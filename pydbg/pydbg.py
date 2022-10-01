@@ -1,30 +1,37 @@
 from pwn import *
 from os import kill
 
-stopped = False
-
-def stop(*args):
-	global stopped
-	stopped = True
-
-def wait(timeout=1):
-	dt = 0.05
-	global stopped
-	while not stopped and timeout > 0:
-		sleep(dt)
-		timeout -= dt
-	stopped = False
-	
 class Debugger:
-	def __init__(self, target, env={}, aslr=False, script=None):
-		self.p = process(target, env=env, aslr=aslr)
-		self.attach(script)
-		
-	def attach(self, script):
-		_, self.gdb = gdb.attach(self.p, gdbscript=script, api=True)
-		self.gdb.events.stop.connect(stop)
+	def __init__(self, target, env={}, aslr=False, script=None, from_start=False):
+		self.stopped = False
+		self._auxiliary_vector = None #only used to locate the canary
+		#gdb.debug() was rulled out due to two bugs with older version of gdbserver in ubuntu 20.04
+		#1) gdbserver crashes trying to locate the canary -> patched in gdbserver 11.0.50 (AKA from ubuntu 22.04)
+		#2) LD_PRELOAD uses the library for gdbserver and not the process -> status unknow for now.
+		if from_start:
+			self.p = gdb.debug(target, env=env, gdbscript=script, api=True)
+			self.gdb = self.p.gdb
+		else:
+			self.p = process(target, env=env, aslr=aslr)
+			_, self.gdb = gdb.attach(self.p, gdbscript=script, api=True)
+		#inferior to easily access memory
 		self.inferior = self.gdb.inferiors()[0]
+		#Stop is used by gdb as a callback function when the process reaches a breackpoint
+		#This is the easiest way I have found to stop the execution of my code untill gdb reaches a breakpoint
+		def stop(*args):
+			self.stopped = True
+		#Set stop as a callback function when the process reaches a breakpoint
+		self.gdb.events.stop.connect(stop)
 		
+	#You have to remember you can not send commands to gdb while the process is running
+	def wait(self, timeout=1):
+		dt = 0.05
+		while not self.stopped and timeout > 0:
+			sleep(dt)
+			timeout -= dt
+		self.stopped = False
+
+	#get base address of libc
 	def get_base_libc(self):
 		data = self.execute("info files")
 		for line in data.split("\n"):
@@ -32,6 +39,7 @@ class Debugger:
 				address = int(line.split()[0], 16)
 				return address - address%0x1000
 
+	#get base address of binary
 	def get_base_elf(self):
 		data = self.execute("info files")
 		for line in data.split("\n"):
@@ -39,14 +47,17 @@ class Debugger:
 				address = int(line.split()[-1], 16)
 				return address - address%0x1000
 		
-	#per interrompere l'esecuzione e riprendere il controllo nella shell gdb
-	def manual(self):
+	#temporarely interrupt the execution of our process to get back control of gdb (equivalent of a manual ctrl+C)
+	#don't worry about the "kill" 
+	def interrupt(self):
 		kill(self.p.pid, signal.SIGINT)
+
+	manual = interrupt
 		
-	def alloc(self, n): #Funziona solo se hai una libc con malloc ovviamente
-		pointer = self.gdb.execute(f"call (long) malloc({n})", to_string=True).split()[-1]
-		return int(pointer)
-	
+	def alloc(self, n):
+		pointer = self.execute(f"call (long) malloc({n})").split()[-1]
+		return int(pointer, 16)
+
 	def read(self, address: int, size: int):
 		return self.inferior.read_memory(address, size).tobytes()
 		
@@ -57,7 +68,6 @@ class Debugger:
 		return self.gdb.execute(code, to_string=True)
 	
 	def b(self, address):
-		#devo ancora capire cosa succede quando arriva sopra
 		if type(address) is int:
 			address = f"*{hex(address)}"
 		self.gdb.Breakpoint(address)
@@ -65,16 +75,29 @@ class Debugger:
 	breakpoint = b
 	
 	def c(self, timeout=1):
-		global stopped
-		stopped = False
-		#self.gdb.events.stop.connect(stop)
+		self.stopped = False
 		self.execute("continue")
-		wait(timeout) #timeout = 0 equivale a no wait
+		self.wait(timeout) #timeout = 0 if you do not want to wait
+
+	def watch(self, pointer, len=4):
+		self.execute(f"watch (char[{len}]) *{pointer}")
+
+	watch_write = watch
+
+	def rwatch(self, pointer, len=4):
+		#if type(pointer) is int:
+		#	pointer = hex(pointer)
+		self.execute(f"rwatch (char[{len}]) *{pointer}")
+
+	watch_read = rwatch
 	
-	def signal(self, n):
-		#dato che signal fa anche continuare il programma devo usare wait
+	#Can be used with signal code or name. Case insensitive.
+	def signal(self, n, timeout):
+		if type(n) is str:
+			n = n.upper()
 		self.execute(f"signal {n}")
-		wait()
+		#sending signal will cause the process to resume his execution so we include the wait to make sure you don't forget
+		self.wait(timeout)
 
 	def close(self):
 		try:
@@ -82,16 +105,35 @@ class Debugger:
 		except Exception:
 			pass #quando muore gdb raisa EOF
 
+	#taken from GEF
+	@property
+	def auxiliary_vector(self):
+		if not self._auxiliary_vector:
+			auxiliary_vector = {}
+			auxv_info = self.execute("info auxv")
+			if "failed" in auxv_info:
+				err(auxv_info)
+				return None
+			for line in auxv_info.splitlines():
+				line = line.split('"')[0].strip()  # remove the ending string (if any)
+				line = line.split()  # split the string by whitespace(s)
+				if len(line) < 4:
+					continue
+				__av_type = line[1]
+				__av_value = line[-1]
+				auxiliary_vector[__av_type] = int(__av_value, base=0)
+			self._auxiliary_vector = auxiliary_vector
+		return self._auxiliary_vector
+
 	@property
 	def canary(self):
-		if not self.p.elf.canary:
-			return none
-		if self.p.elf.bits == 32:
-			pointer = self.ebp
-			sleep(0.2)
-			return self.read(pointer - 4, 4)
-		else:
-			return self.read(self.rbp - 8, 8)
+		auxval = self.auxiliary_vector
+		canary_location = auxval["AT_RANDOM"]
+		canary = self.read(canary_location, self.p.elf.bits//8)
+		return b"\x00"+canary[1:]
+		#taken from GEF
+		#[+] The canary of process 17016 is at 0xff87768b, value is 0x2936a700
+		#return int(self.execute("canary").split()[-1], 16)
 
 	@property
 	def rax(self):
@@ -325,4 +367,3 @@ class Debugger:
 	@r15.setter
 	def r15(self, value):
 		self.execute(f"set $r15 = {value}")
-		 
