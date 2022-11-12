@@ -9,6 +9,7 @@ class Debugger:
     #If possible patch the binary with spwn or pwninit instead of using env. This will let you get a shell instead of having problems trying to preload bash too
     def __init__(self, target, env={}, aslr=True, script=None, from_start=False):
         self._auxiliary_vector = None #only used to locate the canary
+        self._free_bss = None #Used to allocate data in the bss if you can't use the heap
         #What is best ? A simple list or a dictionary with the address as a key?
         self.breakpoints = {}
         #gdb.debug() was rulled out previously due to two bugs with older version of gdbserver used in ubuntu 20.04
@@ -65,9 +66,22 @@ class Debugger:
 
     manual = interrupt
         
-    def alloc(self, n):
-        pointer = self.execute(f"call (long) malloc({n})").split()[-1]
+    #Alloc and Dealloc instead of malloc and free because you may want to keep those names for function in your exploit
+    def alloc(self, n, heap=True):
+        if heap:
+            pointer = self.execute(f"call (long) malloc({n})").split()[-1]
+        else:
+            if self._free_bss is None:
+                self._free_bss = self.bss()
+            pointer = hex(self._free_bss)
+            self._free_bss += n
         return int(pointer, 16)
+
+    def dealloc(self, pointer, len=0, heap=True):
+        if heap:
+            execute(f"call (void) free({hex(pointer)})")
+        else:
+            self._free_bss -= len
 
     def read(self, address: int, size: int):
         return self.p.readmem(address, size)
@@ -85,7 +99,8 @@ class Debugger:
     #May want to put breakpoints relative to the libc too?
     def b(self, address, callback=None, temporary=False, relative=False):
         '''
-        callback should return True if you want to interrupt the execution, False otherwise. If you forget a return value the default behaviour is to interrupt the process
+        callback takes a pointer to the debugger as parameter and should return True if you want to interrupt the execution, False otherwise. If you forget a return value the default behaviour is to interrupt the process
+        You can use Queue to pass data between your exploit and the callbacks
         '''
         if type(address) is int:
             if address < 0x010000:
@@ -97,15 +112,16 @@ class Debugger:
             res = self.gdb.Breakpoint(address, temporary=temporary)
         else:
             #I don't know yet how to handle the conn if I don't go through self.gdb.Breakpoint so I create the class here :(
-            log.warn_once("I haven't tested callbacks a lot. Sorry if it doesn't work perfectly :)")
+            log.warn_once("callbacks should work, but if you have problems scroll a bit for the error messages hidden above in gdb :)")
             class MyBreakpoint(self.gdb.Breakpoint):
-                def __init__(self, address, callback, temporary=False):
+                def __init__(_self, address, callback, temporary=False):
                     super().__init__(address, temporary=temporary)
-                    self.callback = callback
-                def stop():
-                    res = self.callback()
-                    if res is None:
+                    _self.callback = callback
+                def stop(_self, *args):
+                    _break = _self.callback(self) 
+                    if _break is None:
                         return True
+                    return _break
             res = MyBreakpoint(address, callback, temporary)
         if not temporary:
             self.breakpoints[address[1:]] = res #[1:] to remove the '*' from the key
@@ -118,15 +134,11 @@ class Debugger:
         self.execute("continue")
         self.wait(timeout) #timeout = 0 if you do not want to wait
 
-    def call(self, function_address: int, args: list, end_pointer=None, breakpoint=False, no_heap=False):
+    def call(self, function_address: int, args: list, end_pointer=None, breakpoint=False, heap=True):
         log.info_once("calls should work, but we have noticed bugs sometimes with the waits. Patch them into sleeps if needed and remove resore and return if possible")
         #If we hit a breakpoint in the process you are fucked... Could think about temporarely disabeling them all
         #Here knowing which breakpoints we have and being able to temporarely disable them would be interesting
-        #TODO disable breakpoints. Keep a manual flag to let breakpoints and don't run untill finish. Of course there won't be return values tho
-
-        if no_heap:
-            log.warn("sorry... It's not implemented yet...")
-            #How do I locate a free chunk in the bss with aslr and no symbols ? Do I simply ask for an address ?
+        #TODO disable breakpoints. Keep a manual flag to let breakpoints and don't run untill finish. Of course there won't be return values though
 
         #Save strings in the heap
         to_free = []
@@ -134,9 +146,10 @@ class Debugger:
             if type(arg) is str:
                 arg = arg.encode()
             if type(arg) is bytes:
-                log.warn_once("I'm calling malloc to save your data. Use no_heap=True (not implemented yet) if you want me to save it elswhere")
-                pointer = self.alloc(len(arg) + 1)
-                to_free.append(pointer)
+                if heap:
+                    log.warn_once("I'm calling malloc to save your data. Use heap=False (not implemented yet) if you want me to save it elswhere")
+                pointer = self.alloc(len(arg) + 1, heap)
+                to_free.append((pointer, len(arg) + 1)) #I include the length to virtualy clear the bss too if needed (I won't set it to \x00 though)
                 self.write(pointer, arg + b"\x00")
                 arg = pointer
             return arg
@@ -151,8 +164,8 @@ class Debugger:
         def restore_memory():
             for name, value in zip(self.registers, values):
                 setattr(self, name, value)
-            for pointer in to_free:
-                self.execute(f"call (void) free({hex(pointer)})")
+            for pointer, n in to_free[::-1]: #I do it backward to have a coerent behaviour with heap=False, but I still don't really know if I sould implement a free in that case
+                self.dealloc(pointer, len=n, heap=heap)
 
         log.debug("breaking call to %s", hex(function_address))
         self.b(function_address, temporary=True)
