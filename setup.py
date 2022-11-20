@@ -1,14 +1,10 @@
 import setuptools
 
-#with open("README.md") as f:
-#	long_description = f.read()
-
 setuptools.setup(
 	name="pydbg",
-	version="3.1",
+	version="5.0",
 	author="Edoardo",
 	description="Tool to automate gdb debugging",
-	long_description= "TODO",#long_description,
 	packages=["pydbg"],
 	install_requires=[
 		"pwntools",
