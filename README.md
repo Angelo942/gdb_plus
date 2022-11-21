@@ -53,8 +53,7 @@ Debugger can also take as parameter a dictionary for the environement variables.
 Pwntools is built with the idea that you don't have to comment your debug actions when exploiting your target. For this reason i kept that you can use the flags `REMOTE` and `NOPTRACE` to disable all (if I forgot any let me know) actions with gdb.
 
 **Warning**
-Old versions of gdbserver (< 11.0.50) have problems launching 32bit elfs. If you see a crash trying to find the canary use from_start=False instead
-This will launch the process and then attach once the memory has been corectly mapped
+Old versions of gdbserver (< 11.0.50) have problems launching 32bit binaries. If you see a crash trying to find the canary use `from_start=False` instead. This will launch the process and then attach to it once the memory has been corectly mapped
 
 ## Control Flow
 
@@ -158,6 +157,9 @@ dbg.write(pointer, p64(0xdeadbeef))
 secret = dbg.read(dbg.base_elf + dbg.elf.symbols["secret"], 0x10)
 canary = dbg.canary
 ```
+
+**Note**
+While you can access the registers only when the process is at a stop, remember that you can read and write on the memory at any time
 
 Pwntools let you access the address where each library is loaded with `p.libs()[<path_to_library>]`
 We have two wrapper for the main ones:

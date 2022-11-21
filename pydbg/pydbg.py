@@ -49,18 +49,16 @@ class Debugger:
         except (TypeError, AttributeError):
             log.info_once("I think you used noptrace. If not raise an Issue")
 
-    def detach(self):    
+    def detach(self):
         try:
-            #self.interrupt(wait=False)
-            self.execute("quit") #Doesn't allways work if I interact with gdb manualy
-        except Exception:
-            pass #quando muore gdb raisa EOF
+            self.execute("quit") #Doesn't allways work if after interacting manualy
+        except EOFError:
+            log.debug("GDB successfully closed")
 
     def close(self):
         self.detach()
         self.p.close()
 
-    #I would like to make them viable even in remote to not have to comment out or put checks at every call in my scripts.
     def execute(self, code: str):
         if self.debugging:
             return self.gdb.execute(code, to_string=True)
@@ -83,8 +81,18 @@ class Debugger:
         self.gdb.wait()
 
     #temporarely interrupt the execution of our process to get back control of gdb (equivalent of a manual ctrl+C)
-    #don't worry about the "kill" 
-    def interrupt(self, wait=True):
+    #don't worry about the "kill"
+    def interrupt(self, wait=True, timeout=0.2):
+        """
+        Stop the process as you would with ctrl+C
+
+        Parameters
+        ----------
+        wait : bool, optional
+            By default you should wait for the process to stop, but if you aren't sure you can try setting wait to False
+        timeout : floot, optional
+            The timeout should be the time needed for gdb to interrupt the process. Too small your program may crash, too big and you are waisting time. Idealy you will never change it.
+        """
         #self.execute("interrupt") #pwntools uses this command, but I don't because it may not work if the continue command has been sent manualy in gdb
         kill(self.p.pid, signal.SIGINT)
         if wait: # Set wait to false if you are not sure that the process is actualy running
@@ -95,7 +103,7 @@ class Debugger:
             # If interrupt is called while the process isn't running wait() will never return so I don't want to call it if I'm not sure
             # but it still takes some time to interrupt the process if it si running so I HAVE to wait some time just in case.
             # (There is no way of reliably knowing if the process is running. Even setting a flag on continue wouldn't work if the command is sent manualy from gdb
-            sleep(0.2)
+            sleep(timeout)
 
     manual = interrupt
 
@@ -137,18 +145,33 @@ class Debugger:
         self.wait()
         
     #May want to put breakpoints relative to the libc too?
-    def b(self, address, callback=None, temporary=False, relative=False):
-        '''
-        callback takes a pointer to the debugger as parameter and should return True if you want to interrupt the execution, False otherwise. If you forget a return value the default behaviour is to interrupt the process
-        You can use Queue to pass data between your exploit and the callbacks
-        '''
+    def b(self, address, callback=None, temporary=False):
+        """
+    	Set a breakpoint in your process.
+
+    	Parameters
+    	----------
+    	address : INT or STRING
+    		If address is and integer smaller than 0x10000 the address will be interpreted as a relative address
+			Breakpoints are accessible from self.breakpoints as a dictionary where the key is hex(address) or the name of the function
+		callback : FUNCTION, optional
+    		Pass a function to execute when the breakpoint is reached.
+			callback takes a pointer to the debugger as parameter and should return True if you want to interrupt the execution and False otherwise. If you forget a return value the default behaviour is to interrupt the process when reaching the breakpoint
+			You can use Queue to pass data between your exploit and the callbacks
+    	temporary : BOOL, optional
+    	Don't save the breakpoint and disable it when hit
+
+    	Returns
+    	-------
+    	Breakpoint
+    		Return a pointer to the breakpoint set
+			I don't see when you would need it, but here it is
+    	"""
         if not self.debugging:
             return
 
         if type(address) is int:
             if address < 0x010000:
-                relative = True
-            if relative:
                 address += self.base_elf
             address = f"*{hex(address)}"
         if callback is None:
@@ -185,14 +208,29 @@ class Debugger:
 
     ########################## MEMORY ACCESS ##########################
 
-    def read(self, address: int, size: int):
+    def read(self, address: int, size: int) -> bytes:
         return self.p.readmem(address, size)
         
-    def write(self, pointer, byte_array):
+    def write(self, pointer: int, byte_array: bytes):
         self.p.writemem(pointer, byte_array)
         
     #Alloc and Dealloc instead of malloc and free because you may want to keep those names for function in your exploit
-    def alloc(self, n, heap=True):
+    def alloc(self, n: int, heap=True) -> int:
+        """
+    	Allocate N bytes in the heap
+
+    	Parameters
+    	----------
+    	n : int
+    		Size to allocate
+    	heap : bool, optional
+    		Set to False if you can't use the heap
+			This way it will return a pointer to an area of the bss
+
+    	Returns
+    	-------
+    	pointer
+    	"""
         if heap:
             pointer = self.execute(f"call (long) malloc({n})").split()[-1]
         else:
@@ -210,7 +248,8 @@ class Debugger:
             #I know it's not perfect, but damn I don't want to implement a heap logic for the bss ahahah
             #Just use the heap if you can
     
-    #get base address of libc
+    # get base address of libc
+    # I would want something that doesn't requires a process
     def get_base_libc(self):
         return self.p.libs()[self.libc.path]
 
@@ -218,7 +257,7 @@ class Debugger:
     def base_libc(self):
         return self.get_base_libc()
 
-    #get base address of binary
+    # get base address of binary
     def get_base_elf(self):
         return self.p.libs()[self.elf.path]
 
@@ -226,7 +265,7 @@ class Debugger:
     def base_elf(self):
         return self.get_base_elf()
         
-    #taken from GEF
+    # taken from GEF to locate the canary
     @property
     def auxiliary_vector(self):
         if not self._auxiliary_vector:
@@ -344,6 +383,22 @@ class Debugger:
     ########################## REV UTILS ##########################
 
     def call(self, function_address: int, args: list, end_pointer=None, heap=True):
+        """
+    	Call any function in the binary with the parameters you want
+
+    	Parameters
+    	----------
+    	function_address : int
+    		Pointer to the function to call
+    	args : list
+    		List of parameters to pass to the function
+			All strings passed this way will be saved in the binary with a null terminator
+			Byte arrays will be saved as they are
+    	end_pointer : TYPE, optional
+    		The function will run with a 'finish' command. If for some reason you know that it won't work this way you can set an instruction to stop at. (I currently expect it to be a ret and will step on it to leave)
+    	heap : BOOL, optional
+    		Byte arrays and strings passed to the functions are by default saved on the heap with a malloc(). If you can't set this to False to save them on the bss (WARNING I can't guaranty I won't overwrite data this way)
+    	"""
         log.warn_once("calls should work, but we have noticed bugs sometimes with the waits. Patch them into sleeps if needed and remove restore and return if possible")
         log.warn_once("I can not guaranty yet that the program will continue executing correctly after this")
         #If we hit a breakpoint in the process you are fucked... Could think about temporarely disabeling them all
@@ -357,12 +412,12 @@ class Debugger:
         to_free = []
         def convert_arg(arg):
             if type(arg) is str:
-                arg = arg.encode()
+                arg = arg.encode() + b"\x00"
             if type(arg) is bytes:
                 if heap:
                     log.warn_once("I'm calling malloc to save your data. Use heap=False if you want me to save it in the BSS (experimental)")
-                pointer = self.alloc(len(arg) + 1, heap) # I should probably put the null byte only for string in case I have to pass a structure...
-                to_free.append((pointer, len(arg) + 1)) #I include the length to virtualy clear the bss too if needed (I won't set it to \x00 though)
+                pointer = self.alloc(len(arg), heap) # I should probably put the null byte only for string in case I have to pass a structure...
+                to_free.append((pointer, len(arg))) #I include the length to virtualy clear the bss too if needed (I won't set it to \x00 though)
                 self.write(pointer, arg + b"\x00")
                 arg = pointer
             return arg
@@ -402,8 +457,7 @@ class Debugger:
         # Vorrei poter gestire il fatto che l'utente potrebbe voler mettere dei breakpoints nel programma
         # Sarebbe interessante un breakpoint sull'istruzione di ritorno con callback che rimette a posto la memoria
         if end_pointer is None:
-            self.execute(f"finish") #Use a breakpoint instead if you know the last address
-            self.wait()
+            self.finish() # Finish can only work if you have a leave ret. Set the last address otherwise
             log.debug("call finished")
             res = self.return_pointer
             restore_memory()
@@ -426,16 +480,37 @@ class Debugger:
         return res
 
     #Can be used with signal code or name. Case insensitive.
-    def signal(self, n):
-        #Sending signal will cause the process to resume his execution so we put a breakpoint and wait for the handler to finish executing
-        log.warn_once("WARNING sending signals will continue the execution of your code. Put a breakpoint on the address you are at unless the code is self modifying.") 
-        log.warn_once("I won't put a breakpoint for you because it may corrupt the code if the code is self modifying") 
-        log.warn_once("If the code is self modifying: 1) Find the handler 2) Put a breakpoint on the return instruction 3) Save your instruction pointer 4) Call signal() 5) Put a breapoint on your save instruction pointer when you reach the handler finishes executing 5) continue")
-        #self.b(self.ip, temporary=True)
+    def signal(self, n, handler=None):
+        """
+    	Send a signal to the process and put and break returning from the handler
+		Once sent the program will jump to the handler and continue running therefore We set a breakpoint on the next instruction before sending the signal.
+		(If no handler is defined by the program remember that the process will die)
+		You can put breakpoints in the handler and debug it as you please, but remember that there will always be a breakpoint when you return from the handler
+
+    	Parameters
+    	----------
+    	n : INT or STRING
+    		Name or id of the signal. Name isn't case sensitive
+    	handler : POINTER, optional
+    		USE IF SIGNAL WILL MODIFY THE NEXT INSTRUCTION
+    		Pointer to the last instruction of the signal handler. Will be used to set a breakpoint after the code has been modified
+    	"""
+        # Sending signal will cause the process to resume his execution so we put a breakpoint and wait for the handler to finish executing
+        # I may put a flag to precise if the code is self modifying or not and if it is handle breakpoints
+        if handler is None:
+            self.b(self.ip, temporary=True)
+        else:
+            from queue import Queue
+            my_address = Queue()
+            my_address.put(self.ip)
+            def callback(dbg):
+                dbg.b(my_address.get(), temporary=False)
+                return False
+            self.b(handler, temporary=True, callback=callback)
         if type(n) is str:
             n = n.upper()
         self.execute(f"signal {n}")
-        #self.wait()
+        self.wait()
 
     ########################## GEF shortcuts ##########################
     #Works only with GEF. I use them to avoid writing down print(self.execute("heap bins")) every time
@@ -472,4 +547,3 @@ class Debugger:
             self.execute(f"set ${name.lower()} = {value}")
         else:
             super().__setattr__(name, value)
-        

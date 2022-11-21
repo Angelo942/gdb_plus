@@ -2,7 +2,7 @@ import setuptools
 
 setuptools.setup(
 	name="pydbg",
-	version="5.0",
+	version="5.1",
 	author="Edoardo",
 	description="Tool to automate gdb debugging",
 	packages=["pydbg"],
