@@ -8,13 +8,16 @@ from time import sleep
 
 class Debugger:
     #If possible patch the rpath (spwn and pwninit do it automaticaly) instead of using env to load the correct libc. This will let you get a shell not having problems trying to preload bash too
-    def __init__(self, target, env={}, aslr=True, script=None, from_start=True):
+    def __init__(self, target: [int, process, str], env={}, aslr:bool=True, script:str=None, from_start:bool=True, binary:str=None):
         self._capstone = None #To decompile assembly for next_inst
         self._auxiliary_vector = None #only used to locate the canary
+        self._base_libc = None
+        self._base_elf = None
+        self.pid = None # Taken out to be able to send kill() even if we don't use a process
+        self.inferior = None #inferior to easily access memory
         self._free_bss = None #Used to allocate data in the bss if you can't use the heap
         self.breakpoints = {} #Save all non temporary breakpoints for easy access
         self.debugging = None #I want to keep the exploits as clean as possible, so I'm gonna try to handle everything so I can still inherit the class when attacking in remote without having to worry about calls to breakpoint or execute
-
         #gdb.debug() was rulled out previously due to two bugs with older version of gdbserver in ubuntu 20.04
         #1) gdbserver crashes trying to locate the canary (at least with 32 bit binaries) -> patched in gdbserver 11.0.50 (working in ubuntu 22.04)
         #2) LD_PRELOAD uses the library for gdbserver and not the process -> solved in ubuntu 22.04 too
@@ -26,28 +29,46 @@ class Debugger:
 
         #if context.remote:
         if args.REMOTE:
-            pass
+            self.elf = ELF(target, checksec=False)
         #Pwntools allows you to use NOPTRACE if you wan't to skip the attach so I keep the logic here
-        #The only reason I have to keep it separated is that gdb.attach doesn't return, so the unpack "_, self.gdb" breaks my code
-        #elif context.noptrace:
-        #    self.p = process(target, env=env, aslr=aslr)
-        try:
-            # I commented this part because I'm not sure how to handle the absense of a process for some features like access to registers
-            #if type(target) is int:
-            #    _, self.gdb = gdb.attach(target, gdbscript=script, api=True)
-            #elif type(target) is process:
-            if type(target) is process:
-                self.p = target
-                _, self.gdb = gdb.attach(self.p, gdbscript=script, api=True) # will raise TypeError if noptrace
-            #assert type(target) is str, f"I don't know how to handle {type(target)} as target" 
-            elif from_start:
-                self.p = gdb.debug(target, env=env, aslr=aslr, gdbscript=script, api=True)
-                self.gdb = self.p.gdb # will raise AttributeError if noptrace
+        elif context.noptrace:
+            self.p = process(target, env=env, aslr=aslr)
+        # I commented this part because I'm not sure how to handle the absense of a process for some features like access to registers
+        elif type(target) is int:
+            # How can I pass the elf if I just use the pid ?
+            self.pid = target
+            _, self.gdb = gdb.attach(target, gdbscript=script, api=True)
+            # Just ask for it
+            if elf is not None:
+                self.elf = ELF(binary)
             else:
-                self.p = process(target, env=env, aslr=aslr)
-                _, self.gdb = gdb.attach(self.p, gdbscript=script, api=True)
-        except (TypeError, AttributeError):
-            log.info_once("I think you used noptrace. If not raise an Issue")
+                log.info_once("You attached to a process from the pid but didn't pass a binary. Use binary=<path_to_elf> if possible")
+                self.inferior = self.gdb.inferiors()[0]
+                bits = 64 if self.inferior.architecture().name().endswith("64") else 32 # Faster, I just hope it always works
+                #bits = 64 if next(self.inferior.architecture().registers()).name == 'rax' else 32
+                self.elf = FakeELF(bits)
+        elif type(target) is process:
+            self.p = target
+            self.pid = self.p.pid
+            _, self.gdb = gdb.attach(self.p, gdbscript=script, api=True) # will raise TypeError if noptrace
+        elif from_start:
+            self.p = gdb.debug(target, env=env, aslr=aslr, gdbscript=script, api=True)
+            self.gdb = self.p.gdb
+        else:
+            self.p = process(target, env=env, aslr=aslr)
+            _, self.gdb = gdb.attach(self.p, gdbscript=script, api=True)
+        # I think I just need inferior when I don't have a process
+        #if hasattr(self, "gdb"):
+        #    self.inferior = self.gdb.inferiors()[0]
+        if self.p:
+            self.pid = self.p.pid
+            self.elf = self.p.elf
+
+    # Use as : dbg = Debugger("file").remote(IP, PORT)
+    def remote(self, ip: str, port: int):
+        if args.REMOTE:
+            self.p = remote(ip, port)
+        return self
 
     def detach(self):
         try:
@@ -93,13 +114,14 @@ class Debugger:
         timeout : floot, optional
             The timeout should be the time needed for gdb to interrupt the process. Too small your program may crash, too big and you are waisting time. Idealy you will never change it.
         """
-        #self.execute("interrupt") #pwntools uses this command, but I don't because it may not work if the continue command has been sent manualy in gdb
-        kill(self.p.pid, signal.SIGINT)
+        # self.execute("interrupt") #pwntools uses this command, but I don't because it may not work if the continue command has been sent manualy in gdb
+        if not self.debugging:
+            return
+        kill(self.pid, signal.SIGINT)
         if wait: # Set wait to false if you are not sure that the process is actualy running
             self.wait()
         else:
-            # This is a case where a timeout whould be usefull... I may consider re_intruducing it
-            log.warn_once("WARNING interrupt without waiting is curently broken")
+            # This is a case where a timeout in wait whould be usefull... I may consider re_intruducing it
             # If interrupt is called while the process isn't running wait() will never return so I don't want to call it if I'm not sure
             # but it still takes some time to interrupt the process if it si running so I HAVE to wait some time just in case.
             # (There is no way of reliably knowing if the process is running. Even setting a flag on continue wouldn't work if the command is sent manualy from gdb
@@ -112,7 +134,7 @@ class Debugger:
         self.wait()
 
     #Finish a function with modifying code
-    def step_until_address(self, address: int, callback=None, limit=10_000) -> bool:
+    def step_until_address(self, address: int, callback=None, limit:int=10_000) -> bool:
         for i in range(limit):
             if callback is not None:
                 callback(self)
@@ -124,7 +146,7 @@ class Debugger:
             log.warn_once(f"I made {limit} steps and haven't reached the address you are looking for...")
             return -1
 
-    def step_until_ret(self, callback=None, limit=10_000):
+    def step_until_ret(self, callback=None, limit:int=10_000):
         for i in range(limit):
             if callback is not None:
                 callback(self)
@@ -136,22 +158,24 @@ class Debugger:
             log.warn_once(f"I made {limit} steps and haven't reached the end of the function...")
             return -1
 
-    def next(self):
+    def next(self, wait:bool=True):
         self.execute("ni")
-        self.wait()
+        if wait:
+            self.wait()
 
-    def finish(self):
+    def finish(self, wait:bool=True):
         self.execute("finish")
-        self.wait()
+        if wait:
+            self.wait()
         
     #May want to put breakpoints relative to the libc too?
-    def b(self, address, callback=None, temporary=False):
+    def b(self, address: [int, str], callback=None, temporary=False):
         """
     	Set a breakpoint in your process.
 
     	Parameters
     	----------
-    	address : INT or STRING
+    	address : int or str
     		If address is and integer smaller than 0x10000 the address will be interpreted as a relative address
 			Breakpoints are accessible from self.breakpoints as a dictionary where the key is hex(address) or the name of the function
 		callback : FUNCTION, optional
@@ -199,18 +223,19 @@ class Debugger:
     breakpoint = b
 
     def push(self, value):
-        self.sp -= self.p.elf.bytes
+        self.sp -= self.elf.bytes
         self.write(self.sp, self.pbits(value))
 
     def pop(self):
-        self.read(self.sp, self.p.elf.bytes)
-        self.sp += self.p.elf.bytes
+        self.read(self.sp, self.elf.bytes)
+        self.sp += self.elf.bytes
 
     ########################## MEMORY ACCESS ##########################
 
     def read(self, address: int, size: int) -> bytes:
-        return self.p.readmem(address, size)
-        
+        #return self.p.readmem(address, size) # I don't want to relie on the process.
+        return self.inferior.read_memory(address, size).tobytes()
+
     def write(self, pointer: int, byte_array: bytes):
         self.p.writemem(pointer, byte_array)
         
@@ -251,19 +276,39 @@ class Debugger:
     # get base address of libc
     # I would want something that doesn't requires a process
     def get_base_libc(self):
-        return self.p.libs()[self.libc.path]
-
+        if self.p and hasattr(self, libc):
+            return self.p.libs()[self.libc.path]
+        else:
+            data = self.execute("info files")
+            for line in data.split("\n"):
+                line = line.strip()
+                if "libc" in line and line.startswith("0x"):
+                    address = int(line.split()[0], 16)
+                    return address - address % 0x1000
     @property
     def base_libc(self):
+        if self._base_libc is None:
+            self._base_libc = self.get_base_libc()
         return self.get_base_libc()
 
     # get base address of binary
     def get_base_elf(self):
-        return self.p.libs()[self.elf.path]
+        if self.p:
+            return self.p.libs()[self.elf.path]
+        else:
+            data = self.execute("info files")
+            for line in data.split("\n"):
+                line = line.strip()
+                if line.startswith("Entry point:"):
+                    address = int(line.split()[-1], 16)
+                    return address - address%0x1000 #Not always true...
+                    
 
-    @property # I don't wan't to rely on self.p.elf.address which isin't set by default for PIE binaries
+    @property # I don't wan't to rely on self.elf.address which isin't set by default for PIE binaries
     def base_elf(self):
-        return self.get_base_elf()
+        if self._base_elf is None:
+            self._base_elf = self.get_base_elf()
+        return self._base_elf
         
     # taken from GEF to locate the canary
     @property
@@ -289,7 +334,7 @@ class Debugger:
     def canary(self):
         auxval = self.auxiliary_vector
         canary_location = auxval["AT_RANDOM"]
-        canary = self.read(canary_location, self.p.elf.bytes)
+        canary = self.read(canary_location, self.elf.bytes)
         return b"\x00"+canary[1:]
         #taken from GEF
         #[+] The canary of process 17016 is at 0xff87768b, value is 0x2936a700
@@ -297,9 +342,9 @@ class Debugger:
 
     @property
     def registers(self):
-        if self.p.elf.bits == 32:
+        if self.elf.bits == 32:
             return ["eax", "ebx", "ecx", "edx", "edi", "esi", "ebp", "esp", "eip"]
-        elif self.p.elf.bits == 64:
+        elif self.elf.bits == 64:
             return ["rax", "rbx", "rcx", "rdx", "rdi", "rsi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "rbp", "rsp", "rip"]
         else:
             log.critical("Bits not known")
@@ -313,7 +358,7 @@ class Debugger:
         "dx", " dh", "dl",
         "si", "sil",
         "di", "dil"]
-        if self.p.elf.bits == 64:
+        if self.elf.bits == 64:
             _minor_registers += ["eax", "ebx", "ecx", "edx", "esi", "edi",
             "r8d", "r8w", "r8l",
             "r9d", "r9w", "r9l",
@@ -330,7 +375,7 @@ class Debugger:
         from functools import partial
         if self._capstone is None:
             from capstone import Cs, CS_ARCH_X86
-            self._capstone = Cs(CS_ARCH_X86, self.p.elf.bytes)
+            self._capstone = Cs(CS_ARCH_X86, self.elf.bytes)
         inst = next(self._capstone.disasm(self.read(self.ip, 16), self.ip)) #15 bytes is the maximum size for an instruction in x64
         from functools import partial
         inst.toString = partial(lambda self: f"{self.mnemonic} {self.op_str}".strip(), inst)
@@ -340,42 +385,49 @@ class Debugger:
 
     @property
     def return_pointer(self):
-        if self.p.elf.bits == 32:
+        if self.elf.bits == 32:
             return self.eax
         else:
             return self.rax
 
+    @return_pointer.setter
+    def sp(self, value):
+        if self.elf.bits == 32:
+            self.eax = value
+        else:
+            self.rax = value
+
     @property
     def sp(self):
-        if self.p.elf.bits == 32:
+        if self.elf.bits == 32:
             return self.esp
         else:
             return self.rsp
 
     @sp.setter
     def sp(self, value):
-        if self.p.elf.bits == 32:
+        if self.elf.bits == 32:
             self.esp = value
         else:
             self.rsp = value
 
     @property
     def ip(self):
-        if self.p.elf.bits == 32:
+        if self.elf.bits == 32:
             return self.eip
         else:
             return self.rip
 
     @ip.setter
     def ip(self, value):
-        if self.p.elf.bits == 32:
+        if self.elf.bits == 32:
             self.eip = value
         else:
             self.rip = value
 
     #Generic convertion to bytes for addresses
     def pbits(self, value):
-        if self.p.elf.bits == 32:
+        if self.elf.bits == 32:
             return p32(value) 
         else:
             return p64(value)
@@ -438,7 +490,7 @@ class Debugger:
         log.debug("breaking call to %s", hex(function_address))
         self.b(function_address, temporary=True)
 
-        if self.p.elf.bits == 64:
+        if self.elf.bits == 64:
             calling_convention = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
             for register in calling_convention:
                 if len(args) == 0:
@@ -532,18 +584,36 @@ class Debugger:
     def __getattr__(self, name):
         #getattr is only called when an attribute is NOT found in the instance's dictionary
         #I may wan't to use this instead of the 300 lines of registers, but have to check how to handle the setter
-        if name == "p": #If __getattr__ is called with p it means I haven't finished initializing the class so I shouldn't call self.registers in __setattr__
+        if name in ["p", "elf"]: #If __getattr__ is called with p it means I haven't finished initializing the class so I shouldn't call self.registers in __setattr__
             return False
         if name in self.registers + self.minor_registers:
-            res = int(self.gdb.parse_and_eval(f"${name}")) % 2**self.p.elf.bits
+            res = int(self.gdb.parse_and_eval(f"${name}")) % 2**self.elf.bits
             return res
-        elif name in dir(self.p):
+        elif self.p and name in dir(self.p):
             return getattr(self.p, name)
         else:
             raise AttributeError
 
     def __setattr__(self, name, value):
-        if self.p and name in self.registers + self.minor_registers:
+        if self.elf and name in self.registers + self.minor_registers:
             self.execute(f"set ${name.lower()} = {value}")
         else:
             super().__setattr__(name, value)
+
+# I'm having problems with a timeouts...
+#class MyBreakpoint(gdb.Breakpoint):
+#                def __init__(self, conn, address, callback, temporary=False):
+#                    super().__init__(conn, address, temporary=temporary)
+#                    self.callback = callback
+#                
+#                def stop(self, *args):
+#                    must_break = _self.callback(self) 
+#                    if must_break is None:
+#                        must_break = True
+#                    return must_break
+
+# I just need the elf to know if I should use eip or rip... I may just do it this way if I don't have the binary
+class FakeELF:
+    def __init__(self, bits):
+        self.bits = bits
+        self.bytes = self.bits // 8
