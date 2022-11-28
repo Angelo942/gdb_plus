@@ -1,6 +1,8 @@
 from pwn import *
 from os import kill
 from time import sleep
+from functools import partial
+from capstone import Cs, CS_ARCH_X86
 
 #WARNING pwndbg breaks the API so you have to disable it. I advise to use GEF
 
@@ -57,17 +59,17 @@ class Debugger:
         else:
             self.p = process(target, env=env, aslr=aslr)
             _, self.gdb = gdb.attach(self.p, gdbscript=script, api=True)
-        # I think I just need inferior when I don't have a process
-        #if hasattr(self, "gdb"):
-        #    self.inferior = self.gdb.inferiors()[0]
+        # I ended up using inferior to read and write the memory even with a process
+        if hasattr(self, "gdb"):
+            self.inferior = self.gdb.inferiors()[0]
         if self.p:
             self.pid = self.p.pid
             self.elf = self.p.elf
 
     # Use as : dbg = Debugger("file").remote(IP, PORT)
-    def remote(self, ip: str, port: int):
+    def remote(self, host: str, port: int):
         if args.REMOTE:
-            self.p = remote(ip, port)
+            self.p = remote(host, port)
         return self
 
     def detach(self):
@@ -169,6 +171,7 @@ class Debugger:
             self.wait()
         
     #May want to put breakpoints relative to the libc too?
+    # Sembra avere bisogno di interrompere il processo per TUTTI i breakpoint se lancio con gdb.debug invece che attach
     def b(self, address: [int, str], callback=None, temporary=False):
         """
     	Set a breakpoint in your process.
@@ -236,8 +239,9 @@ class Debugger:
         #return self.p.readmem(address, size) # I don't want to relie on the process.
         return self.inferior.read_memory(address, size).tobytes()
 
-    def write(self, pointer: int, byte_array: bytes):
-        self.p.writemem(pointer, byte_array)
+    def write(self, address: int, byte_array: bytes):
+        #self.p.writemem(pointer, byte_array)
+        self.inferior.write_memory(address, byte_array)
         
     #Alloc and Dealloc instead of malloc and free because you may want to keep those names for function in your exploit
     def alloc(self, n: int, heap=True) -> int:
@@ -362,7 +366,7 @@ class Debugger:
             _minor_registers += ["eax", "ebx", "ecx", "edx", "esi", "edi",
             "r8d", "r8w", "r8l",
             "r9d", "r9w", "r9l",
-            "r10d", "r10w", "r10l"
+            "r10d", "r10w", "r10l",
             "r11d", "r11w", "r11l",            
             "r12d", "r12w", "r12l",
             "r13d", "r13w", "r13l",
@@ -372,12 +376,9 @@ class Debugger:
 
     @property
     def next_inst(self):
-        from functools import partial
         if self._capstone is None:
-            from capstone import Cs, CS_ARCH_X86
             self._capstone = Cs(CS_ARCH_X86, self.elf.bytes)
         inst = next(self._capstone.disasm(self.read(self.ip, 16), self.ip)) #15 bytes is the maximum size for an instruction in x64
-        from functools import partial
         inst.toString = partial(lambda self: f"{self.mnemonic} {self.op_str}".strip(), inst)
         return inst
 
@@ -433,8 +434,7 @@ class Debugger:
             return p64(value)
 
     ########################## REV UTILS ##########################
-
-    def call(self, function_address: int, args: list, end_pointer=None, heap=True):
+    def call(self, function_address: int, args: list, end_pointer=None, heap=True, ret_bucket=None):
         """
     	Call any function in the binary with the parameters you want
 
@@ -442,15 +442,19 @@ class Debugger:
     	----------
     	function_address : int
     		Pointer to the function to call
-    	args : list
+    	args : list[int | str | bytes]
     		List of parameters to pass to the function
 			All strings passed this way will be saved in the binary with a null terminator
 			Byte arrays will be saved as they are
-    	end_pointer : TYPE, optional
+    	end_pointer : int, optional
     		The function will run with a 'finish' command. If for some reason you know that it won't work this way you can set an instruction to stop at. (I currently expect it to be a ret and will step on it to leave)
-    	heap : BOOL, optional
+    	heap : bool, optional
     		Byte arrays and strings passed to the functions are by default saved on the heap with a malloc(). If you can't set this to False to save them on the bss (WARNING I can't guaranty I won't overwrite data this way)
-    	"""
+    	ret_bucket : Queue, optional
+            If you want to run call in a Thread and need the return value use a Queue to get back the return value
+            run with `Thread(target=Debugger.call, args=(dbg, 0x1750, [b"\x00"]), kwargs={"ret_bucket":ret_val}).run()`
+            or I may use callbacks inside the breakpoints instead of Thread
+        """
         log.warn_once("calls should work, but we have noticed bugs sometimes with the waits. Patch them into sleeps if needed and remove restore and return if possible")
         log.warn_once("I can not guaranty yet that the program will continue executing correctly after this")
         #If we hit a breakpoint in the process you are fucked... Could think about temporarely disabeling them all
@@ -529,6 +533,8 @@ class Debugger:
                 self.wait()
             self.step()
             res = return_value.get()
+        if ret_bucket is not None:
+            ret_bucket.put(res)
         return res
 
     #Can be used with signal code or name. Case insensitive.
@@ -565,6 +571,12 @@ class Debugger:
         self.wait()
 
     ########################## GEF shortcuts ##########################
+    def context(self):
+        """
+        print memory infos as in gdb
+        """
+        print(self.execute("context"))
+
     #Works only with GEF. I use them to avoid writing down print(self.execute("heap bins")) every time
     def bins(self):
         print(self.execute("heap bins"))
@@ -582,8 +594,9 @@ class Debugger:
     #ITS SO UGLY ESPECIALY WITH THE REGISTERS
     #Since a few people hate OOP and prefer to write their exploit with p = Debugger() and handle it has a simple process let's make all methods of process accessible from the debugger
     def __getattr__(self, name):
-        #getattr is only called when an attribute is NOT found in the instance's dictionary
-        #I may wan't to use this instead of the 300 lines of registers, but have to check how to handle the setter
+    #    log.debug(f"looking for attr {name}")
+    #    #getattr is only called when an attribute is NOT found in the instance's dictionary
+    #    #I may wan't to use this instead of the 300 lines of registers, but have to check how to handle the setter
         if name in ["p", "elf"]: #If __getattr__ is called with p it means I haven't finished initializing the class so I shouldn't call self.registers in __setattr__
             return False
         if name in self.registers + self.minor_registers:
@@ -592,7 +605,8 @@ class Debugger:
         elif self.p and name in dir(self.p):
             return getattr(self.p, name)
         else:
-            raise AttributeError
+            # Get better errors when can't resolve properties
+            self.__getattribute__(name)
 
     def __setattr__(self, name, value):
         if self.elf and name in self.registers + self.minor_registers:
