@@ -1,20 +1,29 @@
 # Pydbg
 *Python library to automate gdb debugging* 
 
+## Main features
+
+* Set python functions as callbacks for any breakpoint you define
+* Test specific functions of a program by calling them at any moment with the parameters you want and analyzing the execution or the outputs
+* Log the code of self modifying functions
+* Backup parts of your memory and restore it during future executions
+* Don't waste time commenting your code. The arguments `NOPTRACE` and `REMOTE` make the exploit skip any action related to gdb.
+
 ## Installation
 
 ```
 pip3 install -U git+https://github.com/Angelo942/pydbg
 ```
 
-**Warning for pwndbg users:**
-Bugs in Pwndbg break the api for python so I advise you to use [GEF](https://github.com/hugsy/gef) instead.
+**Warning for pwndbg users:**  
+Bugs in Pwndbg break the api for python, so I advise you to use [GEF](https://github.com/hugsy/gef) instead.  
 Pydbg **can not** work with pwndbg. You will at least have to disable it temporarely from your gdbinit.
 
 ## Debugging
 
 You can debug a program using the path to the binary.   
 If you really have to you can also use a process or even just his pid.  
+For pwn challenges set the remote address with `Debugger().remote(<host>, <port>)` and use the argument `REMOTE` once you want to exploit the server
 
 ```py
 from pydbg import *
@@ -24,27 +33,23 @@ handle SIGALRM nopass
 continue
 """
 
-dbg = Debugger("./test", script=gdbinit, aslr=False)
+dbg = Debugger("./rev_challenge", script=gdbinit, aslr=False)
+dbg = Debugger("./pwn_challenge", script=gdbinit).remote("10.10.0.1", 1337)
 
-p = process("./test", aslr=False)
+
+p = process("./challenge", aslr=False)
 dbg = Debugger(p, script=gdbinit)
 
-dbg = Debugger(3134, script=gdbinit, binary="./test")
-```
-
-for pwn challenges set the server with `Debugger().remote(<ip>, <port>)`  
-
-```py
-dbg = Debugger("./challenge", script=gdbinit).remote("10.10.0.1", 1337)
+dbg = Debugger(3134, script=gdbinit, binary="./challenge")
 ```
 
 Calling the exploit with pwntools arguments `NOPTRACE` or `REMOTE` will allow you to disable all actions related to gdb and test your exploit localy or attack the remote target without having to comment anything.
 
 **Note**  
-Debugger can also take as parameter a dictionary for the environement variables. You CAN use it to preload libraries, but if you want to do it for the libc I would advise to **patch the rpath** of the binary instead (if you don't know how take a look at [spwn](https://github.com/MarcoMarce) or [pwninit](https://github.com/io12/pwninit). This will prevent problems when running `system("/bin/sh")` that will fail due to LD_PRELOAD and may hide other problems in your exploit.
+Debugger can also take as parameter a dictionary for the environment variables. You CAN use it to preload libraries, but if you want to do it for the libc I would advise to **patch the rpath** of the binary instead (if you don't know how take a look at [spwn](https://github.com/MarcoMarce) or [pwninit](https://github.com/io12/pwninit). This will prevent problems when running `system("/bin/sh")` that will fail due to LD_PRELOAD and may hide other problems in your exploit.
 
 **Warning**  
-Old versions of gdbserver (< 11.0.50) have problems launching 32bit binaries. If you see a crash trying to find the canary use `from_start=False` instead. This will launch the process and then attach to it once the memory has been corectly mapped
+Old versions of gdbserver (< 11.0.50) have problems launching 32bit binaries. If you see a crash trying to find the canary use `from_start=False` as parameter for the debugger. This will launch the process and then attach to it once the memory has been correctly mapped
 
 ## Control Flow
 
@@ -86,8 +91,8 @@ Breakpoints have two main features:
 * if the address is smaller than 0x10000 the address will immediately be interpreted as relative for PIE binaries 
 * you can set callbacks and don't have the breakpoint interrupt the process to run them
 
-The callback is a function that takes the debugguer as parameter and returns a boolean to tell gdb if it should stop or not
-If you want to pass data from your callback function to your exploit you can use pointers
+The callback is a function that takes the debugger as parameter and returns a boolean to tell gdb if it should stop or not. Inside you can do anything you want with the memory
+If you want to pass data from your callback function to your exploit you can use pointers (lists, dictionaries or queues)
 
 **Note**  
 Setting a breakpoint with a callback function requires the process to be interrupted.
@@ -96,7 +101,7 @@ Setting a breakpoint with a callback function requires the process to be interru
 from pydbg import *
 from queue import Queue
 
-# I let the process run in this exemple to reinforce the need for the interrupt later
+# I let the process run in this example to reinforce the need for the interrupt later
 gdbinit = """
 handle SIGALRM nopass
 continue
@@ -124,7 +129,7 @@ dbg.breakpoints[hex(dbg.base_elf + 0xdead)].enabled = False # To access a breakp
 dbg.breakpoints["encrypt"].enabled = False # And the name if you didn't set it with an address
 ```
 
-Currently you can set the breakpoint to permanent or temporary. permanent ones get saved in `dbg.breakpoints[hex(absolute_address)]`, temporary ones aren't saved and get disabled automaticaly when hit for the first time.
+Currently you can set the breakpoint to permanent or temporary. Permanent ones get saved in `dbg.breakpoints[hex(absolute_address)]`, temporary ones aren't saved and get disabled automatically when hit for the first time.
 
 ## Memory access
 
@@ -175,12 +180,12 @@ dbg.read(pointer, 100)
 
 See [this example](./examples/black_box_analysis_of_function.py) for more details
 
-**Note**
+**Note**  
 You can pass parameters as strings or byte_arrays. By default they will be saved on the heap with a null terminator in the case of a string. If you can't use the heap set `heap=False`
 
-**Warning**
+**Warning**  
 You may want to be careful with breakpoints inside the function called. If you don't set any the state of you process will be identical after the execution except for data writen on the stack (which shouldn't influence the future) and the bss (which you may want to correct if needed on a case by case). If you put a breakpoint you will have to handle yourself the execution from your breakpoint onward.  
 Another option would be to pass a pointer to the return instruction, it will block you python script untill you reach that specific point, so you will have to work manualy from gdb for that part.
 
 ## Notes  
-If something can be done with gdb it should be easily programable with pydbg, but you may find it slow as hell for some uses. This tool is meant to help debugging during challenges, if you only want to automate exploit developement you may prefere something like [libdebug](https://github.com/JinBlack/libdebug) which doesn't has to comunicate with gdb for each command.
+If something can be done with gdb it should be easily programable with pydbg, but you may find it slow as hell for some uses. This tool is meant to help debugging during challenges, if you only want to automate exploit developement you may prefere something like [libdebug](https://github.com/JinBlack/libdebug) which doesn't has to communicate with gdb for each command.
