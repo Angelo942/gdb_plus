@@ -60,7 +60,8 @@ class Debugger:
             self.p = process(target, env=env, aslr=aslr)
             _, self.gdb = gdb.attach(self.p, gdbscript=script, api=True)
         # I ended up using inferior to read and write the memory even with a process
-        if hasattr(self, "gdb"):
+        #if hasattr(self, "gdb"):
+        if self.debugging: # Dovrebbe essere equivalente, ma almeno non muore
             self.inferior = self.gdb.inferiors()[0]
         if self.p:
             self.pid = self.p.pid
@@ -440,7 +441,7 @@ class Debugger:
 
     	Parameters
     	----------
-    	function_address : int
+    	function_address : [str, int]
     		Pointer to the function to call
     	args : list[int | str | bytes]
     		List of parameters to pass to the function
@@ -462,7 +463,8 @@ class Debugger:
         #TODO disable breakpoints. Keep a manual flag to let breakpoints and don't run untill finish. Of course there won't be return values though
 
         # If the address is small it is probably a relative address
-        if function_address < 0x10000:
+        # Can send just the name if jump can understand it
+        if type(function_address) is int and function_address < 0x10000:
             function_address += self.base_elf
         #Save strings and get a pointer
         to_free = []
@@ -491,7 +493,7 @@ class Debugger:
             for pointer, n in to_free[::-1]: #I do it backward to have a coerent behaviour with heap=False, but I still don't really know if I sould implement a free in that case
                 self.dealloc(pointer, len=n, heap=heap)
 
-        log.debug("breaking call to %s", hex(function_address))
+        log.debug("breaking call")
         self.b(function_address, temporary=True)
 
         if self.elf.bits == 64:
@@ -507,19 +509,25 @@ class Debugger:
         for arg in args:
             self.push(arg)
         
-        log.debug("jumping to %s", hex(function_address))
-        self.execute(f"jump *{hex(function_address)}")
+        if type(function_address) is int:
+            self.execute(f"jump *{hex(function_address)}")
+        elif type(function_address) is str:
+            self.execute(f"jump {function_address}")
+        else:
+            log.critical(f"What is this function {function_address} ?")
         self.wait()
+        log.debug("jumped to %s\nWaiting to finish", hex(self.ip))
         # Vorrei poter gestire il fatto che l'utente potrebbe voler mettere dei breakpoints nel programma
         # Sarebbe interessante un breakpoint sull'istruzione di ritorno con callback che rimette a posto la memoria
         if end_pointer is None:
+            # Wait why don't I just put a breakpoint on my address before calling the function and then wait ?
             self.finish() # Finish can only work if you have a leave ret. Set the last address otherwise
             log.debug("call finished")
             res = self.return_pointer
             restore_memory()
         else:
-            log.warning("You chose to use 'end_pointer'. Only do it if you need breakpoints in the function and to restore memory when exiting!")
-            log.warning("You will have to handle manualy the execution of your program from gdb untill you reach the pointer selected (Which should be a pointer to the ret instruction...)")
+            log.warn_once("You chose to use 'end_pointer'. Only do it if you need breakpoints in the function and to restore memory when exiting!")
+            log.warn_once("You will have to handle manualy the execution of your program from gdb untill you reach the pointer selected (Which should be a pointer to the ret instruction...)")
             log.debug("breaking return in %s", hex(end_pointer))
             from queue import Queue
             return_value = Queue()
