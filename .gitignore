@@ -1,5 +1,6 @@
 build/
 examples/
 tests/
+dist/
 *.pyc
-pydbg.egg-info
+gdb_plus.egg-info

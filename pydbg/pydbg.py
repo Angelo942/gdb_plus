@@ -121,7 +121,7 @@ class Debugger:
     #don't worry about the "kill"
     def interrupt(self, wait=True, timeout=0.2):
         """
-        Stop the process as you would with ctrl+C
+        Stop the process as you would with ctrl+C in gdb
 
         Parameters
         ----------

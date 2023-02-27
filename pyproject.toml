@@ -1,0 +1,27 @@
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = [
+    "setuptools",
+    "wheel",
+]
+
+[project]
+name = "gdb_plus"
+description = "Python library to automate gdb debugging"
+version = "5.4.0"
+authors = [{name = "Edoardo"}]
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "pwntools",
+    "capstone"
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: Unix",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/Angelo942/pydbg"
+"Bug Tracker" = "https://github.com/Angelo942/pydbg/issues"
