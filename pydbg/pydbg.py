@@ -555,39 +555,54 @@ class Debugger:
             ret_bucket.put(res)
         return res
 
-    #Can be used with signal code or name. Case insensitive.
-    def signal(self, n, handler=None):
+    # Can be used with signal code or name. Case insensitive.
+    def signal(self, n: [int, str], /, *, handler : [int, str] = None):
         """
-    	Send a signal to the process and put and break returning from the handler
-		Once sent the program will jump to the handler and continue running therefore We set a breakpoint on the next instruction before sending the signal.
-		(If no handler is defined by the program remember that the process will die)
-		You can put breakpoints in the handler and debug it as you please, but remember that there will always be a breakpoint when you return from the handler
+        Send a signal to the process and put and break returning from the handler
+        Once sent the program will jump to the handler and continue running therefore We set a breakpoint on the next instruction before sending the signal.
+        (If no handler is defined by the program remember that the process will die)
+        You can put breakpoints in the handler and debug it as you please, but remember that there will always be a breakpoint when you return from the handler
 
-    	Parameters
-    	----------
-    	n : INT or STRING
-    		Name or id of the signal. Name isn't case sensitive
-    	handler : POINTER, optional
-    		USE IF SIGNAL WILL MODIFY THE NEXT INSTRUCTION
-    		Pointer to the last instruction of the signal handler. Will be used to set a breakpoint after the code has been modified
-    	"""
+        Parameters
+        ----------
+        n : INT or STRING
+            Name or id of the signal. Name isn't case sensitive
+        handler : POINTER, optional
+            USE IF SIGNAL WILL MODIFY THE NEXT INSTRUCTION
+            Pointer to the last instruction of the signal handler. Will be used to set a breakpoint after the code has been modified
+        """
+
+        log.warn_once("the method signal() is still evolving. Use it if you don't want the prgram to continue after receiving the signal. If the signal will modify your code you HAVE to add the argument 'handler' with an address after the code has changed")
         # Sending signal will cause the process to resume his execution so we put a breakpoint and wait for the handler to finish executing
         # I may put a flag to precise if the code is self modifying or not and if it is handle breakpoints
+        # If the code is self modifying you must use handler otherwise the breakpoint will be overwriten with bad code [26/02/23]
         if handler is None:
             self.b(self.ip, temporary=True)
+        # I don't understand why callback doesn't allways find my_address. I called signal 3 times and it works for the first 2, but not the next one...  [26/02/23]
+        # Okay, the problem was that the breakpoints wasn't considered as hit since we don't stop, so all the callbacks I have set are called each time [26/02/23]
         else:
             from queue import Queue
             my_address = Queue()
             my_address.put(self.ip)
             def callback(dbg):
-                dbg.b(my_address.get(), temporary=False)
-                return False
-            self.b(handler, temporary=True, callback=callback)
+                address = my_address.get()
+                my_address.put(dbg.instruction_pointer)
+                def delete_callback(dbg):
+                    handler = my_address.get()
+                    dbg.breakpoints[hex(handler)].delete()
+                    return True
+                dbg.b(address, callback=delete_callback, temporary=True)
+                # Can I delete this breakpoint ? Nope so let's do it in another callback... [26/02/23]
+                #dbg.breakpoints[hex(dbg.instruction_pointer)].delete()
+                return False  
+            self.b(handler, callback=callback)
+        
         if type(n) is str:
             n = n.upper()
         self.execute(f"signal {n}")
         self.wait()
-
+        #del my_address # Prevent callback to access it again at a future execution [26/02/23]
+        #del dbg.my_address # I don't want to delete it in case I hit a different breakpoint before the callback is called [26/02/23]
     ########################## GEF shortcuts ##########################
     def context(self):
         """
