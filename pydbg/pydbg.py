@@ -15,6 +15,7 @@ class Debugger:
         self._auxiliary_vector = None #only used to locate the canary
         self._base_libc = None
         self._base_elf = None
+        self._canary = None
         self.pid = None # Taken out to be able to send kill() even if we don't use a process
         self.inferior = None #inferior to easily access memory
         self._free_bss = None #Used to allocate data in the bss if you can't use the heap
@@ -66,6 +67,8 @@ class Debugger:
         if self.p:
             self.pid = self.p.pid
             self.elf = self.p.elf
+        if self.debugging and self.p:
+            self.elf.address = self.get_base_elf()
 
     # Use as : dbg = Debugger("file").remote(IP, PORT)
     def remote(self, host: str, port: int):
@@ -265,7 +268,7 @@ class Debugger:
             pointer = self.execute(f"call (long) malloc({n})").split()[-1]
         else:
             if self._free_bss is None:
-                self._free_bss = self.bss() # I have to think about how to preserve eventual data already present
+                self._free_bss = self.elf.bss() # I have to think about how to preserve eventual data already present
             pointer = hex(self._free_bss)
             self._free_bss += n
         return int(pointer, 16)
@@ -335,12 +338,15 @@ class Debugger:
             self._auxiliary_vector = auxiliary_vector
         return self._auxiliary_vector
 
+    # The canary is constant right ? This way you can also set it after a leak and access it from anywhere
     @property
     def canary(self):
-        auxval = self.auxiliary_vector
-        canary_location = auxval["AT_RANDOM"]
-        canary = self.read(canary_location, self.elf.bytes)
-        return b"\x00"+canary[1:]
+        if self._canary is None:
+            auxval = self.auxiliary_vector
+            canary_location = auxval["AT_RANDOM"]
+            canary = self.read(canary_location, self.elf.bytes)
+            self._canary = b"\x00"+canary[1:]
+        return self._canary
         #taken from GEF
         #[+] The canary of process 17016 is at 0xff87768b, value is 0x2936a700
         #return int(self.execute("canary").split()[-1], 16)
@@ -413,6 +419,8 @@ class Debugger:
         else:
             self.rsp = value
 
+    stack_pointer = sp
+
     @property
     def ip(self):
         if self.elf.bits == 32:
@@ -426,6 +434,8 @@ class Debugger:
             self.eip = value
         else:
             self.rip = value
+
+    instruction_pointer = ip
 
     #Generic convertion to bytes for addresses
     def pbits(self, value):
@@ -605,13 +615,16 @@ class Debugger:
     #    log.debug(f"looking for attr {name}")
     #    #getattr is only called when an attribute is NOT found in the instance's dictionary
     #    #I may wan't to use this instead of the 300 lines of registers, but have to check how to handle the setter
-        if name in ["p", "elf"]: #If __getattr__ is called with p it means I haven't finished initializing the class so I shouldn't call self.registers in __setattr__
+        if name in ["p", "elf", "gdb"]: #If __getattr__ is called with p it means I haven't finished initializing the class so I shouldn't call self.registers in __setattr__
             return False
         if name in self.registers + self.minor_registers:
             res = int(self.gdb.parse_and_eval(f"${name}")) % 2**self.elf.bits
             return res
         elif self.p and name in dir(self.p):
             return getattr(self.p, name)
+        # May want to also expose in case you want to access something like inferiors() 
+        elif self.gdb and name in dir(self.gdb):
+            return getattr(self.gdb, name)
         else:
             # Get better errors when can't resolve properties
             self.__getattribute__(name)
