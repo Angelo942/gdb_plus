@@ -18,10 +18,9 @@ GDB+ is a wrapper around gdb powered by pwntools. The goal is automate your inte
 pip3 install gdb_plus
 ```
 
-
 **Warning for pwndbg users:**  
-Bugs in Pwndbg break the api for python, so I advise you to use [GEF](https://github.com/hugsy/gef) instead.  
-GDB+ **can not** work with pwndbg. You will at least have to disable it temporarely from your gdbinit.
+Previous bugs in Pwndbg used to break the api for python. While GDB+ should work with the current version of pwndbg [19/12/2022], bugs may appear again.
+you are strongly advised to use [GEF](https://github.com/hugsy/gef) instead.
 
 ## Debugging
 

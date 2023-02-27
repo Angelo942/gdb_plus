@@ -130,9 +130,9 @@ class Debugger:
         timeout : floot, optional
             The timeout should be the time needed for gdb to interrupt the process. Too small your program may crash, too big and you are waisting time. Idealy you will never change it.
         """
-        # self.execute("interrupt") #pwntools uses this command, but I don't because it may not work if the continue command has been sent manualy in gdb
         if not self.debugging:
             return
+        #self.execute("interrupt") #pwntools uses this command, but I don't because it may not work if the continue command has been sent manualy in gdb
         kill(self.pid, signal.SIGINT)
         if wait: # Set wait to false if you are not sure that the process is actualy running
             self.wait()
@@ -286,7 +286,8 @@ class Debugger:
                 self._free_bss = self.elf.bss() # I have to think about how to preserve eventual data already present
             pointer = hex(self._free_bss)
             self._free_bss += n
-        return int(pointer, 16)
+        # GEF prints logs as base 16, but pwndbg as base 10
+        return int(pointer, 16) if "0x" in pointer else int(pointer)
 
     def dealloc(self, pointer, len=0, heap=True):
         if heap:
