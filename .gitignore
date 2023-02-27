@@ -1,3 +1,5 @@
 build/
+examples/
+tests/
 *.pyc
 pydbg.egg-info

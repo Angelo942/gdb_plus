@@ -40,10 +40,11 @@ dbg = Debugger("./pwn_challenge", script=gdbinit).remote("10.10.0.1", 1337)
 p = process("./challenge", aslr=False)
 dbg = Debugger(p, script=gdbinit)
 
+#pidof process : 3134
 dbg = Debugger(3134, script=gdbinit, binary="./challenge")
 ```
 
-Calling the exploit with pwntools arguments `NOPTRACE` or `REMOTE` will allow you to disable all actions related to gdb and test your exploit localy or attack the remote target without having to comment anything.
+Executing with pwntools arguments `NOPTRACE` or `REMOTE` will allow you to disable all actions related to gdb and test your exploit localy or attack the remote target without having to comment anything.
 
 **Note**  
 Debugger can also take as parameter a dictionary for the environment variables. You CAN use it to preload libraries, but if you want to do it for the libc I would advise to **patch the rpath** of the binary instead (if you don't know how take a look at [spwn](https://github.com/MarcoMarce) or [pwninit](https://github.com/io12/pwninit). This will prevent problems when running `system("/bin/sh")` that will fail due to LD_PRELOAD and may hide other problems in your exploit.

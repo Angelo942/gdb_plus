@@ -9,7 +9,7 @@ from capstone import Cs, CS_ARCH_X86
 #You don't have to interrupt the process to set breakpointes or read and overwrite the memory. Only to access the registers
 
 class Debugger:
-    #If possible patch the rpath (spwn and pwninit do it automaticaly) instead of using env to load the correct libc. This will let you get a shell not having problems trying to preload bash too
+    # If possible patch the rpath (spwn and pwninit do it automaticaly) instead of using env to load the correct libc. This will let you get a shell not having problems trying to preload bash too
     def __init__(self, target: [int, process, str], env={}, aslr:bool=True, script:str=None, from_start:bool=True, binary:str=None):
         self._capstone = None #To decompile assembly for next_inst
         self._auxiliary_vector = None #only used to locate the canary
@@ -30,19 +30,12 @@ class Debugger:
         else:
             self.debugging = True
 
-        #if context.remote:
-        if args.REMOTE:
-            self.elf = ELF(target, checksec=False)
-        #Pwntools allows you to use NOPTRACE if you wan't to skip the attach so I keep the logic here
-        elif context.noptrace:
-            self.p = process(target, env=env, aslr=aslr)
-        # I commented this part because I'm not sure how to handle the absense of a process for some features like access to registers
-        elif type(target) is int:
+        if type(target) is int:
             # How can I pass the elf if I just use the pid ?
             self.pid = target
             _, self.gdb = gdb.attach(target, gdbscript=script, api=True)
             # Just ask for it
-            if elf is not None:
+            if binary is not None:
                 self.elf = ELF(binary)
             else:
                 log.info_once("You attached to a process from the pid but didn't pass a binary. Use binary=<path_to_elf> if possible")
@@ -50,16 +43,27 @@ class Debugger:
                 bits = 64 if self.inferior.architecture().name().endswith("64") else 32 # Faster, I just hope it always works
                 #bits = 64 if next(self.inferior.architecture().registers()).name == 'rax' else 32
                 self.elf = FakeELF(bits)
+
         elif type(target) is process:
             self.p = target
-            self.pid = self.p.pid
-            _, self.gdb = gdb.attach(self.p, gdbscript=script, api=True) # will raise TypeError if noptrace
+            _, self.gdb = gdb.attach(self.p, gdbscript=script, api=True) # will raise TypeError if noptrace, but why pass a process if you don't want to debug it ?
+
+        elif args.REMOTE:
+            self.elf = ELF(target, checksec=False)
+        #Pwntools allows you to use NOPTRACE if you wan't to skip the attach so I keep the logic here
+
+        elif context.noptrace:
+            self.p = process(target, env=env, aslr=aslr)
+        # I commented this part because I'm not sure how to handle the absense of a process for some features like access to registers
+
         elif from_start:
             self.p = gdb.debug(target, env=env, aslr=aslr, gdbscript=script, api=True)
             self.gdb = self.p.gdb
+            
         else:
             self.p = process(target, env=env, aslr=aslr)
             _, self.gdb = gdb.attach(self.p, gdbscript=script, api=True)
+
         # I ended up using inferior to read and write the memory even with a process
         #if hasattr(self, "gdb"):
         if self.debugging: # Dovrebbe essere equivalente, ma almeno non muore
@@ -78,13 +82,15 @@ class Debugger:
 
     def detach(self):
         try:
-            self.execute("quit") #Doesn't allways work if after interacting manualy
+            self.execute("quit") # Doesn't allways work if after interacting manualy
         except EOFError:
             log.debug("GDB successfully closed")
 
     def close(self):
         self.detach()
-        self.p.close()
+        # Can't close the process if I just attached to the pid
+        if self.p:
+            self.p.close()
 
     def execute(self, code: str):
         if self.debugging:
@@ -157,7 +163,7 @@ class Debugger:
             log.warn_once(f"I made {limit} steps and haven't reached the address you are looking for...")
             return -1
 
-    def step_until_ret(self, callback=None, limit:int=10_000):
+    def step_until_ret(self, callback=None, limit:int=10_000) -> int:
         for i in range(limit):
             if callback is not None:
                 callback(self)
@@ -185,26 +191,26 @@ class Debugger:
     # Sembra avere bisogno di interrompere il processo per TUTTI i breakpoint se lancio con gdb.debug invece che attach
     def b(self, address: [int, str], callback=None, temporary=False):
         """
-    	Set a breakpoint in your process.
+        Set a breakpoint in your process.
 
-    	Parameters
-    	----------
-    	address : int or str
-    		If address is and integer smaller than 0x10000 the address will be interpreted as a relative address
-			Breakpoints are accessible from self.breakpoints as a dictionary where the key is hex(address) or the name of the function
-		callback : FUNCTION, optional
-    		Pass a function to execute when the breakpoint is reached.
-			callback takes a pointer to the debugger as parameter and should return True if you want to interrupt the execution and False otherwise. If you forget a return value the default behaviour is to interrupt the process when reaching the breakpoint
-			You can use Queue to pass data between your exploit and the callbacks
-    	temporary : BOOL, optional
-    	Don't save the breakpoint and disable it when hit
+        Parameters
+        ----------
+        address : int or str
+            If address is and integer smaller than 0x10000 the address will be interpreted as a relative address
+            Breakpoints are accessible from self.breakpoints as a dictionary where the key is hex(address) or the name of the function
+        callback : FUNCTION, optional
+            Pass a function to execute when the breakpoint is reached.
+            callback takes a pointer to the debugger as parameter and should return True if you want to interrupt the execution and False otherwise. If you forget a return value the default behaviour is to interrupt the process when reaching the breakpoint
+            You can use Queue to pass data between your exploit and the callbacks
+        temporary : BOOL, optional
+        Don't save the breakpoint and disable it when hit
 
-    	Returns
-    	-------
-    	Breakpoint
-    		Return a pointer to the breakpoint set
-			I don't see when you would need it, but here it is
-    	"""
+        Returns
+        -------
+        Breakpoint
+            Return a pointer to the breakpoint set
+            I don't see when you would need it, but here it is
+        """
         if not self.debugging:
             return
 
@@ -216,13 +222,15 @@ class Debugger:
             res = self.gdb.Breakpoint(address, temporary=temporary)
         else:
             # I don't know yet how to handle the conn if I don't go through self.gdb.Breakpoint so I create the class here :(
-            log.warn_once("callbacks should work, but if you have problems scroll a bit to fing the error messages hidden above in gdb :)")
+            log.warn_once("if your callbacks crash you have to scroll a bit to find the error messages hidden in the gdb terminal")
             # For some reason this part require the process to be interrupted. I usualy do it from my exploit, but don't want to force everyone to do so
             #self.interrupt(wait=False) # Interrupt if running, but don't wait forever because I don't know if it is really running
             class MyBreakpoint(self.gdb.Breakpoint):
                 def __init__(_self, address, callback, temporary=False):
                     super().__init__(address, temporary=temporary)
                     _self.callback = callback
+                # WARNING IF A TEMPORARY BREAKPOINT DOESN'T STOP IT WON'T COUNT AS HIT AND STAY ACTIVE. May cause problems with the callback if you pass multiple times [26/02/23]
+                # I should find an alternative to continue the execution if callback returns False, but I don't know how to do it yet [26/02/23]
                 def stop(_self, *args):
                     _break = _self.callback(self) 
                     if _break is None:
@@ -231,7 +239,7 @@ class Debugger:
             res = MyBreakpoint(address, callback, temporary)
             #self.c() # This is a problem... I may break someone's exploit if the process was stopped by the user
         if not temporary:
-            self.breakpoints[address[1:] if address[0] == "*" else address] = res #[1:] to remove the '*' from the key if it's an adress, but leave intect if it's a function name
+            self.breakpoints[address[1:] if address[0] == "*" else address] = res.server_breakpoint #[1:] to remove the '*' from the key if it's an adress, but leave intect if it's a function name
         return res
         
     breakpoint = b
@@ -255,22 +263,22 @@ class Debugger:
         self.inferior.write_memory(address, byte_array)
         
     #Alloc and Dealloc instead of malloc and free because you may want to keep those names for function in your exploit
-    def alloc(self, n: int, heap=True) -> int:
+    def alloc(self, n: int, /, *, heap=True) -> int:
         """
-    	Allocate N bytes in the heap
+        Allocate N bytes in the heap
 
-    	Parameters
-    	----------
-    	n : int
-    		Size to allocate
-    	heap : bool, optional
-    		Set to False if you can't use the heap
-			This way it will return a pointer to an area of the bss
+        Parameters
+        ----------
+        n : int
+            Size to allocate
+        heap : bool, optional
+            Set to False if you can't use the heap
+            This way it will return a pointer to an area of the bss
 
-    	Returns
-    	-------
-    	pointer
-    	"""
+        Returns
+        -------
+        pointer
+        """
         if heap:
             pointer = self.execute(f"call (long) malloc({n})").split()[-1]
         else:
@@ -454,21 +462,21 @@ class Debugger:
     ########################## REV UTILS ##########################
     def call(self, function_address: int, args: list, end_pointer=None, heap=True, ret_bucket=None):
         """
-    	Call any function in the binary with the parameters you want
+        Call any function in the binary with the parameters you want
 
-    	Parameters
-    	----------
-    	function_address : [str, int]
-    		Pointer to the function to call
-    	args : list[int | str | bytes]
-    		List of parameters to pass to the function
-			All strings passed this way will be saved in the binary with a null terminator
-			Byte arrays will be saved as they are
-    	end_pointer : int, optional
-    		The function will run with a 'finish' command. If for some reason you know that it won't work this way you can set an instruction to stop at. (I currently expect it to be a ret and will step on it to leave)
-    	heap : bool, optional
-    		Byte arrays and strings passed to the functions are by default saved on the heap with a malloc(). If you can't set this to False to save them on the bss (WARNING I can't guaranty I won't overwrite data this way)
-    	ret_bucket : Queue, optional
+        Parameters
+        ----------
+        function_address : [str, int]
+            Pointer to the function to call
+        args : list[int | str | bytes]
+            List of parameters to pass to the function
+            All strings passed this way will be saved in the binary with a null terminator
+            Byte arrays will be saved as they are
+        end_pointer : int, optional
+            The function will run with a 'finish' command. If for some reason you know that it won't work this way you can set an instruction to stop at. (I currently expect it to be a ret and will step on it to leave)
+        heap : bool, optional
+            Byte arrays and strings passed to the functions are by default saved on the heap with a malloc(). If you can't set this to False to save them on the bss (WARNING I can't guaranty I won't overwrite data this way)
+        ret_bucket : Queue, optional
             If you want to run call in a Thread and need the return value use a Queue to get back the return value
             run with `Thread(target=Debugger.call, args=(dbg, 0x1750, [b"\x00"]), kwargs={"ret_bucket":ret_val}).run()`
             or I may use callbacks inside the breakpoints instead of Thread
@@ -491,7 +499,7 @@ class Debugger:
             if type(arg) is bytes:
                 if heap:
                     log.warn_once("I'm calling malloc to save your data. Use heap=False if you want me to save it in the BSS (experimental)")
-                pointer = self.alloc(len(arg), heap) # I should probably put the null byte only for string in case I have to pass a structure...
+                pointer = self.alloc(len(arg), heap=heap) # I should probably put the null byte only for string in case I have to pass a structure...
                 to_free.append((pointer, len(arg))) #I include the length to virtualy clear the bss too if needed (I won't set it to \x00 though)
                 self.write(pointer, arg + b"\x00")
                 arg = pointer
@@ -632,7 +640,7 @@ class Debugger:
     
     ########################### Heresies ########################## 
     #ITS SO UGLY ESPECIALY WITH THE REGISTERS
-    #Since a few people hate OOP and prefer to write their exploit with p = Debugger() and handle it has a simple process let's make all methods of process accessible from the debugger
+    #Since a few people hate OOP and prefer to write their exploit with p = Debugger() and handle it has a simple process let's make all methods of Process accessible from the debugger
     def __getattr__(self, name):
     #    log.debug(f"looking for attr {name}")
     #    #getattr is only called when an attribute is NOT found in the instance's dictionary
