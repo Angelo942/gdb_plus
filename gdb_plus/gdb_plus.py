@@ -464,8 +464,6 @@ class Debugger:
         else:
             self.rip = value
 
-    instruction_pointer = ip
-
     #Generic convertion to bytes for addresses
     def pbits(self, value):
         if self.elf.bits == 32:
