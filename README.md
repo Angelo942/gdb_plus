@@ -30,7 +30,7 @@ If you really have to you can also use a process or even just his pid.
 For pwn challenges set the remote address with `Debugger().remote(<host>, <port>)` and use the argument `REMOTE` once you want to exploit the server
 
 ```py
-from pydbg import *
+from gdb_plus import *
 
 gdbinit = """
 handle SIGALRM nopass
@@ -103,7 +103,7 @@ If you want to pass data from your callback function to your exploit you can use
 Setting a breakpoint requires the process to be interrupted.
 
 ```py
-from pydbg import *
+from gdb_plus import *
 from queue import Queue
 
 # I let the process run in this example to reinforce the need for the interrupt later
@@ -167,7 +167,7 @@ We have two wrapper for the main ones:
 * `dbg.base_elf`
 * `dbg.base_libc`
 
-from pydbg >= 5.4.0 dbg.elf.address is already set to the correct address even with ASLR on, so you may need dbg.base_elf only if you debug a process for wich you don't have the binary
+from gdb_plus >= 5.4.0 dbg.elf.address is already set to the correct address even with ASLR on, so you may need dbg.base_elf only if you debug a process for wich you don't have the binary
 
 We can also use capstone to know what is the next instruction that will be executed
 ```py
@@ -197,4 +197,4 @@ You may want to be careful with breakpoints inside the function called. If you d
 Another option would be to pass a pointer to the return instruction, it will block you python script untill you reach that specific point, so you will have to work manualy from gdb for that part.
 
 ## Alternatives
-If something can be done with gdb it should be easily programable with pydbg, but you may find it slow as hell for some uses. This tool is meant to help debugging during challenges, if you only want to automate exploit developement you may prefere something like [libdebug](https://github.com/JinBlack/libdebug) which doesn't has to communicate with gdb for each command.
+If something can be done with gdb it should be easily programable with gdb_plus, but you may find it slow as hell for some uses. This tool is meant to help debugging during challenges, if you only want to automate exploit developement you may prefere something like [libdebug](https://github.com/JinBlack/libdebug) which doesn't has to communicate with gdb for each command.
