@@ -1,4 +1,4 @@
-from pydbg import *
+from gdb_plus import *
 from queue import Queue
 
 # In this challenge the process writes an encrypted function somewhere in the memory. Every int3 instructions should raise a signal that is handled decrypting the next few bytes of the function

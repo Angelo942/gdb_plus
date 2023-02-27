@@ -1,0 +1,202 @@
+mov r11d, 0x198205ef
+xor ecx, ecx
+mov r11d, 0x1fc11dc5
+mov dl, 0x7d
+mov r11d, 0xb6b71c18
+xor dl, byte ptr [rdi + 0x1e]
+mov r11d, 0xf9d76c0a
+or cl, dl
+mov r11d, 0xeae3cc65
+mov dl, 0x5f
+mov r11d, 0x7d4ef7a0
+xor dl, byte ptr [rdi + 0x12]
+mov r11d, 0x937bfa95
+or cl, dl
+mov r11d, 0xa5c922e4
+mov dl, 0x30
+mov r11d, 0xd5b14784
+xor dl, byte ptr [rdi + 0x15]
+mov r11d, 0x6c1532cb
+or cl, dl
+mov r11d, 0x8a5b2843
+mov dl, 0x49
+mov r11d, 0x3a015213
+xor dl, byte ptr [rdi + 2]
+mov r11d, 0x5ad24256
+or cl, dl
+mov r11d, 0xa8ad50de
+mov dl, 0x34
+mov r11d, 0xdb031625
+xor dl, byte ptr [rdi + 7]
+mov r11d, 0xa15ca73
+or cl, dl
+mov r11d, 0x6986fb37
+mov dl, 0
+mov r11d, 0x3e26f51
+xor dl, byte ptr [rdi + 0x1f]
+mov r11d, 0x74e1cb5f
+or cl, dl
+mov r11d, 0xe599b6a4
+mov dl, 0x43
+mov r11d, 0xc0604838
+xor dl, byte ptr [rdi + 1]
+mov r11d, 0xef5643dc
+or cl, dl
+mov r11d, 0x2cd53281
+mov dl, 0x30
+mov r11d, 0x5dcea92f
+xor dl, byte ptr [rdi + 0xa]
+mov r11d, 0x68aa3db6
+or cl, dl
+mov r11d, 0x30171ce6
+mov dl, 0x67
+mov r11d, 0x91196b44
+xor dl, byte ptr [rdi + 0x1d]
+mov r11d, 0xabf597df
+or cl, dl
+mov r11d, 0x6cca86bf
+mov dl, 0x54
+mov r11d, 0xf2196a95
+xor dl, byte ptr [rdi + 3]
+mov r11d, 0x381f5379
+or cl, dl
+mov r11d, 0x2c3f8f6d
+mov dl, 0x6e
+mov r11d, 0x9bdfb38e
+xor dl, byte ptr [rdi + 0x1c]
+mov r11d, 0xf3078f53
+or cl, dl
+mov r11d, 0x554dbb62
+mov dl, 0x34
+mov r11d, 0x78bb5896
+xor dl, byte ptr [rdi + 0x18]
+mov r11d, 0x4b1f4aac
+or cl, dl
+mov r11d, 0x7f5d45b9
+mov dl, 0x72
+mov r11d, 0x747f7ac0
+xor dl, byte ptr [rdi + 6]
+mov r11d, 0xb1fa1693
+or cl, dl
+mov r11d, 0xbace85f4
+mov dl, 0x67
+mov r11d, 0x1e4771ae
+xor dl, byte ptr [rdi + 0x16]
+mov r11d, 0x968e5ddd
+or cl, dl
+mov r11d, 0x42f5bdb4
+mov dl, 0x31
+mov r11d, 0xdcace0b4
+xor dl, byte ptr [rdi + 0xc]
+mov r11d, 0xf5e07e40
+or cl, dl
+mov r11d, 0x6ddd1cd1
+mov dl, 0x6e
+mov r11d, 0x844b56c1
+xor dl, byte ptr [rdi + 0xe]
+mov r11d, 0x4d48972
+or cl, dl
+mov r11d, 0x1d289d0f
+mov dl, 0x70
+mov r11d, 0x71750363
+xor dl, byte ptr [rdi + 0x13]
+mov r11d, 0xdb0b4f06
+or cl, dl
+mov r11d, 0x946cc019
+mov dl, 0x6d
+mov r11d, 0x522a5033
+xor dl, byte ptr [rdi + 0x19]
+mov r11d, 0xf1fd9883
+or cl, dl
+mov r11d, 0xed6612e5
+mov dl, 0x65
+mov r11d, 0xc816f97a
+xor dl, byte ptr [rdi + 0xd]
+mov r11d, 0xc06c5159
+or cl, dl
+mov r11d, 0xbdb46696
+mov dl, 0x6d
+mov r11d, 0xcce3fbef
+xor dl, byte ptr [rdi + 0x1a]
+mov r11d, 0xafc9d78f
+or cl, dl
+mov r11d, 0x9f08d156
+mov dl, 0x64
+mov r11d, 0xfe395fdb
+xor dl, byte ptr [rdi + 0x11]
+mov r11d, 0x69b516db
+or cl, dl
+mov r11d, 0xea25350e
+mov dl, 0x72
+mov r11d, 0x5227117c
+xor dl, byte ptr [rdi + 0xb]
+mov r11d, 0x1f69ccc
+or cl, dl
+mov r11d, 0x3f41909e
+mov dl, 0x7b
+mov r11d, 0x9c81427b
+xor dl, byte ptr [rdi + 4]
+mov r11d, 0xe3f156b3
+or cl, dl
+mov r11d, 0xa8f93f4c
+mov dl, 0x70
+mov r11d, 0x85013695
+xor dl, byte ptr [rdi + 8]
+mov r11d, 0xa2031743
+or cl, dl
+mov r11d, 0xc56201e1
+mov dl, 0x5f
+mov r11d, 0xf519d0cf
+xor dl, byte ptr [rdi + 9]
+mov r11d, 0x68501a7b
+or cl, dl
+mov r11d, 0xee84fed
+mov dl, 0x43
+mov r11d, 0x2394c5c6
+xor dl, byte ptr [rdi]
+mov r11d, 0x2926b7f7
+or cl, dl
+mov r11d, 0x47e4ae2b
+mov dl, 0x31
+mov r11d, 0xe86f4fed
+xor dl, byte ptr [rdi + 0x1b]
+mov r11d, 0xb3376cd
+or cl, dl
+mov r11d, 0xe1c2b509
+mov dl, 0x74
+mov r11d, 0x19b4db2a
+xor dl, byte ptr [rdi + 5]
+mov r11d, 0x1593d17f
+or cl, dl
+mov r11d, 0x3805db7a
+mov dl, 0x72
+mov r11d, 0xc91bbaa
+xor dl, byte ptr [rdi + 0x17]
+mov r11d, 0xe754f05d
+or cl, dl
+mov r11d, 0xbf904902
+mov dl, 0x72
+mov r11d, 0x4698c42b
+xor dl, byte ptr [rdi + 0x14]
+mov r11d, 0x8d31398f
+or cl, dl
+mov r11d, 0xf1c8dce6
+mov dl, 0x37
+mov r11d, 0x61c3941a
+xor dl, byte ptr [rdi + 0xf]
+mov r11d, 0x1fe30bd
+or cl, dl
+mov r11d, 0xbf5bc5c7
+mov dl, 0x33
+mov r11d, 0x637158e1
+xor dl, byte ptr [rdi + 0x10]
+mov r11d, 0x81e632ab
+or cl, dl
+mov r11d, 0x312c99c
+xor eax, eax
+mov r11d, 0xb5986641
+test ecx, ecx
+mov r11d, 0x324aae20
+sete al
+mov r11d, 0x4882df28
+ret

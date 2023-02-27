@@ -1,4 +1,4 @@
-from pydbg import Debugger
+from gdb_plus import Debugger
 from pwn import *
 
 # This challenge is a simple buffer overflow

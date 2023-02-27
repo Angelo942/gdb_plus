@@ -1,6 +1,4 @@
 build/
-examples/
-tests/
 dist/
 *.pyc
 gdb_plus.egg-info

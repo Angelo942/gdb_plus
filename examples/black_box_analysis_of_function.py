@@ -1,4 +1,4 @@
-from pydbg import *
+from gdb_plus import *
 
 gdbinit = """
 handle SIGALRM nopass
