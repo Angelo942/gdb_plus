@@ -102,10 +102,14 @@ class Debugger:
 
     cont = c
 
-    #You have to remember you can not send SOME commands to gdb while the process is running
-    #You don't have to interrupt the process to set breakpoints (except if you want callbacks) or access and overwrite the memory. Only work with the registers
-    def wait(self):
-        self.gdb.wait()
+    # You have to remember you can not send SOME commands to gdb while the process is running
+    # You don't have to interrupt the process to set breakpoints (except if you want callbacks) or access and overwrite the memory. Only work with the registers or access the canary for the first time (this last part could be improved)
+    # Apparently now you have to for any breakpoint...
+    # I have to introduce back the timeouts. I just modify the implementation of gdb.wait to do so [26/02/23]
+    # TODO test if the old implementation can detect that the child has died [26/02/23]
+    def wait(self, timeout=None):
+        self.gdb.stopped.wait(timeout=timeout)
+        self.gdb.stopped.clear()
 
     #temporarely interrupt the execution of our process to get back control of gdb (equivalent of a manual ctrl+C)
     #don't worry about the "kill"
@@ -135,9 +139,10 @@ class Debugger:
 
     manual = interrupt
 
-    def step(self):
-        self.execute("si")
-        self.wait()
+    def step(self, repeat:int=1):
+        for _ in range(repeat):
+            self.execute("si")
+            self.wait()
 
     #Finish a function with modifying code
     def step_until_address(self, address: int, callback=None, limit:int=10_000) -> bool:
@@ -164,10 +169,12 @@ class Debugger:
             log.warn_once(f"I made {limit} steps and haven't reached the end of the function...")
             return -1
 
-    def next(self, wait:bool=True):
-        self.execute("ni")
-        if wait:
-            self.wait()
+    # May not want to wait if you are going over a functions that need user interaction
+    def next(self, wait:bool=True, repeat:int=1):
+        for _ in range(repeat):
+            self.execute("ni")
+            if wait:
+                self.wait()
 
     def finish(self, wait:bool=True):
         self.execute("finish")
