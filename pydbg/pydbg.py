@@ -155,7 +155,7 @@ class Debugger:
         for i in range(limit):
             if callback is not None:
                 callback(self)
-            if self.ip == address:
+            if self.instruction_pointer == address:
                 return i
                 break
             self.step()
@@ -245,12 +245,12 @@ class Debugger:
     breakpoint = b
 
     def push(self, value):
-        self.sp -= self.elf.bytes
-        self.write(self.sp, self.pbits(value))
+        self.stack_pointer -= self.elf.bytes
+        self.write(self.stack_pointer, self.pbits(value))
 
     def pop(self):
-        self.read(self.sp, self.elf.bytes)
-        self.sp += self.elf.bytes
+        self.read(self.stack_pointer, self.elf.bytes)
+        self.stack_pointer += self.elf.bytes
 
     ########################## MEMORY ACCESS ##########################
 
@@ -383,7 +383,9 @@ class Debugger:
         "cx", " ch", "cl",
         "dx", " dh", "dl",
         "si", "sil",
-        "di", "dil"]
+        "di", "dil",
+        "sp", "spl",
+        "bp", "bpl"]
         if self.elf.bits == 64:
             _minor_registers += ["eax", "ebx", "ecx", "edx", "esi", "edi",
             "r8d", "r8w", "r8l",
@@ -400,7 +402,7 @@ class Debugger:
     def next_inst(self):
         if self._capstone is None:
             self._capstone = Cs(CS_ARCH_X86, self.elf.bytes)
-        inst = next(self._capstone.disasm(self.read(self.ip, 16), self.ip)) #15 bytes is the maximum size for an instruction in x64
+        inst = next(self._capstone.disasm(self.read(self.instruction_pointer, 16), self.instruction_pointer)) #15 bytes is the maximum size for an instruction in x64
         inst.toString = partial(lambda self: f"{self.mnemonic} {self.op_str}".strip(), inst)
         return inst
 
@@ -414,37 +416,49 @@ class Debugger:
             return self.rax
 
     @return_pointer.setter
-    def sp(self, value):
+    def return_pointer(self, value):
         if self.elf.bits == 32:
             self.eax = value
         else:
             self.rax = value
 
     @property
-    def sp(self):
+    def stack_pointer(self):
         if self.elf.bits == 32:
             return self.esp
         else:
             return self.rsp
 
-    @sp.setter
-    def sp(self, value):
+    @stack_pointer.setter
+    def stack_pointer(self, value):
         if self.elf.bits == 32:
             self.esp = value
         else:
             self.rsp = value
 
-    stack_pointer = sp
+    @property
+    def base_pointer(self):
+        if self.elf.bits == 32:
+            return self.ebp
+        else:
+            return self.rbp
+    
+    @base_pointer.setter
+    def base_pointer(self, value):
+        if self.elf.bits == 32:
+            self.ebp = value
+        else:
+            self.rbp = value
 
     @property
-    def ip(self):
+    def instruction_pointer(self):
         if self.elf.bits == 32:
             return self.eip
         else:
             return self.rip
 
-    @ip.setter
-    def ip(self, value):
+    @instruction_pointer.setter
+    def instruction_pointer(self, value):
         if self.elf.bits == 32:
             self.eip = value
         else:
@@ -529,7 +543,7 @@ class Debugger:
                 log.debug("%s setted to %s", register, args[0])
                 setattr(self, register, args.pop(0))
             
-        args.append(self.ip)
+        args.append(self.instruction_pointer)
         #Should I offset the stack pointer to preserve the stack frame ? No, right ?
         for arg in args:
             self.push(arg)
@@ -541,7 +555,7 @@ class Debugger:
         else:
             log.critical(f"What is this function {function_address} ?")
         self.wait()
-        log.debug("jumped to %s\nWaiting to finish", hex(self.ip))
+        log.debug("jumped to %s\nWaiting to finish", hex(self.instruction_pointer))
         # Vorrei poter gestire il fatto che l'utente potrebbe voler mettere dei breakpoints nel programma
         # Sarebbe interessante un breakpoint sull'istruzione di ritorno con callback che rimette a posto la memoria
         if end_pointer is None:
@@ -592,13 +606,13 @@ class Debugger:
         # I may put a flag to precise if the code is self modifying or not and if it is handle breakpoints
         # If the code is self modifying you must use handler otherwise the breakpoint will be overwriten with bad code [26/02/23]
         if handler is None:
-            self.b(self.ip, temporary=True)
+            self.b(self.instruction_pointer, temporary=True)
         # I don't understand why callback doesn't allways find my_address. I called signal 3 times and it works for the first 2, but not the next one...  [26/02/23]
         # Okay, the problem was that the breakpoints wasn't considered as hit since we don't stop, so all the callbacks I have set are called each time [26/02/23]
         else:
             from queue import Queue
             my_address = Queue()
-            my_address.put(self.ip)
+            my_address.put(self.instruction_pointer)
             def callback(dbg):
                 address = my_address.get()
                 my_address.put(dbg.instruction_pointer)
