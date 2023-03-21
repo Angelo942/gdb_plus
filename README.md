@@ -19,7 +19,7 @@ pip3 install gdb_plus
 ```
 
 **Warning for pwndbg users:**  
-Previous bugs in Pwndbg used to break the api for python. While GDB+ should work with the current version of pwndbg [19/12/2022], bugs may appear again.
+Previous bugs in Pwndbg used to break the api for python. While most of GDB+ should work with the current version of pwndbg [19/12/2022], pwndbg can not debug both processes after a fork.
 you are strongly advised to use [GEF](https://github.com/hugsy/gef) instead.
 
 ## Debugging

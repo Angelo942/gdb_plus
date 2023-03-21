@@ -14,13 +14,18 @@ class Debugger:
     # If possible patch the rpath (spwn and pwninit do it automaticaly) instead of using env to load the correct libc. This will let you get a shell not having problems trying to preload bash too
     def __init__(self, target: [int, process, str], env={}, aslr:bool=True, script:str="", from_start:bool=True, binary:str=None):
         log.debug(f"debugging {target if binary is None else binary} using arch: {context.arch} [{context.bits}bits]")
+
         self._capstone = None #To decompile assembly for next_inst
         self._auxiliary_vector = None #only used to locate the canary
         self._base_libc = None
         self._base_elf = None
         self._canary = None
         self.pid = None # Taken out to be able to send kill() even if we don't use a process
-        self.inferior = None #inferior to easily access memory
+        #self.inferior = None #inferior to easily access memory # Obsolete [03/03/23]
+        self._inferior = 1 # Used to switch between inferiors [03/03/23]
+        self.children = {} # Maybe put {self.pid: self} as first one
+        self.slaves = {} # to emulate ptrace
+        self.master = None
         self._free_bss = None #Used to allocate data in the bss if you can't use the heap
         self.breakpoints = {} #Save all non temporary breakpoints for easy access # The fact that they can't be temporary is used by the callback [21/03/23]
         # How do you remove them with temporary breakpoints ? [19/03/23]
@@ -46,8 +51,8 @@ class Debugger:
                 raise Ecxeption("I need a binary to work !") # I need a quickfix. Who would debug without the binary ? [03/03/23]
                 # Take bits from context... [03/03/23]
                 log.info_once("You attached to a process from the pid but didn't pass a binary. Use binary=<path_to_elf> if possible")
-                self.inferior = self.gdb.inferiors()[0]
-                bits = 64 if self.inferior.architecture().name().endswith("64") else 32 # Faster, I just hope it always works
+                #self.inferior = self.gdb.inferiors()[0]
+                bits = context.bits #64 if self.gdb.inferiors()[0].architecture().name().endswith("64") else 32 # Faster, I just hope it always works
                 #bits = 64 if next(self.inferior.architecture().registers()).name == 'rax' else 32
                 self.elf = FakeELF(bits)
 
@@ -73,8 +78,8 @@ class Debugger:
 
         # I ended up using inferior to read and write the memory even with a process
         #if hasattr(self, "gdb"):
-        if self.debugging: # Dovrebbe essere equivalente, ma almeno non muore
-            self.inferior = self.gdb.inferiors()[0]
+        #if self.debugging: # Dovrebbe essere equivalente, ma almeno non muore
+        #    self.inferior = self.gdb.inferiors()[0]
         if self.p:
             self.pid = self.p.pid
             self.elf = self.p.elf
@@ -127,6 +132,13 @@ class Debugger:
             # Tested and we can even put dbg.c() in the callbacks now <3 [19/03/23]
             self.events.stop.connect(stop_handler)
             self.gdb.events.exited.connect(exit_handler)
+
+            # Manually set by split_child
+            self.gdb.split = Queue()
+
+            # Ptrace_cont
+            self.gdb.master_wants_you_to_continue = Event()
+            self.gdb.slave_has_stopped = Event()
 
         self.restore_arch()
 
@@ -194,7 +206,28 @@ class Debugger:
         log.debug(f"setting stopped in {hex(self.instruction_pointer)}")
         self.gdb.myStopped.set()
 
+    #def wait_fork(self):
+    #    self.gdb.forked.wait()
+    #    self.gdb.forked.clear()
 
+    # TODO: return child pid [06/03/23]
+    def wait_split(self):
+        pid = self.gdb.split.get()
+        return pid
+
+    # For now is handled by simple wait [06/03/23]
+    #def wait_exit(self):
+
+    def wait_master(self):
+        self.gdb.master_wants_you_to_continue.wait()
+        self.gdb.master_wants_you_to_continue.clear()
+
+    # Should handle multiple slaves ?
+    def wait_slave(self):
+        self.gdb.slave_has_stopped.wait()
+        self.gdb.slave_has_stopped.clear()
+
+    
     #temporarely interrupt the execution of our process to get back control of gdb (equivalent of a manual ctrl+C)
     #don't worry about the "kill"
     def interrupt(self, wait=True, timeout=0.2):
@@ -211,7 +244,9 @@ class Debugger:
         if not self.debugging:
             return
         #self.execute("interrupt") #pwntools uses this command, but I don't because it may not work if the continue command has been sent manualy in gdb
-        kill(self.pid, signal.SIGINT)
+        # I won't use kill untill I take into consideration WHICH inferior i'm debugging (so which pid I should use) [04/03/23]
+        # But pwntools cant handle "interrupt"... [07/03/23]
+        kill(self.inferiors[self._inferior].pid, signal.SIGINT)
         if wait: # Set wait to false if you are not sure that the process is actualy running
             self.wait()
         else:
@@ -386,16 +421,55 @@ class Debugger:
 
     ########################## MEMORY ACCESS ##########################
 
-    def read(self, address: int, size: int) -> bytes:
-        #return self.p.readmem(address, size) # I don't want to relie on the process.
-        return self.inferior.read_memory(address, size).tobytes()
+    def read(self, address: int, size: int, inferior = None) -> bytes:
 
-    def write(self, address: int, byte_array: bytes):
-        #self.p.writemem(pointer, byte_array)
-        self.inferior.write_memory(address, byte_array)
+        if inferior == None:
+            inferior = self._inferior
         
+        #return self.p.readmem(address, size) # I don't want to relie on the process.
+        return self.inferiors[inferior].read_memory(address, size).tobytes()
+
+    # You don't allways wan't to write in the parents memory [03/03/23]
+    def write(self, address: int, byte_array: bytes, *, inferior = None):
+
+        if inferior == None:
+            inferior = self._inferior
+        
+        #self.p.writemem(pointer, byte_array)
+        log.debug(f"writing in inferior {inferior}")
+        self.inferiors[inferior].write_memory(address, byte_array)
+        
+
+    @property
+    def inferiors(self):
+        return {inferior.num: inferior for inferior in self.gdb.inferiors()}
+        #return (None,) + self.gdb.inferiors()
+
+    # Useless ? I wanted it for the interrupt, but info inferior requires to be at a halt [07/03/23]
+    @property
+    def current_inferior(self):
+        # trova ultimo id
+        # prendi ultima riga non nulla
+        data = self.execute("info inferior").split("\n") # shouldn't it be "info inferiorS" ?
+        for line in data:
+            line = line.split()
+            if line[0] == "*":
+                n = int(line[1])
+                return self.inferiors[n]
+    
+
     #Alloc and Dealloc instead of malloc and free because you may want to keep those names for function in your exploit
-    def alloc(self, n: int, /, *, heap=True) -> int:
+
+    # ??? [04/03/23]
+    #gdb.error: The program being debugged was signaled while in a function called from GDB.
+    #GDB remains in the frame where the signal was received.
+    #To change this behavior use "set unwindonsignal on".
+    #Evaluation of the expression containing the function
+    #(__GI___libc_malloc) will be abandoned.
+    #When the function is done executing, GDB will silently stop.
+
+
+    def alloc(self, n: int, /, *, heap=True, inferior = None) -> int:
         """
         Allocate N bytes in the heap
 
@@ -406,28 +480,59 @@ class Debugger:
         heap : bool, optional
             Set to False if you can't use the heap
             This way it will return a pointer to an area of the bss
-
+        malloc : int, optional
+            If you want to use malloc but the binary is staticaly linked and striped set malloc=ADDRESS_TO_MALLOC
         Returns
         -------
         pointer
         """
+
+        if inferior == None:
+            inferior = self._inferior
+        
         if heap:
-            pointer = self.execute(f"call (long) malloc({n})").split()[-1]
+        # TODO handle switching between inferiors [03/03/23]
+            old_inferior = self.switch_inferior(inferior)
+            
+            # calling with gdb should be safer, but if you don't have debug symbols you can't. [02/03/23]
+            #if self.elf.statically_linked: # You may not have access to the symbols to call malloc if the binary is statically linked and stripped [02/03/23]
+            #    log.debug("calling malloc from local address")
+            #    pointer = hex(self.call(self.elf.symbols["malloc"], [n])) # Let's return a string to stay consistants [02/03/23]
+            #else:
+            #    pointer = self.execute(f"call (long) malloc({n})").split()[-1]
+            return self.gdb_call("malloc", [n])
+
+            self.switch_inferior(old_inferior)
+
         else:
             if self._free_bss is None:
                 self._free_bss = self.elf.bss() # I have to think about how to preserve eventual data already present
-            pointer = hex(self._free_bss)
             self._free_bss += n
-        # GEF prints logs as base 16, but pwndbg as base 10
-        return int(pointer, 16) if "0x" in pointer else int(pointer)
-
-    def dealloc(self, pointer, len=0, heap=True):
+            return self._free_bss
+        
+    def dealloc(self, pointer: int, len=0, heap=True, inferior = None):
+        
+        if inferior == None:
+            inferior = self._inferior
+        
         if heap:
-            self.execute(f"call (void) free({hex(pointer)})")
+            
+            old_inferior = self.switch_inferior(inferior)
+
+            #if self.elf.statically_linked: # You may not have access to the symbols to call malloc if the binary is statically linked and stripped [02/03/23]
+            #    self.call(self.symbols["free"], [pointer])
+            #else:
+            #    self.execute(f"call (void) free({hex(pointer)})")
+            self.gdb_call("free", [pointer], cast="void")
+
+            self.switch_inferior(old_inferior)
+
         else:
+            # MMMMMMM, not perfect for different inferiors
             self._free_bss -= len
             #I know it's not perfect, but damn I don't want to implement a heap logic for the bss ahahah
             #Just use the heap if you can
+
     # I copied it from pwntools to have access to it even if I attach directly to a pid
     def libs(self):
         """libs() -> dict
@@ -678,7 +783,413 @@ class Debugger:
         else:
             return p64(value)
 
+    ########################## FORKS ##########################
+    # TODO find a beter name [28/02/23]
+    # TODO by default find the last inferior [01/03/23 10:30] # Done
+    # TODO make inferior and n the same parameter ? [04/03/23]
+
+    # Call shellcode has problems: https://sourceware.org/gdb/onlinedocs/gdb/Registers.html. Can't push rip
+    def split_child(self, n = None, /, inferior = None):
+        """
+        return a child as different debugging session
+
+        You must have used `set detach-on-fork off` before the fork for this feature to work
+        """
+        log.warn_once("breakpoints won't be tranfered, you have to set them again")
+        
+        if inferior is None:
+            if n is None:
+                # trova ultimo id
+                # prendi ultima riga non nulla
+                data = self.execute("info inferior").split("\n")[-2].split()
+                n = data[0]
+                if n == "*":
+                    n = data[1]
+                n = int(n)
+            pid = self.inferiors[n].pid
+
+        else:   
+            log.debug(f"spliting inferior {inferior}")
+            pid = inferior.pid
+            n = inferior.num
+        
+        log.debug(f"spliting inferior {n} with pid {pid}")
+        # devi trovare un modo per farlo dormire
+        
+        # loop:
+        # cmp rax, rax
+        # je loop
+        # ret
+        # Why is the shellcode injected in the parent !? [04/03/23 11:30]
+        self.switch_inferior(n)
+        shellcode = b"\x48\x39\xC0\x74\xFB\xC3"
+        log.debug("injecting shellcode")
+        address_shellcode = self.inject_shellcode(shellcode)
+        log.debug(f"calling shellcode at address {hex(address_shellcode)}")
+        # save flag
+        flags = self.eflags
+        # TODO: understand why you get 0xa...
+        self.return_value = 0
+        self.push(self.instruction_pointer)
+        self.jump(address_shellcode)
+        self.switch_inferior(1)
+        log.info("detach from child")
+        self.execute(f"detach inferiors {n}")
+        with context.local(arch = context.arch):
+            child = Debugger(pid, binary=self.elf.path)
+        log.debug("new debugger opened")
+        child.write(address_shellcode + 3, b"\x75") # cambia je -> jne
+        log.debug("shellcode patched")
+        # 3 -> exit fake function, exit sub fork and exit fork
+        child.finish(repeat=3)
+        # restore flag
+        self.eflags = flags
+        self.gdb.split.put(pid)
+        return child
+    
+    # entrambi dovrebbero essere interrotti, il parent alla fine di fork, il child a metà
+    # Ho deciso di lasciare correre il parent. Te la gestisci te se vuoi mettere un breakpoint mettilo dopo
+    # I just discovered "gdb.events.new_inferior"... I can take the pid from event.inferior.pid, but can I do more ?
+    def set_split_on_fork(self, off=False, c=False, keep_breakpoints=False):
+        """
+        The function should split a new session every time you hit a fork
+        """
+        if off:
+            self.execute("set detach-on-fork on")
+            #if self.symbols["fork"] in self.breakpoints:
+            #    self.breakpoints["fork"].enabled = False
+            #    del self.breakpoints["fork"]
+
+            # Will break if not set on before
+            self.gdb.events.new_inferior.disconnect(self.inferior_handler)
+                
+        else:
+            self.execute("set detach-on-fork off")
+
+            def fork_handler(event):
+                inferior = event.inferior
+                # old tests [03/03/23]
+                #self.interrupt()
+                #sleep(3)
+                #print(self.next_inst.toString()) # Questo funziona...
+                #self.next()  # Questo però non può perchè sta runnando...
+                pid = inferior.pid
+                def split(inferior):
+                    print(f"spliting child {inferior}")
+                    self.interrupt(wait=False, timeout=0.1)
+                    self.children[pid] = self.split_child(inferior=inferior)
+                context.Thread(target=split, args = (inferior,)).start()
+
+            self.gdb.events.new_inferior.connect(fork_handler)
+
+            #def finish(dbg):
+            #    log.debug("process forked")
+            #    next_ip = unpack(self.read(self.stack_pointer, context.bytes))
+            #    #
+            #    def split(dbg):
+            #        child = dbg.split_child()
+            #        dbg.childen[child.pid] = child
+            #        return False
+            #    #
+            #    dbg.b(next_ip, real_callback=split, temporary=True)
+            #    return False
+            ##
+            #self.b(self.symbols["fork"], callback=finish)
+            
+            return self
+
+    # Let's handle the bug on the overwriten wait4
+    def exit_broken_function(self):
+        """
+        ipothesis: you are on a ret that for some reason may raise a sigint 
+        """
+        assert self.next_inst.toString() == "ret"
+        ip = self.instruction_pointer
+        while self.instruction_pointer == ip:
+            self.next()
+            if self.instruction_pointer == ip:
+                log.debug("Bug ret still present")
+
+    # Non dovrebbe gestire gli int3 piuttosto ? Un set event if not in breakpoints execute code ? [06/03/23]
+    # Boh, tanto si ferma e basta... 
+    # Però si, dovrebbe dirlo al master
+    # Il problema è che spesso si ferma prima di sapere chi sia il master
+    def emulate_ptrace_slave(self, master = None, *, off = False):
+        if master is not None:
+            self.master = master
+
+        if not off:
+            log.debug(f"emulating slave proc {self.pid}")
+            # patch wait4
+            # Attento che funziona solo su 64 bit, ma è un test per capire da dove appare il sigabort [08/03/23]
+            #self.write(self.symbols["wait4"], b"\xf3\x0f\x1e\xfa\xc3")
+            self.write(self.symbols["wait4"], b"\xc3")
+            # set breakpoint
+            # You can not wait inside the breakpoint otherwise gdb gets blocked before the child can be split away 
+            def callback(dbg):
+                log.debug("slave waiting for instructions")
+
+                # Do it for int3 instead
+                #if dbg.master is not None:
+                #    dbg.master.gdb.slave_has_stopped.set()
+
+                def thread(dbg):
+                    log.critical("slave thread stopped")
+                    dbg.wait_master()
+                    log.critical("slave thread can continue")
+                    log.debug("I won't run dbg.c(), see if you still get the breakpoint hit twice")
+                    #dbg.c() # There are some strange things happening here. Without this continue I need 2 ni to execute the ret since the first just restore the thread in gdb (Try without GEF)
+                # I decided to avoid breaking. Is there a reason to do otherwise ? You are not blocking the master and the slave has nothing else to do
+                context.Thread(target=thread, args=(dbg,)).start()
+                return True
+                #return False 
+            # WHY IS THE BREAK HIT TWICE ??? [07/03/23]
+            self.b(self.symbols["wait4"], callback = callback)
+
+            self.write(self.symbols["ptrace"], b"\xc3")
+            def ptrace_callback(dbg):
+                ptrace_command = dbg.args(0)
+                assert ptrace_command == constants.PTRACE_TRACEME
+                dbg.PTRACE_TRACEME()
+                # The only reason to call this function is to be sure it will stop, right ?
+                return True
+
+            self.b(self.symbols["ptrace"], callback = ptrace_callback)
+
+        else:
+            log.debug("stop emulating slave. Removing wait4 and ptrace breakpoints")
+            self.breakpoints[hex(self.symbols["wait4"])].delete()
+            del self.breakpoints[hex(self.symbols["wait4"])]
+            self.breakpoints[hex(self.symbols["ptrace"])].delete()
+            del self.breakpoints[hex(self.symbols["ptrace"])]
+
+        return self
+    
+    def emulate_ptrace_master(self, slave):
+        log.debug(f"emulating master {self.pid} over {slave.pid}")
+        self.slaves[slave.pid] = slave 
+        # patch ptrace
+        self.write(self.symbols["ptrace"], b"\xc3")
+
+# 32bits
+# 'PTRACE_ATTACH',
+# 'PTRACE_CONT',
+# 'PTRACE_DETACH',
+# 'PTRACE_EVENT_CLONE',
+# 'PTRACE_EVENT_EXEC',
+# 'PTRACE_EVENT_EXIT',
+# 'PTRACE_EVENT_FORK',
+# 'PTRACE_EVENT_VFORK',
+# 'PTRACE_EVENT_VFORK_DONE',
+# 'PTRACE_GETEVENTMSG',
+# 'PTRACE_GETFPREGS',
+# 'PTRACE_GETFPXREGS',
+# 'PTRACE_GETREGS',
+# 'PTRACE_GETSIGINFO',
+# 'PTRACE_KILL',
+# 'PTRACE_O_MASK',
+# 'PTRACE_O_TRACECLONE',
+# 'PTRACE_O_TRACEEXEC',
+# 'PTRACE_O_TRACEEXIT',
+# 'PTRACE_O_TRACEFORK',
+# 'PTRACE_O_TRACESYSGOOD',
+# 'PTRACE_O_TRACEVFORK',
+# 'PTRACE_O_TRACEVFORKDONE',
+# 'PTRACE_PEEKDATA',
+# 'PTRACE_PEEKTEXT',
+# 'PTRACE_PEEKUSER',
+# 'PTRACE_PEEKUSR',
+# 'PTRACE_POKEDATA',
+# 'PTRACE_POKETEXT',
+# 'PTRACE_POKEUSER',
+# 'PTRACE_POKEUSR',
+# 'PTRACE_SETFPREGS',
+# 'PTRACE_SETFPXREGS',
+# 'PTRACE_SETOPTIONS',
+# 'PTRACE_SETREGS',
+# 'PTRACE_SETSIGINFO',
+# 'PTRACE_SINGLESTEP',
+# 'PTRACE_SYSCALL',
+# 'PTRACE_TRACEME',
+
+# 64bits
+# 'PTRACE_ATTACH',
+# 'PTRACE_CONT',
+# 'PTRACE_DETACH',
+# 'PTRACE_EVENT_CLONE',
+# 'PTRACE_EVENT_EXEC',
+# 'PTRACE_EVENT_EXIT',
+# 'PTRACE_EVENT_FORK',
+# 'PTRACE_EVENT_VFORK',
+# 'PTRACE_EVENT_VFORK_DONE',
+# 'PTRACE_GETEVENTMSG',
+# 'PTRACE_GETSIGINFO',
+# 'PTRACE_KILL',
+# 'PTRACE_O_MASK',
+# 'PTRACE_O_TRACECLONE',
+# 'PTRACE_O_TRACEEXEC',
+# 'PTRACE_O_TRACEEXIT',
+# 'PTRACE_O_TRACEFORK',
+# 'PTRACE_O_TRACESYSGOOD',
+# 'PTRACE_O_TRACEVFORK',
+# 'PTRACE_O_TRACEVFORKDONE',
+# 'PTRACE_PEEKDATA',
+# 'PTRACE_PEEKTEXT',
+# 'PTRACE_PEEKUSER',
+# 'PTRACE_PEEKUSR',
+# 'PTRACE_POKEDATA',
+# 'PTRACE_POKETEXT',
+# 'PTRACE_POKEUSER',
+# 'PTRACE_POKEUSR',
+# 'PTRACE_SETSIGINFO',
+# 'PTRACE_SINGLESTEP',
+# 'PTRACE_SYSCALL',
+# 'PTRACE_TRACEME',
+
+        if context.arch == "amd64":
+            constants.PTRACE_GETREGS = 12
+            constants.PTRACE_SETREGS = 13
+            constants.PTRACE_SETOPTIONS = 0x4200 # really ??
+
+        ptrace_dict = {constants.PTRACE_POKEDATA: self.PTRACE_POKETEXT,
+            constants.PTRACE_POKETEXT: self.PTRACE_POKETEXT, 
+            constants.PTRACE_PEEKTEXT: self.PTRACE_PEEKTEXT, 
+            constants.PTRACE_PEEKDATA: self.PTRACE_PEEKTEXT, 
+            constants.PTRACE_GETREGS: self.PTRACE_GETREGS, 
+            constants.PTRACE_SETREGS: self.PTRACE_SETREGS,
+            constants.PTRACE_ATTACH: self.PTRACE_ATTACH,
+            constants.PTRACE_CONT: self.PTRACE_CONT,
+            constants.PTRACE_DETACH: self.PTRACE_DETACH,
+            constants.PTRACE_SETOPTIONS: self.PTRACE_SETOPTIONS}
+
+        
+        def ptrace_callback(dbg):
+            ptrace_command = dbg.args(0)
+            pid = dbg.args(1)
+            arg1 = dbg.args(2)
+            arg2 = dbg.args(3)
+            slave = dbg.slaves[pid]
+            log.debug(f"ptrace {pid} -> {ptrace_command}: ({hex(arg1)}, {hex(arg2)})")
+            action = ptrace_dict[ptrace_command] # The slave can be a parent
+
+            # Why am I using a Thread since I can't use dbg.next() ?
+            #context.Thread(target = action, args = (arg1, arg2), kwargs = {"slave": slave}).start() # Magari fa problemi di sincronizzazione con le wait
+            action(arg1, arg2, slave=slave)
+
+            # The problem with return False is that if I walk over the breakpoint manualy I loose control of the debugger because the program continues
+            return False
+
+        self.b(self.symbols["ptrace"], callback=ptrace_callback)
+
+        # Set breakpoint for wait_attach
+        # Not in attach because TRACEME doesn't call attach
+        # gdb has a bug, [#0] Id 1, Name: "traps_withSymbo", stopped 0x448ac0 in wait4 (), reason: SIGINT. even without a breakpoint
+        self.write(self.symbols["wait4"], b"\xc3")
+        # You have to choose between return False and temporary for now...
+        def callback_wait(dbg):
+            dbg.return_value = dbg.args(0) #slave.pid # Not really, but just != 0
+            status_pointer = dbg.args(1)
+            dbg.write(status_pointer, b"\xff\x00")
+            return True
+
+        self.b(self.symbols["wait4"], callback_wait)
+
+        return self
+
+    ########################## PTRACE EMULATION ##########################
+    def PTRACE_ATTACH(self, _, __, *, slave):
+        log.debug(f"pretending to attach to process {slave.pid}")
+        slave.master = self
+        # I don't think it is needed to stop the child
+        #slave.interrupt() ?
+        self.gdb.slave_has_stopped.set()
+        self.return_value = 0
+
+
+        # set slave. ?
+
+    # Only function called by the slave
+    def PTRACE_TRACEME(self):
+        log.debug("slave wants to be traced")
+        self.return_value = 0
+        # TODO: Wait for a master
+        self.master.gdb.slave_has_stopped.set()
+
+    def PTRACE_CONT(self, _, __, *, slave):
+        print("slave can continue !")
+        slave.gdb.master_wants_you_to_continue.set()
+
+    def PTRACE_DETACH(self, _, __, *, slave):
+        log.debug(f"ptrace detached from {slave.pid}")
+        slave.gdb.master_wants_you_to_continue.set()
+        slave.master = None
+
+    def PTRACE_POKETEXT(self, address, data, *, slave):
+        log.debug(f"poking {hex(data)} into process {slave.pid} at address {hex(address)}")
+        slave.write(address, pack(data))
+        self.return_value = 0 # right ?
+
+    def PTRACE_PEEKTEXT(address, _, *, slave):
+        data = slave.read(address, context.bytes)
+        log.debug(f"peeking {hex(data)} from process {slave.pid} at address {hex(address)}")
+        self.return_value = data
+
+    def PTRACE_GETREGS(self, _, pointer_registers, *, slave):
+        registers = user_regs_struct()
+        for register in slave.registers:
+            value = getattr(slave, register)
+            log.debug(f"reading child's register {register}: {hex(value)}")
+            assert register in registers.registers
+            setattr(registers, register, value)
+        self.write(pointer_registers, registers.get())
+        self.return_value = 0 # right ?
+    
+    def PTRACE_SETREGS(self, _, pointer_registers, *, slave):
+        log.warn_once("funziona solo per registri non triviali")
+        registers = user_regs_struct()
+        registers.set(self.read(pointer_registers, registers.size))
+        for register in registers.registers:
+            if register in slave.registers:
+                value = getattr(registers, register)
+                log.debug(f"setting child's register {register}: {hex(value)}")
+                setattr(slave, register, value)
+            else:
+                log.debug(f"register {register} is not known to the process")
+        self.return_value = 0 # right ?
+
+
+    def PTRACE_SETOPTIONS(self, _, options, *, slave):
+        if options & constants.PTRACE_O_EXITKILL:
+            log.debug("They want to kill the slave if you remove the master")
+            self.return_value = 0
+        
+        # TODO: other options
+        # Can they be mixed togheder ?
+
     ########################## REV UTILS ##########################
+
+
+    # Return old_inferior to know where to go back
+    def switch_inferior(self, n: int) -> int:
+        # May not be acurate if you switched manually before
+        old_inferior = self._inferior
+        if self._inferior != n:
+            log.debug(f"switching to inferior {n}")
+            self.execute(f"inferior {n}")
+            self._inferior = n
+        return old_inferior
+
+
+    # Attento che c'è un problema con troppi return pointers ? [03/03/23]
+    #[#0] 0x448aea → wait4()
+    #[#1] 0x401702 → main()
+
+    #[#0] 0x448aea → wait4()
+    #[#1] 0x448aea → wait4()
+    #[#2] 0x4019ad → entry()
+    # Però boh...
+    # Non è semplicemente che sigint fa continuare il parent ?
+    
     # TODO just a jump with breakpoint
     def jump(self, address, stop = True):   
         self.clear_stop("jump")
@@ -919,7 +1430,6 @@ class Debugger:
         self.wait()
         #del my_address # Prevent callback to access it again at a future execution [26/02/23]
         #del dbg.my_address # I don't want to delete it in case I hit a different breakpoint before the callback is called [26/02/23]
-    ########################## GEF shortcuts ##########################
 
     def syscall(self, code: int, args: list):
         log.debug(f"syscall {code}: {args}")
@@ -966,6 +1476,7 @@ class Debugger:
 
         return address
 
+    ##########################  GEF shortcuts   #########################
     def context(self):
         """
         print memory infos as in gdb
@@ -1032,3 +1543,32 @@ class FakeELF:
         self.path = None
         self.address = 0
         #statically_linked ? always True ? # Needed to call malloc [02/03/23]
+
+class user_regs_struct:
+    def __init__(self):
+        # I should use context maybe... At least you don't have suprises like me when pack breaks [02/03/23]
+        self.registers = {64: ["r15", "r14", "r13", "r12", "rbp", "rbx", "r11", "r10", "r9", "r8", "rax", "rcx", "rdx", "rsi", "rdi", "orig_ax", "rip", "cs", "eflags", "rsp", "ss", "fs_base", "gs_base", "ds", "es", "fs", "gs"]}[context.bits]
+        self.size = len(self.registers)*context.bytes
+
+    def set(self, data):
+        for i, register in enumerate(self.registers):
+            setattr(self, register, unpack(data[i*context.bytes:(i+1)*context.bytes])) # I said I don't like unpack, but shhh [02/03/23]
+
+    def get(self):
+        data = b""
+        for register in self.registers:
+            value = getattr(self, register, 0)
+            data += pack(value)
+        return data
+
+constants.PTRACE_O_TRACESYSGOOD = 0x00000001
+constants.PTRACE_O_TRACEFORK    = 0x00000002
+constants.PTRACE_O_TRACEVFORK   = 0x00000004
+constants.PTRACE_O_TRACECLONE   = 0x00000008
+constants.PTRACE_O_TRACEEXEC    = 0x00000010
+constants.PTRACE_O_TRACEVFORKDONE = 0x00000020
+constants.PTRACE_O_TRACEEXIT    = 0x00000040
+constants.PTRACE_O_TRACESECCOMP = 0x00000080
+constants.PTRACE_O_EXITKILL = 0x00100000
+constants.PTRACE_O_SUSPEND_SECCOMP = 0x00200000
+constants.PTRACE_O_MASK     = 0x003000ff
