@@ -3,6 +3,8 @@ from os import kill
 from time import sleep
 from functools import partial
 from capstone import Cs, CS_ARCH_X86
+from threading import Thread, Event
+from queue import Queue
 
 #WARNING pwndbg breaks the API so you have to disable it. I advise to use GEF
 
@@ -10,7 +12,8 @@ from capstone import Cs, CS_ARCH_X86
 
 class Debugger:
     # If possible patch the rpath (spwn and pwninit do it automaticaly) instead of using env to load the correct libc. This will let you get a shell not having problems trying to preload bash too
-    def __init__(self, target: [int, process, str], env={}, aslr:bool=True, script:str=None, from_start:bool=True, binary:str=None):
+    def __init__(self, target: [int, process, str], env={}, aslr:bool=True, script:str="", from_start:bool=True, binary:str=None):
+        log.debug(f"debugging {target if binary is None else binary} using arch: {context.arch} [{context.bits}bits]")
         self._capstone = None #To decompile assembly for next_inst
         self._auxiliary_vector = None #only used to locate the canary
         self._base_libc = None
@@ -40,6 +43,8 @@ class Debugger:
             if binary is not None:
                 self.elf = ELF(binary)
             else:
+                raise Ecxeption("I need a binary to work !") # I need a quickfix. Who would debug without the binary ? [03/03/23]
+                # Take bits from context... [03/03/23]
                 log.info_once("You attached to a process from the pid but didn't pass a binary. Use binary=<path_to_elf> if possible")
                 self.inferior = self.gdb.inferiors()[0]
                 bits = 64 if self.inferior.architecture().name().endswith("64") else 32 # Faster, I just hope it always works
@@ -73,7 +78,8 @@ class Debugger:
         if self.p:
             self.pid = self.p.pid
             self.elf = self.p.elf
-        if self.debugging and self.p:
+            # We may have problems relying on context... Stay with elf [03/03/23]
+        if self.debugging:
             self.elf.address = self.get_base_elf()
 
             # I create a new one because I can't disconnect their callback
@@ -109,7 +115,28 @@ class Debugger:
                     log.debug(f"no real_callback on {hex(self.instruction_pointer)}")
                     self.set_stop() # Altready handled by pwntools ? [03/03/23] YES ! create a new event instead [19/03/23]
 
+            # Now I can wait for an exit [03/03/23]
+            def exit_handler(event):
+                log.debug("setting stop because process exited")
+                self.gdb.myStopped.set()
+
+            # Events are executed in the order they are set waiting for the previous one to start, but still blocking wait() [04/03/23]
+            # Unfortunately you can't use it to run gdb+ commands... Is it just because they depend on wait() ? [04/03/23]
+            # I can use Thread.start() in the handler. Just be carefull if the script wants to do other things after waiting [04/03/23]
+            # Non è che vengono eseguiti sia dal parent che dal child, vero... Non dovrebbe, spero sia per quando la sessione gdb che si ferma, non i processi [04/03/23]
+            # Tested and we can even put dbg.c() in the callbacks now <3 [19/03/23]
             self.events.stop.connect(stop_handler)
+            self.gdb.events.exited.connect(exit_handler)
+
+        self.restore_arch()
+
+    # Because pwntools isn't perfect
+    def restore_arch(self):
+        if context.arch != self.elf.arch:
+            log.debug("wrong context ! Updating...")
+        context.arch = self.elf.arch
+        context.bits = self.elf.bits
+
     # Use as : dbg = Debugger("file").remote(IP, PORT)
     def remote(self, host: str, port: int):
         if args.REMOTE:
@@ -235,10 +262,24 @@ class Debugger:
             if wait:
                 self.wait()
 
-    def finish(self, wait:bool=True):
-        self.execute("finish")
-        if wait:
-            self.wait()
+    # This one doesn't wait forever if we finish executing
+    # Don't use repeat and no_wait toghether ... [06/03/23]
+    # Not sure if repeat is so usefull... [21/03/23]
+    # The callback is usefull if you have other breakpoints that will be hit before the function finishes so you can't just wait and run the code [21/03/23]
+    def finish(self, *, wait:bool=True, repeat = 1, callback = None):
+        self.clear_stop("finish")
+        if callback is None:
+            for _ in range(repeat):
+                self.execute("finish")
+                if wait:
+                    self.wait()
+        else:
+            # I still use execute("finish") in the other case because I'm not sure return_address is always correct [21/03/23]
+            log.warn_once("using finish with callback. This assumes that the function started with a push base_pointer. If it's not the case this won't work")
+            return_address = unpack(self.read(self.base_pointer + context.bytes, context.bytes))
+            self.b(return_address, real_callback=callback, temporary = True)
+            self.c()
+
     def parse_for_breakpoint(self, address: [int, str]) -> str:
         """
         return the corresponding key used to save breakpoints for the given address
@@ -324,7 +365,6 @@ class Debugger:
         
     breakpoint = b
 
-    def push(self, value):
     def delete_breakpoint(self, address: [int, str]) -> bool:
         address = parse_for_breakpoint(address)
         if address in self.breakpoints:
@@ -334,12 +374,15 @@ class Debugger:
         if address in self.real_callbacks:
             del self.real_callbacks[address]
     
+    def push(self, value: int):
+        log.debug(f"pushing {pack(value)}")
         self.stack_pointer -= self.elf.bytes
-        self.write(self.stack_pointer, self.pbits(value))
+        self.write(self.stack_pointer, pack(value))
 
-    def pop(self):
-        self.read(self.stack_pointer, self.elf.bytes)
+    def pop(self) -> int:
+        data = self.read(self.stack_pointer, self.elf.bytes)
         self.stack_pointer += self.elf.bytes
+        return unpack(data)
 
     ########################## MEMORY ACCESS ##########################
 
@@ -385,43 +428,100 @@ class Debugger:
             self._free_bss -= len
             #I know it's not perfect, but damn I don't want to implement a heap logic for the bss ahahah
             #Just use the heap if you can
+    # I copied it from pwntools to have access to it even if I attach directly to a pid
+    def libs(self):
+        """libs() -> dict
+        Return a dictionary mapping the path of each shared library loaded
+        by the process to the address it is loaded at in the process' address
+        space.
+        """
+        try:
+            maps_raw = open(f"/proc/{self.pid}/maps").read()
+        except IOError:
+            maps_raw = None
+
+        # Enumerate all of the libraries actually loaded right now.
+        maps = {}
+        for line in maps_raw.splitlines():
+            if '/' not in line: continue
+            path = line[line.index('/'):]
+            path = os.path.realpath(path)
+            if path not in maps:
+                maps[path]=0
+
+        for lib in maps:
+            path = os.path.realpath(lib)
+            for line in maps_raw.splitlines():
+                if line.endswith(path):
+                    address = line.split('-')[0]
+                    maps[lib] = int(address, 16)
+                    break
+
+        return maps
     
     # get base address of libc
     # I would want something that doesn't requires a process
     def get_base_libc(self):
-        if self.p and hasattr(self, libc):
-            return self.p.libs()[self.libc.path]
+        #if not hasattr(self, "libc"):
+        # I think process has a libc = None by default
+        if self.libc is None:
+            log.warn_once("I don't see a libc ! Set dbg.libc = ELF(<path_to_libc>)")
+            return 0
+        maps = self.libs()
+        if len(maps) != 0:
+            return maps[self.libc.path]
         else:
-            data = self.execute("info files")
-            for line in data.split("\n"):
-                line = line.strip()
-                if "libc" in line and line.startswith("0x"):
-                    address = int(line.split()[0], 16)
-                    return address - address % 0x1000
+            log.warn("I can't access /proc/%d/maps", self.pid)
+            #data = self.execute("info files")
+            #for line in data.split("\n"):
+            #    line = line.strip()
+            #    if "libc" in line and line.startswith("0x"):
+            #        address = int(line.split()[0], 16)
+            #        return address - address % 0x1000
+
     @property
     def base_libc(self):
         if self._base_libc is None:
             self._base_libc = self.get_base_libc()
-        return self.get_base_libc()
+        return self._base_libc
 
     # get base address of binary
     def get_base_elf(self):
-        if self.p:
-            return self.p.libs()[self.elf.path]
+        maps = self.libs()
+        if len(maps) != 0:
+            return maps[self.elf.path]
         else:
-            data = self.execute("info files")
-            for line in data.split("\n"):
-                line = line.strip()
-                if line.startswith("Entry point:"):
-                    address = int(line.split()[-1], 16)
-                    return address - address%0x1000 #Not always true...
+            log.warn("I can't access /proc/%d/maps", self.pid)
+            # The following part doesn't work properly [28/02/23]
+            #data = self.execute("info files")
+            #for line in data.split("\n"):
+            #    line = line.strip()
+            #    if line.startswith("Entry point:"):
+            #        address = int(line.split()[-1], 16)
+            #        print(f"Entry point = {hex(address)}")
+            #        return address - address%0x1000 #Not always true...
                     
 
     @property # I don't wan't to rely on self.elf.address which isin't set by default for PIE binaries
     def base_elf(self):
+        # I don't want to set it myself either because I want to be able to test leak == dbg.base_elf during my exploit
+        #if self.elf.address == 0:
+        #    self.elf.address = self.get_base_elf()
+        #return self.elf.address
         if self._base_elf is None:
             self._base_elf = self.get_base_elf()
         return self._base_elf
+
+    # WARNING SOLO 3.9
+    @property
+    def symbols(self):
+        #if hasattr(self, "libc"):
+        if hasattr(self, "libc") and self.libc is not None: # If I attack to a pid I self.p doesn't have libc = None
+            #return self.elf.symbols | self.libc.symbols
+            return {**self.elf.symbols, **self.libc.symbols} # Should work in 3.8
+        else:
+            return self.elf.symbols
+
         
     # taken from GEF to locate the canary
     @property
@@ -458,12 +558,14 @@ class Debugger:
 
     @property
     def registers(self):
+        registers = ["eflags", "cs", "ss", "ds", "es", "fs", "gs"]
         if self.elf.bits == 32:
-            return ["eax", "ebx", "ecx", "edx", "edi", "esi", "ebp", "esp", "eip"]
+            registers += ["eax", "ebx", "ecx", "edx", "edi", "esi", "ebp", "esp", "eip"]
         elif self.elf.bits == 64:
-            return ["rax", "rbx", "rcx", "rdx", "rdi", "rsi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "rbp", "rsp", "rip"]
+            registers += ["rax", "rbx", "rcx", "rdx", "rdi", "rsi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "rbp", "rsp", "rip"]
         else:
             log.critical("Bits not known")
+        return registers
 
     # Making ax accessible will probably be faster that having to write 
     @property
@@ -499,14 +601,14 @@ class Debugger:
     ########################## Generic references ##########################
 
     @property
-    def return_pointer(self):
+    def return_value(self):
         if self.elf.bits == 32:
             return self.eax
         else:
             return self.rax
 
-    @return_pointer.setter
-    def return_pointer(self, value):
+    @return_value.setter
+    def return_value(self, value):
         if self.elf.bits == 32:
             self.eax = value
         else:
@@ -519,12 +621,19 @@ class Debugger:
         else:
             return self.rsp
 
+    # issue: setting $sp is not allowed when other stack frames are selected... https://sourceware.org/gdb/onlinedocs/gdb/Registers.html [04/03/23]
     @stack_pointer.setter
     def stack_pointer(self, value):
-        if self.elf.bits == 32:
-            self.esp = value
-        else:
-            self.rsp = value
+        # May move this line to push and pop if someone can argue a good reason to.
+        while self.stack_pointer != value:
+            log.debug("forcing last frame")
+            self.execute("select-frame 0") # I don't know what frames are for, but if you need to push or pop you just want to work on the current frame i guess ? [04/03/23]
+            
+            if self.elf.bits == 32:
+                self.esp = value
+            else:
+                self.rsp = value
+
 
     @property
     def base_pointer(self):
@@ -540,12 +649,19 @@ class Debugger:
         else:
             self.rbp = value
 
+    # Prevent null pointers
     @property
     def instruction_pointer(self):
+        ans = 0
+        #while ans == 0:
         if self.elf.bits == 32:
-            return self.eip
+            ans = self.eip
         else:
-            return self.rip
+            ans = self.rip
+        ## log
+        #if ans == 0:
+        #    log.debug("null pointer in ip ! retrying...")
+        return ans
 
     @instruction_pointer.setter
     def instruction_pointer(self, value):
@@ -555,6 +671,7 @@ class Debugger:
             self.rip = value
 
     #Generic convertion to bytes for addresses
+    # pwntools has pack() ! 
     def pbits(self, value):
         if self.elf.bits == 32:
             return p32(value) 
@@ -785,3 +902,6 @@ class FakeELF:
     def __init__(self, bits):
         self.bits = bits
         self.bytes = self.bits // 8
+        self.path = None
+        self.address = 0
+        #statically_linked ? always True ? # Needed to call malloc [02/03/23]
