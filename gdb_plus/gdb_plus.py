@@ -19,7 +19,9 @@ class Debugger:
         self.pid = None # Taken out to be able to send kill() even if we don't use a process
         self.inferior = None #inferior to easily access memory
         self._free_bss = None #Used to allocate data in the bss if you can't use the heap
-        self.breakpoints = {} #Save all non temporary breakpoints for easy access
+        self.breakpoints = {} #Save all non temporary breakpoints for easy access # The fact that they can't be temporary is used by the callback [21/03/23]
+        # How do you remove them with temporary breakpoints ? [19/03/23]
+        self.real_callbacks = {} # Functions to execute AFTER the breakpoint. Should be more powerfull [03/03/23]
         self.debugging = None #I want to keep the exploits as clean as possible, so I'm gonna try to handle everything so I can still inherit the class when attacking in remote without having to worry about calls to breakpoint or execute
         #gdb.debug() was rulled out previously due to two bugs with older version of gdbserver in ubuntu 20.04
         #1) gdbserver crashes trying to locate the canary (at least with 32 bit binaries) -> patched in gdbserver 11.0.50 (working in ubuntu 22.04)
@@ -74,6 +76,40 @@ class Debugger:
         if self.debugging and self.p:
             self.elf.address = self.get_base_elf()
 
+            # I create a new one because I can't disconnect their callback
+            self.gdb.myStopped = Event()
+
+            # If the real_callback has to wait this can not work...
+            # Yes it can work, but how can I handle it in such a way that my script doesn't resolve the wait instead of the callback ? [19/03/23]
+            # Currently you can't wait in your script and in the callback at the same time. Use a custom event if you really have to. [19/03/23]
+            # Other problem, dbg.c() doesn't always work in the handler. But Thread(target=lambda: dbg.c()).start() does... [20/03/23]
+            def stop_handler(event):
+                if (ip := self.parse_for_breakpoint(self.instruction_pointer)) in self.real_callbacks:
+                    log.debug(f"trying real_callback for {hex(self.instruction_pointer)}")
+                    # TODO, it may be interesting to have the option to put an array of breakpoints for recursive functions [21/03/23]
+                    # something like
+                    #if type(self.real_callbacks[self.instruction_pointer]) is list:
+                    #   callback =  self.real_callbacks[ip].pop()
+                    #   if len(self.real_callbacks[ip]) == 0:
+                    #       del self.real_callbacks[ip]
+                    #else:
+                    callback = self.real_callbacks[ip]
+                    # If the breakpoint was temporary remove the callback. But keep this code in the if not list
+                    if ip not in self.breakpoints:
+                        log.debug("deleting callback because breakpoint was temporary")
+                        del self.real_callbacks[ip]
+                    espect_to_wait = callback(self)
+                    if espect_to_wait is None or espect_to_wait:
+                        self.set_stop()
+                    else:
+                        Thread(target=lambda: self.c()).start()
+                else:
+                    # This is still not perfect. If the callback does self.next() but the script is waiting what will happen ?
+                    # The script will catch the event before :< [19/03/23]
+                    log.debug(f"no real_callback on {hex(self.instruction_pointer)}")
+                    self.set_stop() # Altready handled by pwntools ? [03/03/23] YES ! create a new event instead [19/03/23]
+
+            self.events.stop.connect(stop_handler)
     # Use as : dbg = Debugger("file").remote(IP, PORT)
     def remote(self, host: str, port: int):
         if args.REMOTE:
@@ -102,6 +138,7 @@ class Debugger:
 
     #I don't like continue_and_wait, continue_nowait. I'm not even sure I want to leave the option to have a wait in the fuction. Just do self.c() self.wait() and it will be easier to debug your exploit
     def c(self, wait=False):
+        self.clear_stop("continue")
         self.execute("continue")
         if wait:
             self.wait()
@@ -113,9 +150,23 @@ class Debugger:
     # Apparently now you have to for any breakpoint...
     # I have to introduce back the timeouts. I just modify the implementation of gdb.wait to do so [26/02/23]
     # TODO test if the old implementation can detect that the child has died [26/02/23]
+    # Warning, risky bug: self.gdb.myStopped doesn't get cleared if you do `dbg.c(); sleep(1); dbg.finish()` and the next wait will return immediatly [03/03/23]
     def wait(self, timeout=None):
-        self.gdb.stopped.wait(timeout=timeout)
-        self.gdb.stopped.clear()
+        self.gdb.myStopped.wait(timeout=timeout)
+        self.clear_stop("wait")
+
+    def clear_stop(self, name="someone", /):
+        if self.gdb.myStopped.is_set():
+            log.debug(f"stopped has been cleared by {name}")
+            self.gdb.myStopped.clear()
+        while self.gdb.myStopped.is_set():
+            log.debug("something isn't right with stopped")
+            self.gdb.myStopped.clear()
+
+    def set_stop(self):
+        log.debug(f"setting stopped in {hex(self.instruction_pointer)}")
+        self.gdb.myStopped.set()
+
 
     #temporarely interrupt the execution of our process to get back control of gdb (equivalent of a manual ctrl+C)
     #don't worry about the "kill"
@@ -146,6 +197,7 @@ class Debugger:
     manual = interrupt
 
     def step(self, repeat:int=1):
+        self.clear_stop("step")
         for _ in range(repeat):
             self.execute("si")
             self.wait()
@@ -177,6 +229,7 @@ class Debugger:
 
     # May not want to wait if you are going over a functions that need user interaction
     def next(self, wait:bool=True, repeat:int=1):
+        self.clear_stop("next")
         for _ in range(repeat):
             self.execute("ni")
             if wait:
@@ -186,10 +239,21 @@ class Debugger:
         self.execute("finish")
         if wait:
             self.wait()
+    def parse_for_breakpoint(self, address: [int, str]) -> str:
+        """
+        return the corresponding key used to save breakpoints for the given address
+        """
+        if type(address) is int:
+            if address < 0x010000:
+                address += self.base_elf
+            address = f"*{hex(address)}"
+
+        return address
+
         
     #May want to put breakpoints relative to the libc too?
     # Sembra avere bisogno di interrompere il processo per TUTTI i breakpoint se lancio con gdb.debug invece che attach
-    def b(self, address: [int, str], callback=None, temporary=False):
+    def b(self, address: [int, str], callback=None, real_callback=None, temporary=False):
         """
         Set a breakpoint in your process.
 
@@ -211,40 +275,65 @@ class Debugger:
             Return a pointer to the breakpoint set
             I don't see when you would need it, but here it is
         """
+
+        # Move from callback to real_callback
+        # real_callbacks have problems, but with features not even available with simple callbacks. Furthermore now you can use return False with temporary breakpoints
+        if callback is not None:
+            real_callback = callback
+            callback = None
+
         if not self.debugging:
             return
 
-        if type(address) is int:
-            if address < 0x010000:
-                address += self.base_elf
-            address = f"*{hex(address)}"
-        if callback is None:
-            res = self.gdb.Breakpoint(address, temporary=temporary)
-        else:
-            # I don't know yet how to handle the conn if I don't go through self.gdb.Breakpoint so I create the class here :(
-            log.warn_once("if your callbacks crash you have to scroll a bit to find the error messages hidden in the gdb terminal")
-            # For some reason this part require the process to be interrupted. I usualy do it from my exploit, but don't want to force everyone to do so
-            #self.interrupt(wait=False) # Interrupt if running, but don't wait forever because I don't know if it is really running
-            class MyBreakpoint(self.gdb.Breakpoint):
-                def __init__(_self, address, callback, temporary=False):
-                    super().__init__(address, temporary=temporary)
-                    _self.callback = callback
-                # WARNING IF A TEMPORARY BREAKPOINT DOESN'T STOP IT WON'T COUNT AS HIT AND STAY ACTIVE. May cause problems with the callback if you pass multiple times [26/02/23]
-                # I should find an alternative to continue the execution if callback returns False, but I don't know how to do it yet [26/02/23]
-                def stop(_self, *args):
-                    _break = _self.callback(self) 
-                    if _break is None:
-                        return True
-                    return _break
-            res = MyBreakpoint(address, callback, temporary)
-            #self.c() # This is a problem... I may break someone's exploit if the process was stopped by the user
+
+        if type(address) is not int and real_callback is not None:
+                log.critical('can only use real callbacks with a pointer')
+
+        address = self.parse_for_breakpoint(address)
+
+        if real_callback is not None:
+            log.debug("setting callback")
+            self.real_callbacks[address] = real_callback
+
+        log.debug(f"putting breakpoint in {address}")
+
+        res = self.gdb.Breakpoint(address, temporary=temporary)
+        
+        # Not needed now that I use real_callbacks
+        #else:
+        #    # I don't know yet how to handle the conn if I don't go through self.gdb.Breakpoint so I create the class here :(
+        #    log.warn_once("if your callbacks crash you may not notice it and you have to scroll a bit to find the error messages hidden in the gdb terminal")
+        #    # For some reason this part require the process to be interrupted. I usualy do it from my exploit, but don't want to force everyone to do so
+        #    #self.interrupt(wait=False) # Interrupt if running, but don't wait forever because I don't know if it is really running
+        #    class MyBreakpoint(self.gdb.Breakpoint):
+        #        def __init__(_self, address, callback, temporary=False):
+        #            super().__init__(address, temporary=temporary)
+        #            _self.callback = callback
+        #        # WARNING IF A TEMPORARY BREAKPOINT DOESN'T STOP IT WON'T COUNT AS HIT AND STAY ACTIVE. May cause problems with the callback if you pass multiple times [26/02/23]
+        #        # I should find an alternative to continue the execution if callback returns False, but I don't know how to do it yet [26/02/23]
+        #        def stop(_self, *args):
+        #            _break = _self.callback(self) 
+        #            if _break is None:
+        #                return True
+        #            return _break
+        #    res = MyBreakpoint(address, callback, temporary)
+        #    #self.c() # This is a problem... I may break someone's exploit if the process was stopped by the user
         if not temporary:
-            self.breakpoints[address[1:] if address[0] == "*" else address] = res.server_breakpoint #[1:] to remove the '*' from the key if it's an adress, but leave intect if it's a function name
+            self.breakpoints[address] = res.server_breakpoint #[1:] to remove the '*' from the key if it's an adress, but leave intect if it's a function name
         return res
         
     breakpoint = b
 
     def push(self, value):
+    def delete_breakpoint(self, address: [int, str]) -> bool:
+        address = parse_for_breakpoint(address)
+        if address in self.breakpoints:
+            self.breakpoints[address].enabled = False
+            del self.breakpoints[address]
+
+        if address in self.real_callbacks:
+            del self.real_callbacks[address]
+    
         self.stack_pointer -= self.elf.bytes
         self.write(self.stack_pointer, self.pbits(value))
 
@@ -615,15 +704,16 @@ class Debugger:
             def callback(dbg):
                 address = my_address.get()
                 my_address.put(dbg.instruction_pointer)
-                def delete_callback(dbg):
-                    handler = my_address.get()
-                    dbg.breakpoints[hex(handler)].delete()
-                    return True
-                dbg.b(address, callback=delete_callback, temporary=True)
+                #def delete_callback(dbg):
+                #    handler = my_address.get()
+                #    dbg.breakpoints[hex(handler)].delete()
+                #    return True
+                dbg.b(address, temporary=True)
                 # Can I delete this breakpoint ? Nope so let's do it in another callback... [26/02/23]
                 #dbg.breakpoints[hex(dbg.instruction_pointer)].delete()
                 return False  
-            self.b(handler, callback=callback)
+            # Now thanks to real callbacks I can return to temprary breakpoints [20/03/23]
+            self.b(handler, callback=callback, temporary=True)
         
         if type(n) is str:
             n = n.upper()
