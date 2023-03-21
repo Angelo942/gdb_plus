@@ -679,7 +679,59 @@ class Debugger:
             return p64(value)
 
     ########################## REV UTILS ##########################
-    def call(self, function_address: int, args: list, end_pointer=None, heap=True, ret_bucket=None):
+    # TODO just a jump with breakpoint
+    def jump(self, address, stop = True):   
+        self.clear_stop("jump")
+        if stop:
+            log.debug("breaking destination")
+            self.b(address, temporary=True)
+            
+        if type(address) is int:
+            self.execute(f"jump *{hex(address)}")
+        elif type(address) is str:
+            self.execute(f"jump {address}")
+        else:
+            log.critical(f"What is this function {address} ?")
+        
+        if stop:
+            log.debug("Waiting for jump to conluse")
+            self.wait()
+
+    def ret(self, value: int = None, *, stop = False):
+        # Supose to be at the first instruction of a function
+        ret_address = self.pop()
+        if value is not None:
+            self.return_value = value
+        self.jump(ret_address, stop)
+
+    # For some reasons we get int3 some times
+    def gdb_call(self, function: str, args: list, *, cast = "long"):
+        if not self.elf.statically_linked:
+            try:
+                ans = self.execute(f"call ({cast}) {function} ({', '.join([hex(arg) for arg in args])})")
+                if cast == "void":
+                    return None
+                ans = ans.split()[-1]
+                # GEF prints logs as base 16, but pwndbg as base 10
+                return int(ans, 16) if "0x" in ans else int(ans)
+            except Exception: #gdb.error: The program being debugged was signaled while in a function called from GDB.
+                log.debug(f"gdb got int3 executing {function}. Retrying...")
+                self.finish()
+                # For some reason I just get 0x0
+                #return self.return_value()
+                return self.gdb_call(function, args) # Should work this time
+        
+        elif function in self.symbols:
+            return self.call(self.symbols[function], args)
+            
+        else:
+            raise Ecxeption(f"I don't know how to handle this function! {function} not in symbols")
+
+    def call(self, function_address: int, args: list, *, end_pointer=None, heap=True, ret_bucket=None, wait = True):
+
+        self.clear_stop("call")
+
+
         """
         Call any function in the binary with the parameters you want
 
@@ -737,8 +789,8 @@ class Debugger:
             for pointer, n in to_free[::-1]: #I do it backward to have a coerent behaviour with heap=False, but I still don't really know if I sould implement a free in that case
                 self.dealloc(pointer, len=n, heap=heap)
 
-        log.debug("breaking call")
-        self.b(function_address, temporary=True)
+        #log.debug("breaking call")
+        #self.b(function_address, temporary=True)
 
         if self.elf.bits == 64:
             calling_convention = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
@@ -748,46 +800,75 @@ class Debugger:
                 log.debug("%s setted to %s", register, args[0])
                 setattr(self, register, args.pop(0))
             
-        args.append(self.instruction_pointer)
+        #args.append(self.instruction_pointer)
         #Should I offset the stack pointer to preserve the stack frame ? No, right ?
         for arg in args:
             self.push(arg)
         
-        if type(function_address) is int:
-            self.execute(f"jump *{hex(function_address)}")
-        elif type(function_address) is str:
-            self.execute(f"jump {function_address}")
-        else:
-            log.critical(f"What is this function {function_address} ?")
-        self.wait()
+        self.push(self.instruction_pointer)
+        self.jump(function_address)
+
+        #if type(function_address) is int:
+        #    self.execute(f"jump *{hex(function_address)}")
+        #elif type(function_address) is str:
+        #    self.execute(f"jump {function_address}")
+        #else:
+        #    log.critical(f"What is this function {function_address} ?")
+        #log.debug("Waiting for jump to conluse")
+        #self.wait() 
+        
         log.debug("jumped to %s\nWaiting to finish", hex(self.instruction_pointer))
         # Vorrei poter gestire il fatto che l'utente potrebbe voler mettere dei breakpoints nel programma
         # Sarebbe interessante un breakpoint sull'istruzione di ritorno con callback che rimette a posto la memoria
-        if end_pointer is None:
-            # Wait why don't I just put a breakpoint on my address before calling the function and then wait ?
-            self.finish() # Finish can only work if you have a leave ret. Set the last address otherwise
-            log.debug("call finished")
-            res = self.return_pointer
-            restore_memory()
+        # I also want to just be able to send the code in a shellcode and let it sleep without blocking
+        if wait:
+            if end_pointer is None:
+                # Wait why don't I just put a breakpoint on my address before calling the function and then wait ?
+                self.finish() # Finish can only work if you have a leave ret. Set the last address otherwise
+                log.debug("call finished")
+                res = self.return_value
+                restore_memory()
+            else:
+                log.warn_once("You chose to use 'end_pointer'. Only do it if you need breakpoints in the function and to restore memory when exiting!")
+                log.warn_once("You will have to handle manualy the execution of your program from gdb untill you reach the pointer selected (Which should be a pointer to the ret instruction...)")
+                log.debug("breaking return in %s", hex(end_pointer))
+                from queue import Queue
+                return_value = Queue()
+                def callback(dbg):
+                    return_value.put(dbg.return_value)
+                    return True
+                self.b(end_pointer, callback=callback, temporary=True)
+                # Non mi convince come gestisco la wait [03/03/23]
+                self.c()
+                # TODO TEST IF THIS BLOCKS EVERYTHING (SPOILER PROBABLY)
+                # Why don't I use return_value.get() to wait since it's blocking ? [02/03/23]
+                while(return_value.empty()):
+                    self.wait()
+                self.step()
+                res = return_value.get()
+            if ret_bucket is not None:
+                ret_bucket.put(res)
+            return res
         else:
-            log.warn_once("You chose to use 'end_pointer'. Only do it if you need breakpoints in the function and to restore memory when exiting!")
-            log.warn_once("You will have to handle manualy the execution of your program from gdb untill you reach the pointer selected (Which should be a pointer to the ret instruction...)")
-            log.debug("breaking return in %s", hex(end_pointer))
-            from queue import Queue
-            return_value = Queue()
-            def callback(dbg):
-                return_value.put(dbg.return_pointer)
-                return True
-            self.b(end_pointer, callback=callback, temporary=True)
+            log.debug("I'm not waiting :)")
             self.c()
-            # TODO TEST IF THIS BLOCKS EVERYTHING (SPOILER PROBABLY)
-            while(return_value.empty()):
-                self.wait()
-            self.step()
-            res = return_value.get()
-        if ret_bucket is not None:
-            ret_bucket.put(res)
-        return res
+            return None
+
+    # TESTALA [03/03/23]
+    # Return the nth argument of a function
+    def args(self, index):
+        self.restore_arch()
+        if context.bits == 64:
+            if index < 6:
+                register = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"][index]
+                return getattr(self, register)
+            else:
+                index -= 6
+        else:
+            index += 1 # stack pointer has the return address
+            pointer = self.stack_pointer + index * context.bytes
+            return self.read(pointer, context.bytes)
+
 
     # Can be used with signal code or name. Case insensitive.
     def signal(self, n: [int, str], /, *, handler : [int, str] = None):
@@ -839,6 +920,52 @@ class Debugger:
         #del my_address # Prevent callback to access it again at a future execution [26/02/23]
         #del dbg.my_address # I don't want to delete it in case I hit a different breakpoint before the callback is called [26/02/23]
     ########################## GEF shortcuts ##########################
+
+    def syscall(self, code: int, args: list):
+        log.debug(f"syscall {code}: {args}")
+        self.rax = code
+        # Can't I use search(syscall ; ret) ? Taking care of int80 vs syscall [04/03/23]
+        return self.call(self.symbols["_syscall"], args)
+
+    def inject_shellcode(self, shellcode, *, address = None, skip_mprotect = False, inferior = None):
+
+        if inferior == None:
+            inferior = self._inferior
+        
+        old_inferior = self.switch_inferior(inferior)
+
+        if address is None:
+            log.debug("allocating memory for shellcode")
+            address = self.alloc(len(shellcode))
+
+        self.write(address, shellcode)
+        if skip_mprotect:
+            return address
+        # How many pages does your shellcode takes
+        size = 0x1000 * ((1 + (address + len(shellcode)) // 0x1000) - address // 0x1000)
+        #if not self.elf.statically_linked:
+        #    ans = self.execute(f"call (long) mprotect({hex(address)}, {hex(size)}, 7)")
+        #else:
+        if "mprotect" in self.symbols:
+            # I can use gdb call, but there are problems if the symbols are "fake" so put a check elf.staticaly_linked if you want to do it [04/03/23]
+            ans = self.call(self.symbols["mprotect"], [address & 0xfffffffffffff000, size, constants.PROT_EXEC | constants.PROT_READ | constants.PROT_WRITE])
+        # I don't want the libc syscall, but a simple \x0f\x05\xc3
+        elif "_syscall" in self.symbols:
+            # Context.arch handles constants.SYS ! I love pwntools <3
+            log.debug("calling sys_mprotect. Should be 0xa on 64bit arch")
+            log .debug(f"{context.arch=}")
+            self.restore_arch()
+            log .debug(f"{context.arch=}")
+            ans = self.syscall(constants.SYS_mprotect.real, [address & 0xfffffffffffff000, size, constants.PROT_EXEC | constants.PROT_READ | constants.PROT_WRITE])
+        else:
+            log.critical("please, I at least need an address to a syscall ; ret gadget in symbols[\"_syscall\"]")
+            
+        # parse ans == 0 ?
+        
+        self.switch_inferior(old_inferior)
+
+        return address
+
     def context(self):
         """
         print memory infos as in gdb
