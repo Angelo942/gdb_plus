@@ -12,7 +12,7 @@ from queue import Queue
 
 class Debugger:
     # If possible patch the rpath (spwn and pwninit do it automaticaly) instead of using env to load the correct libc. This will let you get a shell not having problems trying to preload bash too
-    def __init__(self, target: [int, process, str], env={}, aslr:bool=True, script:str="", from_start:bool=True, binary:str=None):
+    def __init__(self, target: [int, process, str, list], env={}, aslr:bool=True, script:str="", from_start:bool=True, binary:str=None, debug_from: int=None, timeout: int=10):
         log.debug(f"debugging {target if binary is None else binary} using arch: {context.arch} [{context.bits}bits]")
 
         self._capstone = None #To decompile assembly for next_inst
@@ -84,10 +84,32 @@ class Debugger:
             self.pid = self.p.pid
             self.elf = self.p.elf
             # We may have problems relying on context... Stay with elf [03/03/23]
+        
+        # pwntools symbols duplicate every entry in the plt and the got. This breaks my version of symbols because they have the same name as the libc [25/03/23]
+        # This may break not stripped staticaly linked binaries, just wait for the libc to be loaded and those symbols will be overshadowed [25/03/23]
+        #for symbol_name in self.elf.symbols:
+        #    if symbol_name.startswith("plt.") or symbol_name.startswith("got.") and (name := symbol_name[4:]) in self.elf.symbols:
+        #        del self.elf.symbols[name]
+
+        self.restore_arch()
+        
         if self.debugging:
             self.elf.address = self.get_base_elf()
 
+
+            # Start debugging from a specific address. Wait timeout seconds for the program to reach that address. Is blocking so you may need to use Thread() in some cases
+            if debug_from is not None:  
+                backup = self.inject_sleep(debug_from)
+                self.detach()
+                sleep(timeout)
+                _, self.gdb = gdb.attach(self.p.pid, gdbscript=script, api=True) # P is gdbserver...
+                self.write(debug_from, backup)
+                #self.jump(debug_from) # Can't wait before gdb.myStopped is created and can't create it before because I will overwrite gdb
+                self.b(debug_from, temporary=True)
+                self.jump(debug_from, stop=False)
+
             # I create a new one because I can't disconnect their callback
+            # I could do like with libdebug a custom event with priority_wait to let the user put a continue and wait even if callbacks have wait inside [04/04/23]
             self.gdb.myStopped = Event()
 
             # If the real_callback has to wait this can not work...
@@ -140,7 +162,9 @@ class Debugger:
             self.gdb.master_wants_you_to_continue = Event()
             self.gdb.slave_has_stopped = Event()
 
-        self.restore_arch()
+            # This is the wait I should have done after the jump. I can't bacause gdb changes so gdb.myStopped wouldn't exist anymore for the wait [02/04/23]
+            if debug_from is not None:
+                self.wait()
 
     # Because pwntools isn't perfect
     def restore_arch(self):
@@ -1475,6 +1499,14 @@ class Debugger:
         self.switch_inferior(old_inferior)
 
         return address
+
+    def inject_sleep(self, address):
+        #test:
+        #jmp test
+        shellcode = b"\xeb\xfe"
+        backup = self.read(address, len(shellcode))
+        self.write(address, shellcode)
+        return backup
 
     ##########################  GEF shortcuts   #########################
     def context(self):
