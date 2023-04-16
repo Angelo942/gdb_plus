@@ -14,8 +14,13 @@ GDB+ is a wrapper around gdb powered by pwntools. The goal is automate your inte
 
 ## Installation
 
+stable
 ```
 pip3 install gdb_plus
+```
+or dev branch
+```
+pip3 install git+https://github.com/Angelo942/gdb_plus.git@dev
 ```
 
 **Warning for pwndbg users:**  
@@ -197,3 +202,11 @@ Another option would be to pass a pointer to the return instruction, it will blo
 
 ## Alternatives
 If something can be done with gdb it should be easily programable with gdb_plus, but you may find it slow as hell for some uses. This tool is meant to help debugging during challenges, if you only want to automate exploit developement you may prefere something like [libdebug](https://github.com/JinBlack/libdebug) which doesn't has to communicate with gdb for each command.
+
+
+# TODO
+
+* Improve callbacks to run in parallel and allow nested calls to wait
+* Identify actions performed manually in gdb
+* Handle fork and ptrace from syscall instead of libc
+* Add option to use libdebug instead of gdb
