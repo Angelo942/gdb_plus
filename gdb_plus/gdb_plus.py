@@ -5,7 +5,7 @@ from functools import partial
 from capstone import Cs, CS_ARCH_X86
 from threading import Thread, Event
 from queue import Queue
-from gdb_plus.utils import Arguments, user_regs_struct, FakeELF, context
+from gdb_plus.utils import Arguments, user_regs_struct, FakeELF, context, MyEvent
 
 RET = b"\xc3"
 
@@ -24,7 +24,7 @@ class Debugger:
         self._base_elf = None
         self._canary = None
         self._args = None
-        self.closed = False
+        self.closed = Event()
         self.pid = None # Taken out to be able to send kill() even if we don't use a process
         #self.inferior = None #inferior to easily access memory # Obsolete [03/03/23]
         self._inferior = 1 # Used to switch between inferiors [03/03/23]
@@ -41,7 +41,9 @@ class Debugger:
         #gdb.debug() was rulled out previously due to two bugs with older version of gdbserver in ubuntu 20.04
         #1) gdbserver crashes trying to locate the canary (at least with 32 bit binaries) -> patched in gdbserver 11.0.50 (working in ubuntu 22.04)
         #2) LD_PRELOAD uses the library for gdbserver and not the process -> solved in ubuntu 22.04 too
-        
+        self.gdbscript = script # For non blocking debug_from
+        self.debug_from_done = Event()
+
         if args.REMOTE or context.noptrace:
             self.debugging = False
         else:
@@ -120,95 +122,142 @@ class Debugger:
         if self.debugging:
             self.elf.address = self.get_base_elf()
 
-
             # Start debugging from a specific address. Wait timeout seconds for the program to reach that address. Is blocking so you may need to use Thread() in some cases
             if debug_from is not None:
+                backup = self.inject_sleep(debug_from)
                 while True:  
-                    backup = self.inject_sleep(debug_from)
                     self.detach()
                     sleep(timeout)
                     # what happens if there is a continue in script ? It should break the script, but usually it's the last instruction so who cares ? Just warn them in the docs [06/04/23]
                     _, self.gdb = gdb.attach(self.p.pid, gdbscript=script, api=True) # P is gdbserver...
                     if self.instruction_pointer - debug_from in range(0, len(backup)): # I'm in the sleep shellcode
                         self.write(debug_from, backup)
-                        #self.jump(debug_from) # Can't wait before gdb.myStopped is created and can't create it before because I will overwrite gdb
-                        self.b(debug_from, temporary=True)
-                        # return to the beggining of the shellcode
-                        self.jump(debug_from, stop=False)
+                        # To allow call to wait inside the jump
+                        self.gdb.myStopped = self.gdb.stopped
+                        self.gdb.myStopped.priority = 0
+                        # should maybe rename priority_wait into wait and avoid this line [17/04/23]
+                        self.gdb.myStopped.priority_wait = lambda: self.gdb.myStopped.wait()
+                        self.jump(debug_from)
                         break
                     else:
-                        log.warn(f"{timeout}s timeout isn't enought to reach the code... Retrying with bigger timeout...")
-                        timeout += 1
+                        log.warn(f"{timeout}s timeout isn't enought to reach the code... Retrying...")
 
-            # I create a new one because I can't disconnect their callback
-            # I could do like with libdebug a custom event with priority_wait to let the user put a continue and wait even if callbacks have wait inside [04/04/23]
-            self.gdb.myStopped = Event()
+            self._setup_gdb()
 
+    def _setup_gdb(self):
+        # I create a new one because I can't disconnect their callback
+        # I could do like with libdebug a custom event with priority_wait to let the user put a continue and wait even if callbacks have wait inside [04/04/23]
+        self.gdb.myStopped = MyEvent()
 
-            # It is possible to have step() in a callback and execute the following callback before finishing the first one, so why so many problems with finish ? [25/03/23]
-            #In [12]: [DEBUG] trying real_callback for 0x555555557e93
-            #[DEBUG] stopped has been cleared by step
-            #[DEBUG] trying real_callback for 0x555555557e95
-            #[DEBUG] setting stopped in 0x555555557e95
-            #[DEBUG] stopped has been cleared by wait
+        # Now I can wait for an exit [03/03/23]
+        def exit_handler(event):
+            log.debug("setting stop because process exited")
+            self.gdb.myStopped.set()
+            self.closed.set()
 
+        # Events are executed in the order they are set waiting for the previous one to start, but still blocking wait() [04/03/23]
+        # Unfortunately you can't use it to run gdb+ commands... Is it just because they depend on wait() ? [04/03/23]
+        # I can use Thread.start() in the handler. Just be carefull if the script wants to do other things after waiting [04/03/23]
+        # Non è che vengono eseguiti sia dal parent che dal child, vero... Non dovrebbe, spero sia per quando la sessione gdb che si ferma, non i processi [04/03/23]
+        # Tested and we can even put dbg.c() in the callbacks now <3 [19/03/23]
+        self.gdb.events.stop.connect(lambda event: Thread(target=self._stop_handler).start())
+        self.gdb.events.exited.connect(exit_handler)
 
-            # If the real_callback has to wait this can not work...
-            # Yes it can work, but how can I handle it in such a way that my script doesn't resolve the wait instead of the callback ? [19/03/23]
-            # Currently you can't wait in your script and in the callback at the same time. Use a custom event if you really have to. [19/03/23]
-            # Other problem, dbg.c() doesn't always work in the handler. But Thread(target=lambda: dbg.c()).start() does... [20/03/23]
-            def stop_handler(event):
-                if (ip := self.parse_for_breakpoint(self.instruction_pointer)) in self.real_callbacks:
-                    log.debug(f"trying real_callback for {hex(self.instruction_pointer)}")
-                    # TODO, it may be interesting to have the option to put an array of breakpoints for recursive functions [21/03/23]
-                    # something like
-                    #if type(self.real_callbacks[self.instruction_pointer]) is list:
-                    #   callback =  self.real_callbacks[ip].pop()
-                    #   if len(self.real_callbacks[ip]) == 0:
-                    #       del self.real_callbacks[ip]
-                    #else:
-                    callback = self.real_callbacks[ip]
-                    # If the breakpoint was temporary remove the callback. But keep this code in the if not list
-                    if ip not in self.breakpoints:
-                        log.debug("deleting callback because breakpoint was temporary")
-                        del self.real_callbacks[ip]
-                    expect_to_wait = callback(self)
-                    # This should let us keep control of the debugger even if we use gdb manually while emulating ptrace
-                    if expect_to_wait is None or expect_to_wait or self._stop_reason == "SINGLE STEP": 
-                        self._set_stop()
+        # Manually set by split_child
+        self.gdb.split = Queue()
+
+        # Ptrace_cont
+        self.gdb.master_wants_you_to_continue = Event()
+        self.gdb.slave_has_stopped = Event()
+
+    def debug_from(self, location: [int, str], *, event=None, timeout=0.5):
+        """
+        Alternative debug_from which isn't blocking
+
+        event: optional event to signal that you have finished the actions you needed to perform. (If you need debug_from to be non blocking I supose you have to interact with the process before attaching to it)
+        """
+        address = self.parse_address(location)
+
+        if self.debugging:
+            def action():
+                backup = self.inject_sleep(address)
+                while True:  
+                    self.detach()
+                    if event is not None:
+                        event.wait()
+                        log.debug("user finished interaction. Proceeding with debug_from")
+                    sleep(timeout)
+                    # Maybe the process is behing traced and I can't attach to it yet
+                    try:
+                        # what happens if there is a continue in script ? It should break the script, but usually it's the last instruction so who cares ? Just warn them in the docs [06/04/23]
+                        _, self.gdb = gdb.attach(self.p.pid, gdbscript=self.gdbscript, api=True) # P is gdbserver...
+                    except Exception as e:
+                        log.debug(f"can't attach in debug_from because of {e}... Retrying...")
+                        continue
+                    self._setup_gdb()
+                    if self.instruction_pointer - address in range(0, len(backup)): # I'm in the sleep shellcode
+                        self.write(address, backup)
+                        self.jump(address)
+                        self.debug_from_done.set()
+                        break
                     else:
-                        Thread(target=lambda: self.c()).start()
-                else:
-                    # This is still not perfect. If the callback does self.next() but the script is waiting what will happen ?
-                    # The script will catch the event before :< [19/03/23]
-                    log.debug(f"no real_callback on {hex(self.instruction_pointer)}")
-                    self._set_stop() # Altready handled by pwntools ? [03/03/23] YES ! create a new event instead [19/03/23]
+                        log.warn(f"{timeout}s timeout isn't enought to reach the code... Retrying...")
 
-            # Now I can wait for an exit [03/03/23]
-            def exit_handler(event):
-                log.debug("setting stop because process exited")
-                self.gdb.myStopped.set()
-                self.closed = True
+            Thread(target=action).start()
+        else:
+            #log.warn_once(FEATURE_SKIPPED)
+            self.debug_from_done.set()
+        return self
 
-            # Events are executed in the order they are set waiting for the previous one to start, but still blocking wait() [04/03/23]
-            # Unfortunately you can't use it to run gdb+ commands... Is it just because they depend on wait() ? [04/03/23]
-            # I can use Thread.start() in the handler. Just be carefull if the script wants to do other things after waiting [04/03/23]
-            # Non è che vengono eseguiti sia dal parent che dal child, vero... Non dovrebbe, spero sia per quando la sessione gdb che si ferma, non i processi [04/03/23]
-            # Tested and we can even put dbg.c() in the callbacks now <3 [19/03/23]
-            self.gdb.events.stop.connect(stop_handler)
-            self.gdb.events.exited.connect(exit_handler)
+    def _stop_handler(self):
+        #self._set_secret_stop()
+        if (ip := self.parse_address(self.instruction_pointer)) in self.real_callbacks:
+            log.debug(f"trying real_callback for {hex(self.instruction_pointer)}")
+            # TODO, it may be interesting to have the option to put an array of breakpoints for recursive functions [21/03/23]
+            # something like
+            #if type(self.real_callbacks[self.instruction_pointer]) is list:
+            #   callback =  self.real_callbacks[ip].pop()
+            #   if len(self.real_callbacks[ip]) == 0:
+            #       del self.real_callbacks[ip]
+            #else:
+            callback = self.real_callbacks[ip]
+            # If the breakpoint was temporary remove the callback. But keep this code in the if not list
+            if ip not in self.breakpoints:
+                log.debug("deleting callback because breakpoint was temporary")
+                del self.real_callbacks[ip]
 
-            # Manually set by split_child
-            self.gdb.split = Queue()
+            # Can not use Thread due to problems with RPyC that make impossible comunicating with the process [14/04/23]
+            #expect_to_wait_pointer = []
+            #
+            #def wrapper():
+            #    expect_to_wait_pointer.append(callback(self))
+            #
+            #thread = Thread(target=wrapper)
+            #thread.start()
+            #thread.join()
+            #expect_to_wait, = expect_to_wait_pointer
+            # This is already running in a separate thread, so no need to use a second one, right ?
+            expect_to_wait = callback(self)
 
-            # Ptrace_cont
-            self.gdb.master_wants_you_to_continue = Event()
-            self.gdb.slave_has_stopped = Event()
-
-            # This is the wait I should have done after the jump. I can't bacause gdb changes so gdb.myStopped wouldn't exist anymore for the wait [02/04/23]
-            if debug_from is not None:
-                # Attento quando userai MyEvent che no sarà settata la priorità
-                self.wait()
+            # This should let us keep control of the debugger even if we use gdb manually while emulating ptrace
+            if expect_to_wait is None or expect_to_wait or self._stop_reason == "SINGLE STEP": 
+                self._set_stop()
+                # No Idea what I had in mind [17/04/23]
+                #if self.running:
+                #    log.warn("I should be at a stop, but callback couldn't wait")
+                #else:
+                #    self._set_stop()
+            else:
+                # Can we somehow use self.c() instead... The problem is the priority... [17/04/23]
+                # I still don't know which one I hate the most lol: accessing priority to reset the +1 in c() or call directly "execute" ? [17/04/23]
+                self.execute("c")
+                #self.priority -= 1
+                #self.c()
+        else:
+            # This is still not perfect. If the callback does self.next() but the script is waiting what will happen ?
+            # The script will catch the event before :< [19/03/23]
+            log.debug(f"no real_callback on {hex(self.instruction_pointer)}")
+            self._set_stop() # Altready handled by pwntools ? [03/03/23] YES ! create a new event instead [19/03/23]
 
     # Because pwntools isn't perfect
     def restore_arch(self):
@@ -265,19 +314,25 @@ class Debugger:
     ########################## CONTROL FLOW ##########################
 
     def c(self, wait=False, force_step=False, until = None):
-        self.clear_stop("continue")
+        #self._clear_stop("continue")
         if force_step:
             self.broken_step()
+        # Remember not to put the breakpoint yourself
         if until is not None:
-            address = self.parse_for_breakpoint(until)
+            address = self.parse_address(until)
             self.b(address, temporary=True)
             wait = True
+        self.priority += 1
+        self._clear_stop("continue")
         self.execute("continue")
         if wait:
-            self.wait()
+            self.priority_wait()
+        #else:
+        #    log.warn_once("remember about priority")
         if until and self.instruction_pointer != address:
             log.critical(f"debugger stopped at {hex(self.instruction_pointer)} for '{self._stop_reason}' instead of {hex(address)}")
             raise Ecxeption()
+    
     cont = c
 
     # You have to remember you can not send SOME commands to gdb while the process is running
@@ -286,21 +341,53 @@ class Debugger:
     # I have to introduce back the timeouts. I just modify the implementation of gdb.wait to do so [26/02/23]
     # TODO test if the old implementation can detect that the child has died [26/02/23]
     # Warning, risky bug: self.gdb.myStopped doesn't get cleared if you do `dbg.c(); sleep(1); dbg.finish()` and the next wait will return immediatly [03/03/23]
-    def wait(self, timeout=None):
-        self.gdb.myStopped.wait(timeout=timeout)
-        self.clear_stop("wait")
+    # I still want to allow a case where the user is doing dbg.c(); <stuff>; dbg.wait() without having to worry about priority... [14/04/23]
+    def wait(self, timeout=None, legacy=False):
+        if legacy:
+            self.gdb.myStopped.wait(timeout=timeout)
+            #self._clear_stop("legacy_wait")
+        else:
+            self.priority_wait()
 
-    def clear_stop(self, name="someone", /):
-        if self.gdb.myStopped.is_set():
+    # This should only be used under the hood, but how do we let the other one to the user without generating problems ? [14/04/23]
+    def priority_wait(self):
+        self.gdb.myStopped.priority_wait()
+        #self._clear_stop("priority_wait")
+
+    @property
+    def running(self):
+        return not self.gdb.myStopped.is_set()
+
+    @property
+    def priority(self):
+        return self.gdb.myStopped.priority
+
+    @priority.setter
+    def priority(self, value):
+        self.gdb.myStopped.priority = value
+
+    def _clear_stop(self, name="someone", /):
+        #log.critical("clear shouldn't have been called ! (Not yet a bug, but soon will be)")
+        #if self.gdb.myStopped.is_set():
             log.debug(f"stopped has been cleared by {name}")
             self.gdb.myStopped.clear()
-        while self.gdb.myStopped.is_set():
-            log.debug("something isn't right with stopped")
-            self.gdb.myStopped.clear()
+        #while self.gdb.myStopped.is_set():
+        #    log.debug("something isn't right with stopped")
+        #    self.gdb.myStopped.clear()
+
+    def _clear_secret_stop(self, name="someone", /):
+        #assert not self.running
+        self.gdb.myStopped.secret.clear()
 
     def _set_stop(self):
         log.debug(f"setting stopped in {hex(self.instruction_pointer)}")
+        # handle case where no action are performed after the end of a callback with high priority 
+        self._clear_stop("_set_stop")
         self.gdb.myStopped.set()
+
+    def _set_secret_stop(self):
+        log.debug(f"setting secret stopped in {hex(self.instruction_pointer)}")
+        self.gdb.myStopped.secret.set()
 
     #def wait_fork(self):
     #    self.gdb.forked.wait()
@@ -352,30 +439,34 @@ class Debugger:
         # But pwntools cant handle "interrupt"... [07/03/23]
         kill(self.inferiors[self._inferior].pid, signal.SIGINT)
         if wait: # Set wait to false if you are not sure that the process is actualy running
-            self.wait()
+            # Let's think about how to handle priorities [14/04/23]
+            self.wait(legacy=True)
         else:
             # This is a case where a timeout in wait whould be usefull... I may consider re_intruducing it
             # If interrupt is called while the process isn't running wait() will never return so I don't want to call it if I'm not sure
             # but it still takes some time to interrupt the process if it si running so I HAVE to wait some time just in case.
             # (There is no way of reliably knowing if the process is running. Even setting a flag on continue wouldn't work if the command is sent manualy from gdb
+            # hold my beer, now we should be hable to know if the program is actually running... [14/04/23]
             sleep(timeout)
 
     manual = interrupt
 
     # Next may break again on the same address, but not step
-    def step(self, repeat:int=1, *, force = True):
-        self.clear_stop("step")
-        for _ in range(repeat):
-            # If I want to handle here the case where gdb updates the stack_frame, but stays on the same address. Currently handled by "exit_broken_function" [23/03/23]
-            old_address = self.instruction_pointer
-            self.execute("si")
-            self.wait()
-            #if force:
-            #    while old_address == self.instruction_pointer:
-            #        log.debug("gdb step is still broken")
-            #        self.execute("si")
-            #        self.wait()
+    def step(self, repeat:int=1, *, force=False, broken=False):
+        broken = force or broken
 
+        for _ in range(repeat):
+            
+            # If I want to handle here the case where gdb updates the stack_frame, but stays on the same address. Currently handled by "exit_broken_function" [23/03/23]
+            if broken:
+                self.broken_step()
+
+            else:
+                self.priority += 1
+                self._clear_stop("step")
+                self.execute("si")
+                self.priority_wait()
+                
     #Finish a function with modifying code
     def step_until_address(self, address: int, callback=None, limit:int=10_000) -> int:
         for i in range(limit):
@@ -415,32 +506,38 @@ class Debugger:
 
     # May not want to wait if you are going over a functions that need user interaction
     def next(self, wait:bool=True, repeat:int=1):
-        self.clear_stop("next")
         for _ in range(repeat):
+            self.priority += 1
+            self._clear_stop("next")
             self.execute("ni")
             if wait:
-                self.wait()
+                self.priority_wait()
+            #else:
+            #    log.warn_once("remember about priority")
 
     # This one doesn't wait forever if we finish executing
     # Don't use repeat and no_wait toghether ... [06/03/23]
     # Not sure if repeat is so usefull... [21/03/23]
     # The callback is usefull if you have other breakpoints that will be hit before the function finishes so you can't just wait and run the code [21/03/23]
     def finish(self, *, wait:bool=True, repeat = 1, callback = None):
-        self.clear_stop("finish")
+        #self._clear_stop("finish")
         if callback is None:
             for _ in range(repeat):
+                self.priority += 1
+                self._clear_stop("finish")
                 self.execute("finish")
                 if wait:
-                    self.wait()
+                    self.priority_wait()
         else:
             # I still use execute("finish") in the other case because I'm not sure return_address is always correct [21/03/23]
             log.warn_once("using finish with callback. This assumes that the function started with a push base_pointer. If it's not the case this won't work")
             return_address = unpack(self.read(self.base_pointer + context.bytes, context.bytes))
             self.b(return_address, real_callback=callback, temporary = True)
             self.c()
+            # Now that I have priority_wait I could use 'finish', wait and let eventual callbacks hit during the execution execute without problems! [14/04/23]
 
     # TODO take a library for relative addresses like libdebug
-    def parse_for_breakpoint(self, address: [int, str]) -> str:
+    def parse_address(self, address: [int, str]) -> str:
         """
         return the corresponding key used to save breakpoints for the given address
         """
@@ -462,6 +559,9 @@ class Debugger:
         #address = f"*{hex(address)}"
 
         return address
+
+    # Legacy
+    parse_for_breakpoint = parse_address
 
     #May want to put breakpoints relative to the libc too?
     # Sembra avere bisogno di interrompere il processo per TUTTI i breakpoint se lancio con gdb.debug invece che attach
@@ -494,7 +594,7 @@ class Debugger:
         if not self.debugging:
             return
 
-        address = self.parse_for_breakpoint(address)
+        address = self.parse_address(address)
         # Now address should always be a int
         #if type(address) is not int and callback is not None:
         #        # We could invert the symbol dict and use realcallbacks with function names too. But I'm afraid of breakpoints like "main+0x4"
@@ -507,7 +607,7 @@ class Debugger:
             log.debug("setting real callback")
             self.real_callbacks[address] = callback
 
-        log.debug(f"putting breakpoint in {address}")
+        log.debug(f"putting breakpoint in {hex(address)}")
         
         # Not needed now that I use real_callbacks
         if legacy_callback is not None:
@@ -538,8 +638,8 @@ class Debugger:
     breakpoint = b
 
     def delete_breakpoint(self, address: [int, str]) -> bool:
-        self.clear_stop("delete breakpoint")
-        address = self.parse_for_breakpoint(address)
+        #self._clear_stop("delete breakpoint")
+        address = self.parse_address(address)
         if address in self.breakpoints:
             self.breakpoints[address].delete()
             del self.breakpoints[address]
@@ -1046,9 +1146,9 @@ class Debugger:
         callback = None
 
         # Remove callback to avoid calling it twice (Nice, this wasn't possible with legacy_callbacks) (I'm not sure if we could simply disable a brakepoint for a turn)
-        if self.parse_for_breakpoint(old_ip) in self.real_callbacks:
-            callback = self.real_callbacks[self.parse_for_breakpoint(old_ip)]
-            del self.real_callbacks[self.parse_for_breakpoint(old_ip)]
+        if self.parse_address(old_ip) in self.real_callbacks:
+            callback = self.real_callbacks[self.parse_address(old_ip)]
+            del self.real_callbacks[self.parse_address(old_ip)]
 
         self.step()
 
@@ -1057,7 +1157,7 @@ class Debugger:
                 self.step()
 
         if callback is not None:
-            self.real_callbacks[self.parse_for_breakpoint(old_ip)] = callback
+            self.real_callbacks[self.parse_address(old_ip)] = callback
 
     # For backward compatibility
     exit_broken_function = broken_step
@@ -1124,7 +1224,7 @@ class Debugger:
                 def thread(dbg):
                     log.critical("slave thread stopped")
                     dbg.wait_master()
-                    dbg.clear_stop("thread slave")
+                    dbg._clear_stop("thread slave")
                     log.critical("slave thread can continue")
                     #log.debug("I won't run dbg.c(), see if you still get the breakpoint hit twice")
                     dbg.exit_broken_function()
@@ -1327,11 +1427,13 @@ class Debugger:
             self._inferior = n
         return old_inferior
     
+    # How to handle a jump no wait without destroying the priority queue ? [17/04/23]
     def jump(self, location: [int, str], stop = True):
-        address = self.parse_for_breakpoint(location)
+        address = self.parse_address(location)
         
         if stop:
-            self.clear_stop("jump")
+            self.priority += 1
+            self._clear_stop("jump")
             log.debug(f"breaking destination at {hex(address)}")
             self.b(address, temporary=True)
             
@@ -1339,7 +1441,10 @@ class Debugger:
         
         if stop:
             log.debug("Waiting for jump to conlude")
-            self.wait()
+            self.priority_wait()
+
+        #else:
+        #    log.warn_once("remember about priority")
 
     # Now can return from anywhere in the function
     def ret(self, value: int = None, *, stop = False):
@@ -1380,7 +1485,7 @@ class Debugger:
 
     def call(self, function_address: int, args: list, *, end_pointer=None, heap=True, ret_bucket=None, wait = True):
 
-        self.clear_stop("call")
+        #self._clear_stop("call")
         self.restore_arch()
 
 
@@ -1457,15 +1562,6 @@ class Debugger:
         self.push(self.instruction_pointer)
         self.jump(function_address)
 
-        #if type(function_address) is int:
-        #    self.execute(f"jump *{hex(function_address)}")
-        #elif type(function_address) is str:
-        #    self.execute(f"jump {function_address}")
-        #else:
-        #    log.critical(f"What is this function {function_address} ?")
-        #log.debug("Waiting for jump to conluse")
-        #self.wait() 
-        
         log.debug("jumped to %s\nWaiting to finish", hex(self.instruction_pointer))
         # Vorrei poter gestire il fatto che l'utente potrebbe voler mettere dei breakpoints nel programma
         # Sarebbe interessante un breakpoint sull'istruzione di ritorno con callback che rimette a posto la memoria
@@ -1477,6 +1573,7 @@ class Debugger:
                 log.debug("call finished")
                 res = self.return_value
                 restore_memory()
+            # Non dovrebbe più essere necessario adesso che finish ha priority_wait
             else:
                 log.warn_once("You chose to use 'end_pointer'. Only do it if you need breakpoints in the function and to restore memory when exiting!")
                 log.warn_once("You will have to handle manualy the execution of your program from gdb untill you reach the pointer selected (Which should be a pointer to the ret instruction...)")
@@ -1515,20 +1612,10 @@ class Debugger:
         if self._args is None:
             self._args = Arguments(self)
         return self._args 
-        #self.restore_arch()
-        #if context.bits == 64:
-        #    if index < 6:
-        #        register = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"][index]
-        #        return getattr(self, register)
-        #    else:
-        #        index -= 6
-        #
-        #index += 1 # stack pointer has the return address
-        #pointer = self.stack_pointer + index * context.bytes
-        #return self.read(pointer, context.bytes)
 
 
     # Can be used with signal code or name. Case insensitive.
+    # TODO handle priority_wait
     def signal(self, n: [int, str], /, *, handler : [int, str] = None):
         """
         Send a signal to the process and put and break returning from the handler
@@ -1573,8 +1660,10 @@ class Debugger:
         
         if type(n) is str:
             n = n.upper()
+        self.priority += 1
+        self._clear_stop("signal")
         self.execute(f"signal {n}")
-        self.wait()
+        self.priority_wait()
         #del my_address # Prevent callback to access it again at a future execution [26/02/23]
         #del dbg.my_address # I don't want to delete it in case I hit a different breakpoint before the callback is called [26/02/23]
 
