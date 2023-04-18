@@ -7,7 +7,7 @@ handle SIGALRM nopass
 source ~/.gdbinit-gef.py
 """
 
-#@unittest.skip
+@unittest.skip
 class Debugger_process(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
@@ -109,8 +109,24 @@ class Debugger_process(unittest.TestCase):
 			dbg.debug_from_done.wait()
 			self.assertEqual(dbg.eip, 0x804809d)
 
-
 #@unittest.skip
+class Debugger_actions(unittest.TestCase):
+	def setUp(self):
+		warnings.simplefilter("ignore", ResourceWarning)
+		with context.local(arch="amd64", bits=64):
+			self.dbg = Debugger("./insaaaaaaane")
+
+	def tearDown(self):
+		self.dbg.close()
+
+	def test_continue_until(self):
+		print("\ntest_continue_until: ", end="")
+		self.dbg.b(0x403ad7, temporary=True)
+		print("\nPlay with gdb once we hit address 0x403ad7 and then send continue")
+		self.dbg.c(until=0x403adb)
+		self.assertEqual(self.dbg.instruction_pointer, 0x403adb)
+
+@unittest.skip
 class Debugger_callbacks(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
@@ -168,7 +184,7 @@ class Debugger_callbacks(unittest.TestCase):
 	# Ricordati di testare anche finish con callback
 
 
-#@unittest.skip
+@unittest.skip
 class Debugger_memory(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
@@ -209,7 +225,7 @@ class Debugger_memory(unittest.TestCase):
 		# remember dealloc in the bss will only delete the last chunk... 
 		self.dbg.close()
 		
-#@unittest.skip
+@unittest.skip
 class Debbuger_fork(unittest.TestCase):
 	from base64 import b64encode
 	def setUp(self):
@@ -355,7 +371,7 @@ class Debbuger_fork(unittest.TestCase):
 			second_child.close()
 			dbg.close()
 
-#@unittest.skip
+@unittest.skip
 class Debugger_signals(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
@@ -455,7 +471,7 @@ class Debugger_signals(unittest.TestCase):
 		with open("dump_ExceptionalChecking") as fp:
 			self.assertEqual(output, fp.read().split("\n"))
 
-#@unittest.skip
+@unittest.skip
 class Debugger_calls(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)

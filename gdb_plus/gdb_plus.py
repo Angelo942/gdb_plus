@@ -329,9 +329,15 @@ class Debugger:
             self.priority_wait()
         #else:
         #    log.warn_once("remember about priority")
-        if until and self.instruction_pointer != address:
-            log.critical(f"debugger stopped at {hex(self.instruction_pointer)} for '{self._stop_reason}' instead of {hex(address)}")
-            raise Ecxeption()
+        if until:
+            while self.instruction_pointer != address:
+                log.info(f"debugger stopped at {hex(self.instruction_pointer)} for '{self._stop_reason}' instead of {hex(address)}")
+                log.info("I assume this happend because you are using gdb manualy. Finish what you are doing and let the process run. I will handle the rest")
+                # function execute_action doesn't exist yet
+                #self.execute_action("", sender="continue just to avoid writing priority += 1")
+                self.priority += 1
+                self._clear_stop("continue until")
+                self.priority_wait()
     
     cont = c
 
@@ -399,9 +405,10 @@ class Debugger:
         return pid
 
     def advanced_continue_and_wait_split(self):
-        self.b(self.symbols["fork"])
-        self.c(wait=True)
-        assert self.instruction_pointer == self.symbols["fork"], "Are you sure the libc was loaded before ? Check unexpected breakpoints otherwise"
+        #self.b(self.symbols["fork"])
+        #self.c(wait=True)
+        #assert self.instruction_pointer == self.symbols["fork"], "Are you sure the libc was loaded before ? Check unexpected breakpoints otherwise"
+        self.c(until="fork")
         self.finish()
         return self.wait_split()
 
