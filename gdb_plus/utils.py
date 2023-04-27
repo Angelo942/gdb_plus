@@ -12,11 +12,12 @@ class FakeELF:
         self.path = None
         self.address = 0
         #statically_linked ? always True ? # Needed to call malloc [02/03/23]
+from dataclasses import dataclass
 
 class user_regs_struct:
     def __init__(self):
         # I should use context maybe... At least you don't have suprises like me when pack breaks [02/03/23]
-        self.registers = {64: ["r15", "r14", "r13", "r12", "rbp", "rbx", "r11", "r10", "r9", "r8", "rax", "rcx", "rdx", "rsi", "rdi", "orig_ax", "ip", "cs", "eflags", "sp", "ss", "fs_base", "gs_base", "ds", "es", "fs", "gs"]}[context.bits]
+        self.registers = {64: ["r15", "r14", "r13", "r12", "rbp", "rbx", "r11", "r10", "r9", "r8", "rax", "rcx", "rdx", "rsi", "rdi", "orig_ax", "rip", "cs", "eflags", "rsp", "ss", "fs_base", "gs_base", "ds", "es", "fs", "gs"]}[context.bits]
         self.size = len(self.registers)*context.bytes
 
     def set(self, data):
@@ -105,3 +106,10 @@ class MyEvent(Event):
         if self.is_set():
             super().clear()
             self.cleared.set()
+
+@dataclass
+class Inner_Breakpoint:
+    byte: bytes = None
+    temporary: bool = False
+
+# I need a way to no if the process stopped due to my debugger or an action done manually
