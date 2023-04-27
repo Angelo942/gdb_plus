@@ -7,7 +7,7 @@ handle SIGALRM nopass
 source ~/.gdbinit-gef.py
 """
 
-@unittest.skip
+#@unittest.skip
 class Debugger_process(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
@@ -25,14 +25,12 @@ class Debugger_process(unittest.TestCase):
 	def test_file_standard(self):
 		print("\ntest_file_standard: ", end="")
 		with context.local(arch="i386", bits=32):
-			gdbscript = "" #"continue"
-			dbg = Debugger("./start", script=gdbscript).remote("chall.pwnable.tw", 10000)
+			dbg = Debugger("./start").remote("chall.pwnable.tw", 10000)
 			self.debuggers.append(dbg)
 			dbg.c()
 			self.assertEqual(dbg.recv(), b"Let's start the CTF:")
 			dbg.interrupt()
 			self.assertEqual(dbg.instruction_pointer - dbg.elf.address, 0x99)
-			#dbg.p.interactive()
 			dbg.close()
 	
 	#@unittest.skip
@@ -119,6 +117,8 @@ class Debugger_actions(unittest.TestCase):
 	def tearDown(self):
 		self.dbg.close()
 
+	# Fail, ho fatto next a mano e ho perso il controllo
+	#@unittest.skip
 	def test_continue_until(self):
 		print("\ntest_continue_until: ", end="")
 		self.dbg.b(0x403ad7, temporary=True)
@@ -126,7 +126,7 @@ class Debugger_actions(unittest.TestCase):
 		self.dbg.c(until=0x403adb)
 		self.assertEqual(self.dbg.instruction_pointer, 0x403adb)
 
-@unittest.skip
+#@unittest.skip
 class Debugger_callbacks(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
@@ -184,7 +184,7 @@ class Debugger_callbacks(unittest.TestCase):
 	# Ricordati di testare anche finish con callback
 
 
-@unittest.skip
+#@unittest.skip
 class Debugger_memory(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
@@ -225,7 +225,7 @@ class Debugger_memory(unittest.TestCase):
 		# remember dealloc in the bss will only delete the last chunk... 
 		self.dbg.close()
 		
-@unittest.skip
+#@unittest.skip
 class Debbuger_fork(unittest.TestCase):
 	from base64 import b64encode
 	def setUp(self):
@@ -289,16 +289,18 @@ class Debbuger_fork(unittest.TestCase):
 			dbg.interrupt()
 			dbg.b(CALL_TO_B64DECODE)
 			child = dbg.split_child(2)
-			child.b(CALL_TO_B64DECODE)
-			child.c()
 			dbg.p.sendline(self.http_request(keepAlive=True))
-			child.wait()
+			child.b(CALL_TO_B64DECODE)
+			#child.c()
+			#child.wait()
+			child.c(wait=True)
 			self.assertEqual(child.rip, 0x5555555566d5)
 			child.c()
 			dbg.execute("set follow-fork-mode child")
-			dbg.c()
 			dbg.p.sendline(self.http_request(keepAlive=True))
-			dbg.wait()
+			#dbg.c()
+			#dbg.wait()
+			dbg.c(wait=True)
 			self.assertEqual(dbg.rip, 0x5555555566d5)
 			dbg.close()
 			child.close()
@@ -315,7 +317,7 @@ class Debbuger_fork(unittest.TestCase):
 			pid = dbg.wait_split() # and then for the child to split out
 			child = dbg.children[pid]
 			self.assertEqual(dbg.instruction_pointer, 0x4327a7) # Will continue without interuptions. Get's there waiting for the PTRACE from the child
-			self.assertEqual(child.instruction_pointer, 0x4025c0) #0x449097)
+			self.assertEqual(child.instruction_pointer, 0x432d37)
 			dbg.close()
 			child.close()
 
@@ -332,46 +334,47 @@ class Debbuger_fork(unittest.TestCase):
 			dbg.elf.symbols["_syscall"] = SYSCALL_RET
 			
 			pid = dbg.advanced_continue_and_wait_split()
-			dbg.exit_broken_function()
+			dbg.step(force=True)
 			
 			second_child = dbg.children[pid]
 			second_child.emulate_ptrace_slave(dbg)
 			dbg.emulate_ptrace_master(second_child)
-
 			# Continue after fork
 			dbg.c(wait=True)
 			second_child.c(wait=True)
 		
 			# handle signal
 			dbg.c(wait=True)
-			second_child.exit_broken_function()
-			second_child.c(wait=True)
+			second_child.c(wait=True, force=True)
 			
 			dbg.p.sendline(b"CSCG{4ND_4LL_0FF_TH1S_W0RK_JU5T_T0_G3T_TH1S_STUUUP1D_FL44G??!!1}")
-			# Temporary breakpoint to avoid having a \xCC in the dump 
-			second_child.b(END_UNPACK, temporary=True)
 			for i in range(1, 22):
 				if second_child.instruction_pointer == RWX_SECTION + 1:
 					# setup unpack
 					dbg.c(wait=True)
-					# Reach breakpoint
-					second_child.c(wait=True)
+					second_child.c(until=END_UNPACK)
+					if i < 4:
+						second_child.c(wait=True)
+						continue
+					elif i == 4:
+						dbg.p.recv() # Just receive the prompt
+						# Pass ptrace check
+						second_child.c(until=SYSCALL_TRAP_PTRACE)
+						second_child.step()
+						second_child.return_value = 0x0
+					else:
+						...
+				# Temporary breakpoint to avoid having a \xCC in the dump 
+				# Use breakpoint instead of until so I can wait for both the breakpoint and the exit of the process
 				second_child.b(END_UNPACK, temporary=True)
-				if i == 4:
-					dbg.p.recv() # Just receive the prompt
-					# Pass ptrace check
-					second_child.b(SYSCALL_TRAP_PTRACE, temporary=True)
-					second_child.c(wait=True)
-					second_child.step()
-					second_child.return_value = 0x0
 				second_child.c(wait=True)
-		
+			
 			self.assertTrue(b"YES !" in dbg.p.recv())
 
 			second_child.close()
 			dbg.close()
 
-@unittest.skip
+#@unittest.skip
 class Debugger_signals(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
@@ -471,7 +474,7 @@ class Debugger_signals(unittest.TestCase):
 		with open("dump_ExceptionalChecking") as fp:
 			self.assertEqual(output, fp.read().split("\n"))
 
-@unittest.skip
+#@unittest.skip
 class Debugger_calls(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
@@ -480,6 +483,7 @@ class Debugger_calls(unittest.TestCase):
 		if hasattr(self, "dbg"):
 			self.dbg.close()
 
+	#@unittest.skip
 	def test_call(self):
 		print("\ntest_call: ", end="")
 		out = []
@@ -498,6 +502,19 @@ class Debugger_calls(unittest.TestCase):
 		with open("./dump_Cube") as fd:
 			self.assertEqual(out, fd.read().split("\n"))
 		self.dbg.close()
+
+	def test_syscall_64bit(self):
+		path = "./data.txt"
+		with context.local(arch="amd64", bits=64):
+			with open(path, "wb") as file:
+				file.write(b"")
+			self.dbg = Debugger("./insaaaaaaane", from_start=False) # You must wait for the libc to be loaded to call malloc
+			fd = self.dbg.syscall(constants.SYS_open, [path, constants.O_WRONLY, 0x0])
+			data = b"ciao, come stai ?"
+			self.dbg.syscall(constants.SYS_write, [fd, data, len(data)])
+			self.dbg.syscall(constants.SYS_close, [fd])
+			with open(path, "rb") as file:
+				self.assertEqual(file.read(), data)
 
 #class Debugger_fancy_gdb(unittest.TestCase):
 #

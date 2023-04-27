@@ -4,14 +4,6 @@
 from pwn import *
 from threading import Event
 from queue import Queue
-
-class FakeELF:
-    def __init__(self, bits):
-        self.bits = bits
-        self.bytes = self.bits // 8
-        self.path = None
-        self.address = 0
-        #statically_linked ? always True ? # Needed to call malloc [02/03/23]
 from dataclasses import dataclass
 
 class user_regs_struct:
@@ -113,3 +105,9 @@ class Inner_Breakpoint:
     temporary: bool = False
 
 # I need a way to no if the process stopped due to my debugger or an action done manually
+class Breakpoint:
+    def __init__(self, breakpoint, callback = None, temporary = False):
+        self.gdb_breakpoint = breakpoint
+        self.callback = callback
+        self.temporary = temporary
+        
