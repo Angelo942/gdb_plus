@@ -372,7 +372,7 @@ class Debugger:
         self.__clear_stop(sender if sender is not None else command)
         self.execute(command)
 
-    # TODO handle case where I use gdb manually for more than reading the memory [26/04/23]
+    # TODO make the option to have "until" be non blocking with an event when we reach the address [28/04/23] In other words migrate wait=False to wait=Event()
     def c(self, wait=False, force = False, until = None):
         """
         Continue execution of the process
@@ -391,9 +391,8 @@ class Debugger:
             address = self.parse_address(until)
             self.b(address, temporary=True)
             wait = True
-        self.priority += 1
-        self.__clear_stop("continue")
-        self.execute("continue")
+            log.debug(f"continuing until {hex(address)}")
+        self.execute_action("continue", sender="continue")
         if wait:
             self.priority_wait()
         #else:
@@ -598,12 +597,16 @@ class Debugger:
 
     # May not want to wait if you are going over a functions that need user interaction
     def next(self, wait:bool=True, repeat:int=1):
-        for _ in range(repeat):
+        if wait == False:
             self.execute_action("ni", sender="next")
-            if wait:
-                self.priority_wait()
-            #else:
             #    log.warn_once("remember about priority")
+        else:
+            for _ in range(repeat):
+                next_inst = self.next_inst
+                if next_inst.mnemonic == "call":
+                    self.c(until=self.instruction_pointer+next_inst.size)
+                else:
+                    self.step()
 
     ni = next
 
@@ -611,11 +614,14 @@ class Debugger:
     # Not sure if repeat is so useful... [21/03/23]
     # May be dependent on the stack frame and cause problems after a jump [27/04/23]
     def finish(self, *, wait:bool=True, repeat = 1):
-        for _ in range(repeat):
-            self.stepped = True # No really stepped, But I don't want a new variable
+        if wait == False:
             self.execute_action("finish", sender="finish")
-            if wait:
-                self.priority_wait()
+
+        for _ in range(repeat):
+            ip = self.__saved_ip
+            if ip == 0:
+                raise Exception("stack frame is broken or we are not in a function")
+            self.c(until=ip)
 
     # How to handle a jump no wait without destroying the priority queue ? [17/04/23]
     # Don't let it as an option... [17/04/23]
@@ -751,7 +757,6 @@ class Debugger:
                 log.debug("call finished")
                 
             else:
-                log.warn_once("You chose to use 'end_pointer'. Only do it if you need breakpoints in the function and to restore memory when exiting!")
                 self.c(until=end_pointer)
                 # Exit the function
                 self.step()
@@ -1256,6 +1261,7 @@ class Debugger:
     def instruction_pointer(self):
         ans = 0
         while ans == 0:
+            # what about self.gdb.newest_frame().pc() ? [28/04/23]
             if context.bits == 32:
                 ans = self.eip
             else:
@@ -1271,6 +1277,20 @@ class Debugger:
             self.eip = value
         else:
             self.rip = value
+
+    @property
+    def __saved_ip(self):
+        return self.gdb.newest_frame().older().pc()
+
+        ## rip = 0x7ffff7fe45b8 in _dl_start_final (./elf/rtld.c:507); saved rip = 0x7ffff7fe32b8
+        #data = self.execute("info frame 0").split("\n")
+        #print(data)
+        #for line in data:
+        #    if " saved " in line and "ip = " in line:
+        #        ip = line.split("saved ")[-1].split("= ")[-1]
+        #        if "<" in ip:
+        #            return 0
+        #        return int(ip, 16)
 
     ########################## FORKS ##########################
     # TODO find a better name [28/02/23]

@@ -156,11 +156,9 @@ class Inner_Debugger:
         ip = self.instruction_pointer
         inst = self.next_inst
         if inst.mnemonic == "call":
+            self._disable_breakpoint(ip)
+            self.cont(until=ip + inst.size)
             self._restore_breakpoint(ip)
-            pointer = ip + inst.size
-            self._set_breakpoint(pointer, temporary=True)
-            self._cont()
-            self.wait() # I will have to think about how to implement it, but for 1 instruction (fuck there are the function calls too)... [02/03/23]
         else:
             self.step()
 

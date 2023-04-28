@@ -240,7 +240,7 @@ See [this example](./examples/black_box_analysis_of_function.py) for more detail
 You can pass parameters as strings or byte_arrays. By default they will be saved on the heap with a null terminator in the case of a string. If you can't use the heap set `heap=False`
 
 **Warning**  
-You may want to debug manually the function called. If this is the case set last address of your function in `call(..., end_pointer= ...)` so that the script continues only once you reach the end of the function and not while you are using gdb
+If the stack frame has been corrupted finish() may not work. If this is the case set last address of your function in `call(..., end_pointer= ...)`.
 
 ## Alternatives
 from version 6.0 gdb_plus should be able to script anything you can imagine, but you it can be slow as hell for some uses. This tool is meant to help debugging during challenges, if you only want to automate exploit development you may prefer something like [libdebug](https://github.com/JinBlack/libdebug) which doesn't has to communicate with gdb for each command.
@@ -248,6 +248,7 @@ from version 6.0 gdb_plus should be able to script anything you can imagine, but
 # TODO
 
 * Add option to use libdebug instead of gdb
+* Migrate all wait=False to non blocking functions with events set when finished
 * Identify actions performed manually in gdb (overwrite finish and ni)
 * Handle fork and ptrace from syscall instead of libc
 * Improve ptrace emulation
