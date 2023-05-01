@@ -93,19 +93,23 @@ class Inner_Debugger:
 
     # Please, never ever put two breakpoints next to each others as a user (using next is fine) [03/03/23]
     def cont(self, *, wait=False, until=None) -> None:
-        ip = self.instruction_pointer
         if until is not None:
-            address = self.dbg.parse_address(until)
-            self.b(address, temporary=True)
-            wait = True
+            log.warn_once("dbg.cont(until=ADDRESS) is deprecated, use dbg.continue_until(ADDRESS) instead!")    
         # Attento a non fare riferimenti ciclici
         if ip in self.breakpoints:
             self.step()
         self._cont(wait)
-        if until is not None and address != self.instruction_pointer:
-            log.critical(f"couldn't reach address {hex(address)}. Stopped at address {hex(self.instruction_pointer)} instead")
 
     c = cont
+
+    def continue_until(self, location):
+        ip = self.instruction_pointer
+        address = self.dbg.parse_address(until)
+        self.b(address, temporary=True)
+        if address != self.instruction_pointer:
+            log.critical(f"couldn't reach address {hex(address)}. Stopped at address {hex(self.instruction_pointer)} instead")
+
+    until = continue_until
 
     def interrupt(self) -> None:
         # PTRACE_INTERRUPT may not work

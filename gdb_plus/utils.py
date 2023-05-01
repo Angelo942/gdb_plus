@@ -71,6 +71,7 @@ class Arguments:
             pointer = self.dbg.base_pointer + (index + 2) * context.bytes
         return self.dbg.write(pointer, pack(value))
 
+# Warning. Calling wait() before clear() returns immediatly!
 class MyEvent(Event):
     def __init__(self):
         super().__init__()
@@ -83,11 +84,13 @@ class MyEvent(Event):
         priority = self.priority
         log.debug(f"waiting with priority {priority}")
         while True:
-            #super().wait()
-            self.wait()
+            super().wait()
+            #self.wait()
             if priority == self.priority:
                 log.debug(f"priority {priority} met")
                 self.priority -= 1
+                if self.priority < 0:
+                    log.warn(f"I think there is something wrong with the wait! We reached priority {self.priority}")
                 break
             # If I call wait again while the event is set it won't block ! [04/04/23]
             self.cleared.wait()

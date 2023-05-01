@@ -74,24 +74,37 @@ Old versions of gdbserver (< 11.0.50) have problems launching 32bit binaries. If
 
 ## Control Flow
 
-The main actions for gdb are already wrapped in individual methods. For all commands not present you can reconstruct them by calling `dbg.execute(<command>)` as if you where using gdb. Just make sure to use `dbg.execute_action(<command>)` if your command will require calling `dbg.wait()`.
+The main actions for gdb are already wrapped in individual methods. For all commands not present you can reconstruct them by calling `dbg.execute(<command>)` as if you where using gdb. Just make sure to use `dbg.execute_action(<command>)` if your command will require you to call `dbg.wait()`.
 
 ```py
+dbg.jump() # set instruction pointer to specific address
 dbg.step() # Single instruction (will enter function calls)
 dbg.next() # Next instruction (will jump over function calls)
 dbg.cont() # Continue execution
+dbg.continue_until() # Continue until you reach a specific location
 dbg.finish() # Finish current function
 dbg.interrupt() # Stop the execution of your process
 dbg.wait() # Wait until you have control of gdb
 ```
 
-**Note**
-* dbg.cont(until=ADDRESS) allows you to block your script until you reach a specific address (or symbol). This means that you can debug manually with gdb while your script is waiting without problems
+In the cases where you have to interact with the process before reaching the address you want or if you would like to put some more breakpoints on the way to play manually with gdb you can use wait=False
+
+```py
+...
+dbg.breakpoint("main+0x12", temporary=True)
+dbg.breakpoint(0x23, temporary=True)
+done = dbg.continue_until("main+0x43", wait=False)
+dbg.p.recvline()
+dbg.p.sendline(b"4")
+done.wait()
+# Here the script will wait until you reach the offset 0x43 from main while gdb will break at offset 0x12 and 0x23 to let you look at the process
+...
+```
 
 **Warning**  
 * `finish` can only work if the stack frame hasn't been corrupted
-* you should specify if you want continue to wait or not with `dbg.cont(wait=True/False)`. We aren't sure about what should be the default behaviour and may set it to `wait=True` in a future version
 * Try avoiding `interrupt` as much as possible. 
+* You may be tempted to do `dbg.instruction_pointer = dbg.parse_address(location)`, but a bug in gdb may cause an unexpected behaviour if you do so. Use `dbg.jump(location)` instead
 
 If the function modifies itself you may find yourself unable to set breakpoints where you want. To analyse these function we can run them step by step
 
@@ -198,15 +211,17 @@ print(dbg.next_inst.mnemonic)   # "mov"
 ```
 
 ## Fork
-You can set the debugger to spwn a new instance of gdb every time the process calls fork with `dbg.set_split_on_fork()`.
+You can set the debugger to spwn a new instance of gdb every time the process calls fork with `dbg.set_split_on_fork()`. The child will stop as soon as the process is created by fork, but will wait for the debugger to stop before creating the new object
 
 ```py
 dbg = Debugger("http_server").set_split_on_fork()
-dbg.cont(wait=False)
+done = dbg.continue_until(0x40233)
 dbg.p.sendline("input")
+done.wait()
+# Now that the process stopped at address 0x40233 a new debugger will attach to the child
 pid_child = dbg.wait_split()
 
-# all children are saved in dbg.children and can be accessed by the pid
+# all children have their debugger saved in dbg.children and can be accessed by the pid
 child = dbg.children[pid_child]
 ```
 
@@ -217,10 +232,12 @@ child.emulate_ptrace_slave(dbg)
 dbg.emulate_ptrace_master(child)
 ```
 
-This will interrupt the process at every call to waitpid for the master and SIGSTOP or INT3 for the child. You have to handle yourself when to let each one of them continue while you debug them.
+This will interrupt the process at every call to waitpid for the master and SIGSTOP or INT3 for the child. You have to handle yourself when to let each one of them continue while you debug them. To help you a bit we print "Slave can continue" every time the tracer tries to send a continue to the tracee
 
 **Warning**
-pwndbg can not handle multi-process applications and this section is only possible in native gdb or with GEF
+* If the tracee stopped with a SIGSTOP gdb may bug a bit and you may need `force=True` to make it continue correctly
+* pwndbg can not handle multi-process applications and this section is only possible in native gdb or with GEF
+* Handleling multiple processes in the same debugger instead of splitting them may cause problems whith the waits
 
 ## Call functions
 
@@ -248,6 +265,8 @@ from version 6.0 gdb_plus should be able to script anything you can imagine, but
 # TODO
 
 * Add option to use libdebug instead of gdb
+    * Add option to migrate from gdb to libdebug while debugging and vice-versa (while keeping all breakpoints)
 * Identify actions performed manually in gdb (overwrite finish and ni)
 * Handle fork and ptrace from syscall instead of libc
 * Improve ptrace emulation
+    * register waitpid return value
