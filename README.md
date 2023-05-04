@@ -252,3 +252,4 @@ from version 6.0 gdb_plus should be able to script anything you can imagine, but
 * Identify actions performed manually in gdb (overwrite finish and ni)
 * Handle fork and ptrace from syscall instead of libc
 * Improve ptrace emulation
+* Maybe nop split_on_fork&co while debugging is False

@@ -8,6 +8,7 @@ from queue import Queue
 from gdb_plus.utils import Arguments, user_regs_struct, context, MyEvent, Breakpoint
 
 RET = b"\xc3"
+DEBUG_OFF = "Debug is off, commands won't be executed"
 
 class Debugger:
     # If possible patch the rpath (spwn and pwninit do it automatically) instead of using env to load the correct libc. This will let you get a shell not having problems trying to preload bash too
@@ -218,7 +219,7 @@ class Debugger:
 
             Thread(target=action).start()
         else:
-            #log.warn_once(FEATURE_SKIPPED)
+            log.warn_once(DEBUG_OFF)
             self.debug_from_done.set()
         return self
 
@@ -256,7 +257,7 @@ class Debugger:
         if self.debugging:
             return self.gdb.execute(code, to_string=True)
         else:
-            log.warn_once("Debug is off, commands won't be executed")
+            log.warn_once(DEBUG_OFF)
 
     # I want a function to restart the process without closing and opening a new one
     # Not working properly
@@ -368,10 +369,13 @@ class Debugger:
         """
         Wrapper around execute to handle commands that will require a wait
         """
-        self.priority += 1
-        self.__clear_stop(sender if sender is not None else command)
-        self.execute(command)
-
+        if self.debugging:
+            self.priority += 1
+            self.__clear_stop(sender if sender is not None else command)
+            self.execute(command)
+        else:
+            log.warn_once(DEBUG_OFF)
+            
     # TODO make the option to have "until" be non blocking with an event when we reach the address [28/04/23] In other words migrate wait=False to wait=Event()
     def c(self, wait=False, force = False, until = None):
         """
@@ -418,7 +422,10 @@ class Debugger:
 
     # This should only be used under the hood, but how do we let the other one to the user without generating problems ? [14/04/23]
     def priority_wait(self):
-        self.gdb.myStopped.priority_wait()
+        if self.debugging:
+            self.gdb.myStopped.priority_wait()
+        else:
+            log.warn_once(DEBUG_OFF)
 
     # problems when I haven't executed anything
     @property
@@ -487,7 +494,7 @@ class Debugger:
         Warning: can not YET be put inside a callback
         """
         if not self.debugging:
-            #log.warn_once(FEATURE_SKIPPED)
+            log.warn_once(DEBUG_OFF)
             return
         
         # TODO check that self.running is valid and then use execute_action and priority_wait
