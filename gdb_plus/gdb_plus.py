@@ -452,7 +452,7 @@ class Debugger:
         log.debug(f"{self.pid} continuing until {hex(address)}")
 
         done = Event()
-        context.Thread(target=self.__continue_until(address, done)).start()
+        context.Thread(target=self.__continue_until, args=(address, done)).start()
         if wait:
             done.wait()
         else:
@@ -674,7 +674,7 @@ class Debugger:
             self.__next(repeat)
         else:
             done = Event()
-            context.Thread(target=self.__next(repeat, done)).start()
+            context.Thread(target=self.__next, args=(repeat, done)).start()
             return done
 
     ni = next
