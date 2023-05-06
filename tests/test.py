@@ -126,6 +126,14 @@ class Debugger_actions(unittest.TestCase):
 		self.dbg.c(until=0x403adb)
 		self.assertEqual(self.dbg.instruction_pointer, 0x403adb)
 
+	#@unittest.skip
+	def test_nonblocking_continue_until(self):
+		print("\ntest_nonblocking_continue_until: ", end="")
+		done = self.dbg.continue_until(0x4038c2, wait=False)
+		self.p.sendline(b"ciao")
+		done.wait()
+		self.assertEqual(self.dbg.instruction_pointer, 0x4038c2)
+
 @unittest.skip
 class Debugger_callbacks(unittest.TestCase):
 	def setUp(self):

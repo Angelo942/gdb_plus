@@ -184,8 +184,8 @@ class Debugger:
         self.split = Queue()
 
         # Ptrace_cont
-        self.gdb.master_wants_you_to_continue = Event()
-        self.gdb.slave_has_stopped = Event()    
+        self.master_wants_you_to_continue = Event()
+        self.slave_has_stopped = Event()    
 
     # Because pwntools isn't perfect
     def restore_arch(self):
@@ -532,13 +532,13 @@ class Debugger:
         self.closed.wait()
 
     def wait_master(self):
-        self.gdb.master_wants_you_to_continue.wait()
-        self.gdb.master_wants_you_to_continue.clear()
+        self.master_wants_you_to_continue.wait()
+        self.master_wants_you_to_continue.clear()
 
     # Should handle multiple slaves ?
     def wait_slave(self):
-        self.gdb.slave_has_stopped.wait()
-        self.gdb.slave_has_stopped.clear()
+        self.slave_has_stopped.wait()
+        self.slave_has_stopped.clear()
 
     # temporarily interrupt the execution of our process to get back control of gdb (equivalent of a manual ctrl+C)
     # don't worry about the "kill"
@@ -1548,7 +1548,7 @@ class Debugger:
 
                 # Do it for int3 instead
                 #if dbg.master is not None:
-                #    dbg.master.gdb.slave_has_stopped.set()
+                #    dbg.master.slave_has_stopped.set()
 
                 def thread(dbg):
                     log.critical("slave thread stopped")
@@ -1583,9 +1583,20 @@ class Debugger:
 
         return self
     
-    def emulate_ptrace_master(self, slave, *, wait_fun = "waitpid"):
-        log.debug(f"emulating master {self.pid} over {slave.pid}")
-        self.slaves[slave.pid] = slave 
+    def emulate_ptrace_master(self, slave = None, *, wait_fun = "waitpid", stop_at_waitpid = True):
+        """
+        Tell the debugger to handle calls to ptrace
+        
+        Arguments:
+            slave: pointer to a debugger of the tracee. If not set will look for the corresponding debugger in self.children
+            wait_fun: function used to wait for the tracee
+            stop_at_waitpid: flag to set a breakpoint on the wait function (Default True to help manual debugging)
+        """
+        if slave is None:
+            log.debug(f"emulating master {self.pid}. You haven't set the slave yet")
+        else:
+            log.debug(f"emulating master {self.pid} over {slave.pid}")
+            self.slaves[slave.pid] = slave
         # patch ptrace
         self.write(self.symbols["ptrace"], RET)
 
@@ -1616,7 +1627,16 @@ class Debugger:
             pid = dbg.args[1]
             arg1 = dbg.args[2]
             arg2 = dbg.args[3]
-            slave = dbg.slaves[pid]
+            if pid in dbg.slaves:
+                slave = dbg.slaves[pid]
+            elif pid in dbg.children:
+                assert ptrace_command in [constants.PTRACE_ATTACH, constants.PTRACE_SEIZE]
+                slave = dbg.children[pid]
+                log.debug(f"the slave for {self.pid} will be {pid}")
+                dbg.slaves[pid]
+            else:
+                raise Exception(f"master tried to trace {pid}, which isn't known as a child nor a slave")
+
             log.debug(f"ptrace {pid} -> {ptrace_command}: ({hex(arg1)}, {hex(arg2)})")
             action = ptrace_dict[ptrace_command] # The slave can be a parent
 
@@ -1627,7 +1647,8 @@ class Debugger:
             # The problem with return False is that if I walk over the breakpoint manualy I loose control of the debugger because the program continues
             return False
 
-        # Legacy_callback so that the program does stop if we step over the breakpoint manualy
+        # Legacy_callback so that the program does run off if we step over the breakpoint manualy
+        # Is this still needed ? [05/05/23] # Yes, you have to patch gdb's implementation of nexti and finish first
         self.b(self.symbols["ptrace"], legacy_callback=ptrace_callback)
 
         # Set breakpoint for wait_attach
@@ -1642,23 +1663,34 @@ class Debugger:
             wait_signal = self._wait_signal if self._wait_signal is not None else 0x13
             self._wait_signal = None
             dbg.write(status_pointer, p32(wait_signal * 0x100 + 0x7f)) # Random status that currently works. For sigabort it is \x13\x7f \x13 is SIGSTOP \x7f means that the process has stopped
-            return True
+            if stop_at_waitpid:
+                return True
+            else:
+                return False
 
         self.b(self.symbols[wait_fun], legacy_callback = callback_wait)
 
         return self
 
     ########################## PTRACE EMULATION ##########################
-    def PTRACE_ATTACH(self, _, __, *, slave):
-        log.debug(f"pretending to attach to process {slave.pid}")
+    def PTRACE_ATTACH(self, pid, _, *, slave):
+        log.debug(f"pretending to attach to process {pid}")
         slave.master = self
         # I don't think it is needed to stop the child
         #slave.interrupt() ?
-        self.gdb.slave_has_stopped.set()
+        self.slave_has_stopped.set()
         self.return_value = 0
 
-
-        # set slave. ?
+    # Copied from attach for now
+    def PTRACE_SEIZE(self, pid, options, *, slave):
+        raise Exception("not implemented yet")
+        log.debug(f"pretending to seize process {slave.pid}")
+        slave.master = self
+        self.PTRACE_SETOPTIONS(pid, options, slave=self.slave)
+        # I don't think it is needed to stop the child
+        #slave.interrupt() ?
+        self.slave_has_stopped.set()
+        self.return_value = 0
 
     # Only function called by the slave
     def PTRACE_TRACEME(self):
@@ -1667,15 +1699,18 @@ class Debugger:
         if context.bits == 64:
             self.r8 = -1
         # TODO: Wait for a master
-        self.master.gdb.slave_has_stopped.set()
+        if self.pid not in self.master.slaves:
+            log.debug(f"setting {self.pid} as slave for {self.master.pid}")
+            self.master.slaves[self.pid] = self
+        self.master.slave_has_stopped.set()
 
     def PTRACE_CONT(self, _, __, *, slave):
         print("slave can continue !")
-        slave.gdb.master_wants_you_to_continue.set()
+        slave.master_wants_you_to_continue.set()
 
     def PTRACE_DETACH(self, _, __, *, slave):
         log.debug(f"ptrace detached from {slave.pid}")
-        slave.gdb.master_wants_you_to_continue.set()
+        slave.master_wants_you_to_continue.set()
         slave.master = None
 
     def PTRACE_POKETEXT(self, address, data, *, slave):
