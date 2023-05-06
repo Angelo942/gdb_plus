@@ -93,19 +93,24 @@ class Inner_Debugger:
 
     # Please, never ever put two breakpoints next to each others as a user (using next is fine) [03/03/23]
     def cont(self, *, wait=False, until=None) -> None:
-        ip = self.instruction_pointer
         if until is not None:
-            address = self.dbg.parse_address(until)
-            self.b(address, temporary=True)
-            wait = True
-        # Attento a non fare riferimenti ciclici
-        if ip in self.breakpoints:
-            self.step()
-        self._cont(wait)
-        if until is not None and address != self.instruction_pointer:
-            log.critical(f"couldn't reach address {hex(address)}. Stopped at address {hex(self.instruction_pointer)} instead")
+            log.warn_once("dbg.cont(until=ADDRESS) is deprecated, use dbg.continue_until(ADDRESS) instead!")  
+            self.continue_until(until)  
+        self.step()
+        if self.instruction_pointer not in self.breakpoints:    
+            self._cont(wait)
 
     c = cont
+
+    def continue_until(self, location):
+        ip = self.instruction_pointer
+        address = self.dbg.parse_address(location)
+        self.b(address, temporary=True)
+        self.cont(wait=True)
+        if address != self.instruction_pointer:
+            log.critical(f"couldn't reach address {hex(address)}. Stopped at address {hex(self.instruction_pointer)} instead")
+
+    until = continue_until
 
     def interrupt(self) -> None:
         # PTRACE_INTERRUPT may not work
@@ -143,7 +148,7 @@ class Inner_Debugger:
             byte = self.read_memory(address, 1)
             if byte != INT3:
                 breakpoint.byte = byte
-    # No need to emulate jumps. Ptrace can do it
+
     def step(self):
         constants.PTRACE_SINGLESTEP = 0x9
         ip = self.instruction_pointer
@@ -157,7 +162,7 @@ class Inner_Debugger:
         inst = self.next_inst
         if inst.mnemonic == "call":
             self._disable_breakpoint(ip)
-            self.cont(until=ip + inst.size)
+            self.until(ip + inst.size)
             self._restore_breakpoint(ip)
         else:
             self.step()
@@ -165,17 +170,18 @@ class Inner_Debugger:
     def wait(self):
         status_pointer = self.dbg.alloc(4)
         self.dbg.call("waitpid", [self.pid, status_pointer, 0x40000000, 0])
-        # be carefull that INT3 is executed as an instruction! You have to back down
         
         log.debug(f"wait finished with status: {hex(u32(self.dbg.read(status_pointer, 4)))}")
         self.dbg.dealloc(status_pointer)
         
+        # be carefull that INT3 is executed as an instruction! You have to back down if you did hit a breakpoint
         ip = self.instruction_pointer - 1
         breakpoint = self.breakpoints.get(ip)
         
         if breakpoint is None:
             return
 
+        # What happens if I step over a breakpoint on an instruction of size 1 ?
         self.instruction_pointer = ip
 
         if breakpoint.temporary:

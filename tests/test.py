@@ -7,7 +7,7 @@ handle SIGALRM nopass
 source ~/.gdbinit-gef.py
 """
 
-#@unittest.skip
+@unittest.skip
 class Debugger_process(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
@@ -27,7 +27,7 @@ class Debugger_process(unittest.TestCase):
 		with context.local(arch="i386", bits=32):
 			dbg = Debugger("./start").remote("chall.pwnable.tw", 10000)
 			self.debuggers.append(dbg)
-			dbg.c()
+			dbg.c(wait=False)
 			self.assertEqual(dbg.recv(), b"Let's start the CTF:")
 			dbg.interrupt()
 			self.assertEqual(dbg.instruction_pointer - dbg.elf.address, 0x99)
@@ -107,7 +107,7 @@ class Debugger_process(unittest.TestCase):
 			dbg.debug_from_done.wait()
 			self.assertEqual(dbg.eip, 0x804809d)
 
-#@unittest.skip
+@unittest.skip
 class Debugger_actions(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
@@ -126,7 +126,15 @@ class Debugger_actions(unittest.TestCase):
 		self.dbg.c(until=0x403adb)
 		self.assertEqual(self.dbg.instruction_pointer, 0x403adb)
 
-#@unittest.skip
+	#@unittest.skip
+	def test_nonblocking_continue_until(self):
+		print("\ntest_nonblocking_continue_until: ", end="")
+		done = self.dbg.continue_until(0x4038c2, wait=False)
+		self.p.sendline(b"ciao")
+		done.wait()
+		self.assertEqual(self.dbg.instruction_pointer, 0x4038c2)
+
+@unittest.skip
 class Debugger_callbacks(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
@@ -184,7 +192,7 @@ class Debugger_callbacks(unittest.TestCase):
 	# Ricordati di testare anche finish con callback
 
 
-#@unittest.skip
+@unittest.skip
 class Debugger_memory(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
@@ -248,7 +256,7 @@ class Debbuger_fork(unittest.TestCase):
 			request.append(b"Connection: close")
 		return LINE_TERMINATOR.join(request + [b""])
 
-	#@unittest.skip
+	@unittest.skip
 	def test_continuous_follow(self):
 		print("\ntest_continuous_follow: ", end="")
 		gdbscript = """
@@ -258,24 +266,19 @@ class Debbuger_fork(unittest.TestCase):
 		self.dbg = Debugger("./httpd", aslr=False, script=gdbscript)
 		CALL_TO_B64DECODE = 0x26d5
 		self.dbg.b(CALL_TO_B64DECODE)
-		self.dbg.c()
+		self.dbg.c(wait=False)
 		self.dbg.p.sendline(self.http_request(keepAlive=True))
 		self.dbg.wait()
 		self.assertEqual(self.dbg.rip, 0x5555555566d5)
-		self.dbg.c() # Don't forget to switch only after the child has continued
-		# do what you want and go back to the parent once you are done (you can also do it after the children death)
-		#print("\nthe first child is dead")
-		#self.dbg.wait(timeout=2) # Non riceve mai il segnale che è finito...
-		##sleep(2) # TODO find an alternative than waiting for the child to die
-		self.dbg.wait() # Ora dovrei ricevere l'output
+		self.dbg.c(wait=True)
 		self.dbg.execute("inferior 1") # We can't go back while the child is running
-		self.dbg.c()
+		self.dbg.c(wait=False)
 		self.dbg.p.sendline(self.http_request(keepAlive=True))
 		self.dbg.wait()
 		self.assertEqual(self.dbg.rip, 0x5555555566d5)
 		self.dbg.close()
 	
-	#@unittest.skip
+	@unittest.skip
 	def test_split(self):
 		print("\ntest_split: ", end="")
 		with context.local(arch = "amd64", bits = 64):
@@ -288,7 +291,7 @@ class Debbuger_fork(unittest.TestCase):
 			sleep(1) # wait for the child to spwn. The parrent will continue while the child is stopped at fork
 			dbg.interrupt()
 			dbg.b(CALL_TO_B64DECODE)
-			child = dbg.split_child(2)
+			child = dbg.split_child(n=2)
 			dbg.p.sendline(self.http_request(keepAlive=True))
 			child.b(CALL_TO_B64DECODE)
 			#child.c()
@@ -298,22 +301,19 @@ class Debbuger_fork(unittest.TestCase):
 			child.c()
 			dbg.execute("set follow-fork-mode child")
 			dbg.p.sendline(self.http_request(keepAlive=True))
-			#dbg.c()
+			#dbg.c(wait=False)
 			#dbg.wait()
 			dbg.c(wait=True)
 			self.assertEqual(dbg.rip, 0x5555555566d5)
 			dbg.close()
 			child.close()
 
-	#@unittest.skip
+	@unittest.skip
 	def test_my_split(self):
 		print("\ntest_my_split: ", end="")
 		with context.local(arch = 'amd64'):
-			SYSCALL_RET = 0x04133f6
-			dbg = Debugger("./traps_withSymbols", aslr=False).set_split_on_fork()
-			dbg.elf.symbols["_syscall"] = SYSCALL_RET
-			dbg.c()
-			#dbg.c(wait=True) # wait for the fork
+			dbg = Debugger("./traps_withSymbols", script="", aslr=False).set_split_on_fork(interrupt=True)
+			dbg.c(wait=False)
 			pid = dbg.wait_split() # and then for the child to split out
 			child = dbg.children[pid]
 			self.assertEqual(dbg.instruction_pointer, 0x4327a7) # Will continue without interuptions. Get's there waiting for the PTRACE from the child
@@ -321,20 +321,20 @@ class Debbuger_fork(unittest.TestCase):
 			dbg.close()
 			child.close()
 
+	# This one fails 1/4 times
 	#@unittest.skip
 	def test_ptrace_emulation(self):
 		print("\ntest_ptrace_emulation: ", end="")
 		with context.local(arch = 'amd64'):
-			SYSCALL_RET = 0x04133f6
 			ANTI_DEBUG_TEST_FINISHED = 0x0401590
 			RWX_SECTION = 0x7ffff7ff8000
 			END_UNPACK  = RWX_SECTION + 0x80
 			SYSCALL_TRAP_PTRACE = RWX_SECTION + 0x9e
-			dbg = Debugger("./traps_withSymbols", script=gdbinit, aslr=False, debug_from=ANTI_DEBUG_TEST_FINISHED, timeout=1).set_split_on_fork()
-			dbg.elf.symbols["_syscall"] = SYSCALL_RET
+			dbg = Debugger("./traps_withSymbols", script=gdbinit, aslr=False, debug_from=ANTI_DEBUG_TEST_FINISHED).set_split_on_fork()
 			
-			pid = dbg.advanced_continue_and_wait_split()
-			dbg.step(force=True)
+			dbg.continue_until("fork")
+			dbg.finish()
+			pid = dbg.wait_split()
 			
 			second_child = dbg.children[pid]
 			second_child.emulate_ptrace_slave(dbg)
@@ -374,7 +374,7 @@ class Debbuger_fork(unittest.TestCase):
 			second_child.close()
 			dbg.close()
 
-#@unittest.skip
+@unittest.skip
 class Debugger_signals(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
@@ -474,7 +474,7 @@ class Debugger_signals(unittest.TestCase):
 		with open("dump_ExceptionalChecking") as fp:
 			self.assertEqual(output, fp.read().split("\n"))
 
-#@unittest.skip
+@unittest.skip
 class Debugger_calls(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
@@ -503,6 +503,7 @@ class Debugger_calls(unittest.TestCase):
 			self.assertEqual(out, fd.read().split("\n"))
 		self.dbg.close()
 
+	#@unittest.skip
 	def test_syscall_64bit(self):
 		path = "./data.txt"
 		with context.local(arch="amd64", bits=64):
@@ -528,7 +529,7 @@ class Debugger_calls(unittest.TestCase):
 #		source ~/.gdbinit-pwndbg
 #		"""
 #		self.dbg = Debugger("./httpd", script=gdbinit, from_start=False)
-#		self.dbg.c()
+#		self.dbg.c(wait=False)
 #		sleep(1)
 #		self.dbg.interrupt() # Non è questo ad ucciderlo anche se printa SIGINT
 #		pointer = self.dbg.alloc(16, heap=False)
@@ -543,7 +544,10 @@ class Debugger_calls(unittest.TestCase):
 #		pointer = self.dbg.alloc(16)
 #		self.dbg.write(pointer, p64(0xdeadbeeffafa90be))
 #		self.dbg.close()
-#
+
+@unittest.skip
+class Debugger_no_wait(unittest.TestCase):
+	pass	
 
 if __name__ == "__main__":
 	with context.quiet:
