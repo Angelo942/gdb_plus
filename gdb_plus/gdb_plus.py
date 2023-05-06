@@ -8,6 +8,7 @@ from queue import Queue
 from gdb_plus.utils import Arguments, user_regs_struct, context, MyEvent, Breakpoint
 
 RET = b"\xc3"
+DEBUG_OFF = "Debug is off, commands won't be executed"
 
 class Debugger:
     # If possible patch the rpath (spwn and pwninit do it automatically) instead of using env to load the correct libc. This will let you get a shell not having problems trying to preload bash too
@@ -234,7 +235,7 @@ class Debugger:
 
             context.Thread(target=action).start()
         else:
-            #log.warn_once(FEATURE_SKIPPED)
+            log.warn_once(DEBUG_OFF)
             self.debug_from_done.set()
         return self
 
@@ -272,7 +273,7 @@ class Debugger:
         if self.debugging:
             return self.gdb.execute(code, to_string=True)
         else:
-            log.warn_once("Debug is off, commands won't be executed")
+            log.warn_once(DEBUG_OFF)
 
     # I want a function to restart the process without closing and opening a new one
     # Not working properly
@@ -386,15 +387,12 @@ class Debugger:
         """
         Wrapper around execute to handle commands that will require a wait
         """
-        self.priority += 1
-        self.__clear_stop(sender if sender is not None else command)
-        self.execute(command)
-
-    def __c(self, wait, done):
-        if wait:
-            self.priority_wait()
-        if done is not None:
-            done.set()
+        if self.debugging:
+            self.priority += 1
+            self.__clear_stop(sender if sender is not None else command)
+            self.execute(command)
+        else:
+            log.warn_once(DEBUG_OFF)
 
     # TODO make the option to have "until" be non blocking with an event when we reach the address [28/04/23] In other words migrate wait=False to wait=Event()
     def c(self, *, wait=True, force = False, until = None):
@@ -408,6 +406,10 @@ class Debugger:
             force: gdb may bug and keep you at the same address after a jump or if the stackframe as been edited. If you notice this problem use force to bypass it 
         """
         self.restore_arch()
+
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+            return
 
         # I always step so if we catch a broken instruction we can inform the user [05/05/23]
         # In case of force=False the program should continue anywhay since we are already stepping, but the program will still raise a warning. [05/05/23]
@@ -446,6 +448,12 @@ class Debugger:
         can be blocking or non blocking thanks to wait
         It the function is called from the address you want to reach the intended behaviour is to supose you are in a loop and continue anyway
         """ 
+        done = Event()
+        if not self.debugging:
+            done.set()
+            log.warn_once(DEBUG_OFF)
+            return done
+
         self.restore_arch()
         
         self.step(force=True) # force=True just to be sure 
@@ -456,7 +464,6 @@ class Debugger:
         self.b(address, temporary=True)
         log.debug(f"{self.pid} continuing until {hex(address)}")
 
-        done = Event()
         context.Thread(target=self.__continue_until, args=(address, done)).start()
         if wait:
             done.wait()
@@ -471,6 +478,10 @@ class Debugger:
         Wait for the process to stop after an action.
         Won't return until all future actions have been handled so that you can use it at the same time in your script and in a breakpoint
         """
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+            return
+
         if legacy:
             self.myStopped.wait(timeout)
         else:
@@ -478,7 +489,10 @@ class Debugger:
 
     # This should only be used under the hood, but how do we let the other one to the user without generating problems ? [14/04/23]
     def priority_wait(self):
-        self.myStopped.priority_wait()
+        if self.debugging:
+            self.gdb.myStopped.priority_wait()
+        else:
+            log.warn_once(DEBUG_OFF)
 
     # problems when I haven't executed anything
     @property
@@ -551,7 +565,7 @@ class Debugger:
         Warning: can not YET be put inside a callback
         """
         if not self.debugging:
-            #log.warn_once(FEATURE_SKIPPED)
+            log.warn_once(DEBUG_OFF)
             return
         
         # TODO check that self.running is valid and then use execute_action and priority_wait
@@ -581,6 +595,10 @@ class Debugger:
             repeat: step n times
             force : if the stackframe has been tampered with gdb may stay stuck on the current instruction. Use force to handle this bug in gdb
         """
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+            return
+        
         for _ in range(repeat):
             address = self.instruction_pointer
             self.stepped = True
@@ -682,10 +700,16 @@ class Debugger:
 
     # May not want to wait if you are going over a functions that need user interaction
     def next(self, wait:bool=True, repeat:int=1):
+        done = Event()
+
+        if not self.debugging:
+            done.set()
+            log.warn_once(DEBUG_OFF)
+            return done
+        
         if wait:
             self.__next(repeat)
         else:
-            done = Event()
             context.Thread(target=self.__next, args=(repeat, done)).start()
             return done
 
@@ -705,6 +729,12 @@ class Debugger:
     # May be dependent on the stack frame and cause problems after a jump [27/04/23]
     def finish(self, *, wait:bool=True, repeat = 1):
         done = Event()    
+        
+        if not self.debugging:
+            done.set()
+            log.warn_once(DEBUG_OFF)
+            return done
+        
         context.Thread(target=self.__finish, args=(repeat, done)).start()
         if wait:
             done.wait()
@@ -992,6 +1022,7 @@ class Debugger:
         # Move from callback to real_callback
         # real_callbacks have problems, but with features not even available with simple callbacks. Furthermore now you can use return False with temporary breakpoints
         if not self.debugging:
+            log.warn_once(DEBUG_OFF)
             return
 
         address = self.parse_address(location)
@@ -1056,6 +1087,10 @@ class Debugger:
         """
         push value (must be uint) on the stack
         """
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+            return
+
         log.debug(f"pushing {pack(value)}")
         self.stack_pointer -= context.bytes
         self.write(self.stack_pointer, pack(value))
@@ -1064,6 +1099,10 @@ class Debugger:
         """
         pop value (uint) from the stack
         """
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+            return 0
+
         data = self.read(self.stack_pointer, context.bytes)
         self.stack_pointer += context.bytes
         return unpack(data)
