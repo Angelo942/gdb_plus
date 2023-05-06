@@ -78,6 +78,7 @@ class MyEvent(Event):
         self.cleared = Event()
         #self.secret = Event()
         self.priority = 0
+        self.pid = 0
 
     # I still need a standard wait for actions not initiated by dbg.cont and dbg.next
     def priority_wait(self):
@@ -87,7 +88,7 @@ class MyEvent(Event):
             super().wait()
             #self.wait()
             if priority == self.priority:
-                log.debug(f"priority {priority} met")
+                log.debug(f"priority {priority} met for {self.pid}")
                 self.priority -= 1
                 if self.priority < 0:
                     log.warn(f"I think there is something wrong with the wait! We reached priority {self.priority}")

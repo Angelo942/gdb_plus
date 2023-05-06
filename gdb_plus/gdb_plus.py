@@ -36,6 +36,8 @@ class Debugger:
         # To know that I'm responsible for the interruption even if there is no callback
         self.stepped = False
         self.interrupted = False
+        # Maybe not needed (see set_split_on_fork)
+        self.last_breakpoint_deleted = 0 # Keep track of the last temporary breakpoint deleted if we realy have to know if we hit something
 
         if args.REMOTE or context.noptrace:
             self.debugging = False
@@ -172,13 +174,14 @@ class Debugger:
         
         def exit_handler(event):
             log.debug("setting stop because process exited")
+            self.myStopped.pid = self.current_inferior.pid
             self.myStopped.set()
             self.closed.set()
 
         self.gdb.events.exited.connect(exit_handler)
 
         # Manually set by split_child
-        self.gdb.split = Queue()
+        self.split = Queue()
 
         # Ptrace_cont
         self.gdb.master_wants_you_to_continue = Event()
@@ -405,8 +408,10 @@ class Debugger:
             force: gdb may bug and keep you at the same address after a jump or if the stackframe as been edited. If you notice this problem use force to bypass it 
         """
         self.restore_arch()
-        if force:
-            self.__broken_step()
+
+        # I always step so if we catch a broken instruction we can inform the user [05/05/23]
+        # In case of force=False the program should continue anywhay since we are already stepping, but the program will still raise a warning. [05/05/23]
+        self.step(force=force)
 
         if until is not None:
             log.warn_once("dbg.cont(until=ADDRESS) is deprecated, use dbg.continue_until(ADDRESS) instead!")
@@ -496,6 +501,7 @@ class Debugger:
         log.debug(f"{self.current_inferior.pid} setting stopped in {hex(self.instruction_pointer)}")
         # handle case where no action are performed after the end of a callback with high priority 
         self.__clear_stop("__set_stop")
+        self.myStopped.pid = self.current_inferior.pid
         self.myStopped.set()
 
     #def wait_fork(self):
@@ -510,7 +516,9 @@ class Debugger:
         Return:
             pid: pid of the child process
         """
-        pid = self.gdb.split.get()
+        pid = self.split.get()
+        if pid == 0:
+            raise Exception("What the fuck happened with split ???")
         return pid
 
     def advanced_continue_and_wait_split(self):
@@ -564,6 +572,7 @@ class Debugger:
 
     # Next may break again on the same address, but not step
     # Why isn't force = True the default behaviour ? [29/04/23]
+    # I don't use force=True by default because there are instructions that keep the instruction pointer at the same address even if executed [05/05/23]
     def step(self, repeat:int=1, *, force=False):
         """
         execute a single instruction
@@ -573,13 +582,16 @@ class Debugger:
             force : if the stackframe has been tampered with gdb may stay stuck on the current instruction. Use force to handle this bug in gdb
         """
         for _ in range(repeat):
-            # If I want to handle here the case where gdb updates the stack_frame, but stays on the same address. Currently handled by "exit_broken_function" [23/03/23]
-            if force:
-                self.__broken_step()
-            else:
-                self.stepped = True
-                self.execute_action("si", sender="step")
-                self.priority_wait() 
+            address = self.instruction_pointer
+            self.stepped = True
+            self.execute_action("si", sender="step")
+            self.priority_wait() 
+            if address == self.instruction_pointer:
+                # If I want to handle here the case where gdb updates the stack_frame, but stays on the same address. Currently handled by "exit_broken_function" [23/03/23]
+                if force:
+                    self.step(force=True)
+                else:
+                    log.warn("You stepped, but the address didn't change. This may be due to a bug in gdb. If this wasn't the intended behaviour use force=True in the function step or continue you just called")
 
     si = step
 
@@ -1414,7 +1426,6 @@ class Debugger:
         child.write(ip, backup)
         log.debug("shellcode patched")
         child.jump(ip)
-        self.gdb.split.put(pid)
         return child  
     
     # entrambi dovrebbero essere interrotti, il parent alla fine di fork, il child a metà
@@ -1447,32 +1458,27 @@ class Debugger:
                 pid = inferior.pid        
                 #self.to_split.put(pid)
                 def split(inferior):
-                    print(f"splitting child {inferior}")
+                    log.info(f"splitting child: {inferior.pid}")
+                    stopped = False
                     if self.running:
                         self.interrupt()
-                        stopped = True
+                        # How to handle the case where we interrupt at the address of a temporary breakpoint ? [05/05/23]
+                        #if self.instruction_pointer not in self.breakpoints and self.instruction_pointer != self.last_breakpoint_deleted:
+                        if self._stop_reason != "BREAKPOINT":
+                            stopped = True
                     self.children[pid] = self.split_child(inferior=inferior)
                     # Should not continue if I reached the breakpoint before the split
                     if not interrupt and stopped:
                         self.execute("c")
+                        # What is the difference ? [05/O5/23 20:30]
+                        #self.priority -= 1 # Can i do it this way to keep the priority correct ? [05/05/23 20:00]
+                        #self.cont(wait=False)
+                    # Put it at the end to avoid any race condition [05/05/23 2O:30]
+                    self.split.put(pid)
                 ## Non puoi eseguire azioni dentro ad un handler degli eventi quindi lancio in un thread a parte
                 context.Thread(target=split, args = (inferior,)).start()
 
             self.gdb.events.new_inferior.connect(fork_handler)
-
-            #def finish(dbg):
-            #    log.debug("process forked")
-            #    next_ip = unpack(self.read(self.stack_pointer, context.bytes))
-            #    #
-            #    def split(dbg):
-            #        child = dbg.split_child()
-            #        dbg.childen[child.pid] = child
-            #        return False
-            #    #
-            #    dbg.b(next_ip, real_callback=split, temporary=True)
-            #    return False
-            ##
-            #self.b(self.symbols["fork"], callback=finish)
             
             return self
 
