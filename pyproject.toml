@@ -8,7 +8,7 @@ requires = [
 [project]
 name = "gdb_plus"
 description = "Python library to automate gdb debugging"
-version = "6.2.0"
+version = "6.2.1"
 authors = [{name = "Edoardo"}]
 readme = "README.md"
 requires-python = ">=3.8"

@@ -5,6 +5,9 @@ from functools import partial
 from capstone import Cs, CS_ARCH_X86
 from gdb_plus.utils import Inner_Breakpoint
 
+#import logging
+#log = logging.getLogger("gdb_plus-inner_debugger")
+
 INT3 = b"\xcc"
 constants.PTRACE_GETREGS = 0xc
 constants.PTRACE_SETREGS = 0xd
@@ -16,26 +19,28 @@ class Inner_Debugger:
         self.pid = pid
         self._mem_file = None # instead of opening it every time
         self.breakpoints = {}
+        # We can not cache the registers because we don't know if the child continues due to the parrent [31/05/23]
+        # We could change the ptrace emulation too, but for know we are going fast enough [31/05/23]
+        #self.__registers = None
+        self.__pointer_registers = None
 
         self.dbg.restore_arch()
 
     def get_regs(self):
         registers = user_regs_struct()
-        pointer_registers = self.dbg.alloc(registers.size)
-        res = self.dbg.call("ptrace", [constants.PTRACE_GETREGS, self.pid, 0, pointer_registers])
+        if self.__pointer_registers is None:
+            self.__pointer_registers = self.dbg.alloc(registers.size)
+        res = self.dbg.call("ptrace", [constants.PTRACE_GETREGS, self.pid, 0, self.__pointer_registers])
         assert res != 2**context.bits - 1
-        #self.dbg.syscall(constants.SYS_ptrace, [constants.PTRACE_GETREGS, self.pid, 0, pointer_registers])
-        registers.set(self.dbg.read(pointer_registers, registers.size))
-        self.dbg.dealloc(pointer_registers)
+        #self.dbg.syscall(constants.SYS_ptrace, [constants.PTRACE_GETREGS, self.pid, 0, self.__pointer_registers])
+        registers.set(self.dbg.read(self.__pointer_registers, registers.size))
         return registers
 
     def set_regs(self, registers):
-        pointer_registers = self.dbg.alloc(registers.size)
-        self.dbg.write(pointer_registers, registers.get())
-        self.dbg.call("ptrace", [constants.PTRACE_SETREGS, self.pid, 0, pointer_registers])
-        self.dbg.dealloc(pointer_registers)
+        self.dbg.write(self.__pointer_registers, registers.get())
+        self.dbg.call("ptrace", [constants.PTRACE_SETREGS, self.pid, 0, self.__pointer_registers])
         return registers
-
+    
     def read_memory(self, addr, size) -> bytes:
         buffer = self.dbg.alloc(size)
         self.dbg.syscall(constants.SYS_lseek.real, [self.mem_file, addr, constants.SEEK_SET.real])
@@ -91,20 +96,37 @@ class Inner_Debugger:
         if wait:
             self.wait()
 
-    # Please, never ever put two breakpoints next to each others as a user (using next is fine) [03/03/23]
+    # Please, never ever put two breakpoints next to each others as a user (using next is fine) [03/03/23] # Maybe not needed anymore
+    # Clear last_breakpoint ?
     def cont(self, *, wait=False, until=None) -> None:
         if until is not None:
             log.warn_once("dbg.cont(until=ADDRESS) is deprecated, use dbg.continue_until(ADDRESS) instead!")  
             self.continue_until(until)  
         self.step()
-        if self.instruction_pointer not in self.breakpoints:    
+        # Wait, handle the case where breakpoints are temporary!! [26/05/23]
+        # This can't work with libdebug...
+        #if self._stop_reason != "SINGLE STEP":
+        #    if "BREAKPOINT" not in self._stop_reason:
+        #        if DEBUG:
+        #            log.warn(f"unknown interuption! {self._stop_reason}")
+        #    if DEBUG:
+        #        log.debug(f"step in continue already reached the breakpoint")
+        #    return
+        if self.instruction_pointer not in self.breakpoints: # Add last deleted breakpoint ?    
             self._cont(wait)
 
     c = cont
 
-    def continue_until(self, location):
+    def continue_until(self, location, loop=False):
         ip = self.instruction_pointer
         address = self.dbg.parse_address(location)
+        if address == ip:
+            if not loop:
+                if DEBUG:
+                    log.debug(f"I'm already at {self.dbg.reverse_lookup(address)}")
+                    log.warn_once("Be careful that the default behaviour changed. Use loop=True if you want to continue anyway")
+            else:
+                self.step()
         self.b(address, temporary=True)
         self.cont(wait=True)
         if address != self.instruction_pointer:
