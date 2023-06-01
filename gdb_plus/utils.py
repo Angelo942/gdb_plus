@@ -95,6 +95,8 @@ class MyEvent(Event):
                 break
             # If I call wait again while the event is set it won't block ! [04/04/23]
             self.cleared.wait()
+            # I forgot to clear it somewhere... [22/05/23]
+            self.cleared.clear()
 
     
     def clear(self):

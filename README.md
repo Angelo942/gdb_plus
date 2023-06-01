@@ -24,7 +24,7 @@ pip3 install git+https://github.com/Angelo942/gdb_plus.git@dev
 ```
 
 **Warning for pwndbg users:**  
-Previous bugs in Pwndbg used to break the api for python. While most of GDB+ should work with the current version of pwndbg [19/12/2022], pwndbg can not debug both processes after a fork.
+Previous bugs in Pwndbg used to break the api for python. While most of GDB+ should work with the current version of pwndbg [19/12/2022], pwndbg can not debug both processes after a fork, making it almost impossible to use features such as the emulation of ptrace.   
 you are strongly advised to use [GEF](https://github.com/hugsy/gef) instead.
 
 ## Debugging
@@ -102,7 +102,7 @@ done.wait()
 ```
 
 **Warning**  
-* `finish` can only work if the stack frame hasn't been corrupted
+* `finish` can only work if the stack frame hasn't been corrupted. With libdebug it will fail if the function doesn't use the base pointer.
 * Try avoiding `interrupt` as much as possible. 
 * You may be tempted to do `dbg.instruction_pointer = dbg.parse_address(location)`, but a bug in gdb may cause an unexpected behaviour if you do so. Use `dbg.jump(location)` instead
 
@@ -259,15 +259,37 @@ You can pass parameters as strings or byte_arrays. By default they will be saved
 **Warning**  
 If the stack frame has been corrupted finish() may not work. If this is the case set last address of your function in `call(..., end_pointer= ...)`.
 
-## Alternatives
-from version 6.0 gdb_plus should be able to script anything you can imagine, but you it can be slow as hell for some uses. This tool is meant to help debugging during challenges, if you only want to automate exploit development you may prefer something like [libdebug](https://github.com/JinBlack/libdebug) which doesn't has to communicate with gdb for each command.
+## Libdebug
+By default GDB+ uses a gdbserver to debug the process. This is verry usefull when you also have to check manually gdb while you are writing a script, but can be verry slow. For this reason we now support libdebug (from version >= 0.4) as an alternative debugger. It is lacking a lot of features but can do the job for most tasks and it can be 50 times faster. 
+
+The debugger will always start with dbg, but you can switch back and forth
+
+```py
+dbg = Debugger(<binary>)
+# switch to libdebug
+dbg.migrate(libdebug=True)
+# switch to gdb
+dbg.migrate(gdb=True)
+```
+
+To access properties of libdebug that haven't been wrapped you can simply use `dbg.libdebug` as you would with `dbg.gdb`.
+
+When you switch the breakpoints and callbacks will be preserved except for those needed to emulate ptrace. Please migrate to libdebug before setting the emulator up or disable it and set it up again right after.
+
+Since libdebug isn't on PyPI yet we could't include it in the dependencies. 
+You can install it manually:
+`pip3 install git+https://github.com/Angelo942/libdebug.git@parallel`
 
 # TODO
 
-* Add option to use libdebug instead of gdb
-* Migrate all wait=False to non blocking functions with events set when finished
 * Identify actions performed manually in gdb (overwrite finish and ni)
 * Handle fork and ptrace from syscall instead of libc
 * Improve ptrace emulation
     * register waitpid return value
-* Maybe nop split_on_fork&co while debugging is False
+* Stack multiple callbacks on the same breakpoint
+* handle Hardware breakpoint
+* support ARM binaries
+* support multithread applications
+* setup gdbinit for forked processes
+* catch sigsegv as an exit instead of user interaction
+* enable signal() with libdebug
