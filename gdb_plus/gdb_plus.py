@@ -7,7 +7,6 @@ from capstone import Cs, CS_ARCH_X86
 from threading import Event
 from queue import Queue
 from gdb_plus.utils import Arguments, user_regs_struct, context, MyEvent, Breakpoint
-from libdebug import Debugger as lib_Debugger
 #import logging
 
 #log = logging.getLogger("gdb_plus")
@@ -272,6 +271,7 @@ class Debugger:
             for address in self.breakpoints:
                 self.__breakpoint_gdb(address)
         elif libdebug:
+            from libdebug import Debugger as lib_Debugger
             # Disable hook stop
             self.gdb.events.exited.disconnect(self.__exit_handler)
             self.detach()
