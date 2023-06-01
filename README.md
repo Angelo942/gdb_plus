@@ -102,7 +102,7 @@ done.wait()
 ```
 
 **Warning**  
-* `finish` can only work if the stack frame hasn't been corrupted
+* `finish` can only work if the stack frame hasn't been corrupted. With libdebug it will fail if the function doesn't use the base pointer.
 * Try avoiding `interrupt` as much as possible. 
 * You may be tempted to do `dbg.instruction_pointer = dbg.parse_address(location)`, but a bug in gdb may cause an unexpected behaviour if you do so. Use `dbg.jump(location)` instead
 
@@ -264,10 +264,15 @@ from version 6.0 gdb_plus should be able to script anything you can imagine, but
 
 # TODO
 
-* Add option to use libdebug instead of gdb
-* Migrate all wait=False to non blocking functions with events set when finished
 * Identify actions performed manually in gdb (overwrite finish and ni)
 * Handle fork and ptrace from syscall instead of libc
 * Improve ptrace emulation
     * register waitpid return value
 * Maybe nop split_on_fork&co while debugging is False
+* Stack callbacks
+* Hardware breakpoint
+* ARM binaries
+* support multithread applications
+* gdbinit for forked processes
+* catch sigsegv as exit instead of user interaction
+* signal for libdebug

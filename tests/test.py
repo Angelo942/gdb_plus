@@ -7,7 +7,7 @@ handle SIGALRM nopass
 source ~/.gdbinit-gef.py
 """
 
-@unittest.skip
+#@unittest.skip
 class Debugger_process(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
@@ -102,12 +102,13 @@ class Debugger_process(unittest.TestCase):
 		with context.local(arch="i386", bits=32):
 			interaction_finished = Event()
 			dbg = Debugger("./start", aslr=False).debug_from(0x804809d, event=interaction_finished, timeout=0.01)
+			self.debuggers.append(dbg)
 			dbg.p.sendline(b"ciao")
 			interaction_finished.set()
 			dbg.debug_from_done.wait()
 			self.assertEqual(dbg.eip, 0x804809d)
 
-@unittest.skip
+#@unittest.skip
 class Debugger_actions(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
@@ -118,7 +119,7 @@ class Debugger_actions(unittest.TestCase):
 		self.dbg.close()
 
 	# Fail, ho fatto next a mano e ho perso il controllo
-	#@unittest.skip
+	@unittest.skip
 	def test_continue_until(self):
 		print("\ntest_continue_until: ", end="")
 		self.dbg.b(0x403ad7, temporary=True)
@@ -130,11 +131,11 @@ class Debugger_actions(unittest.TestCase):
 	def test_nonblocking_continue_until(self):
 		print("\ntest_nonblocking_continue_until: ", end="")
 		done = self.dbg.continue_until(0x4038c2, wait=False)
-		self.p.sendline(b"ciao")
+		self.dbg.p.sendline(b"ciao")
 		done.wait()
 		self.assertEqual(self.dbg.instruction_pointer, 0x4038c2)
 
-@unittest.skip
+#@unittest.skip
 class Debugger_callbacks(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
@@ -169,9 +170,6 @@ class Debugger_callbacks(unittest.TestCase):
 
 		self.dbg.b(0x403ad0, callback=callback, temporary=True)
 		
-		# NOOOOOO don't put a breakpoint !
-		#self.dbg.b(0x403ad9, temporary=True)
-
 		self.dbg.c(wait=True)
 		#self.dbg.interactive()
 		self.assertEqual(self.dbg.rip, 0x403ad9)
@@ -192,7 +190,7 @@ class Debugger_callbacks(unittest.TestCase):
 	# Ricordati di testare anche finish con callback
 
 
-@unittest.skip
+#@unittest.skip
 class Debugger_memory(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
@@ -203,6 +201,7 @@ class Debugger_memory(unittest.TestCase):
 			self.dbg.close()
 		pass
 
+	#@unittest.skip
 	def test_register_access(self):
 		print("\ntest_register_access: ", end="")
 		self.dbg.rax = 0xdeadbeefdeadbeef
@@ -213,6 +212,7 @@ class Debugger_memory(unittest.TestCase):
 		self.dbg.r11 = 0x134343432342
 		self.assertEqual(self.dbg.r11, 0x134343432342)
 
+	#@unittest.skip
 	def test_special_registers(self):
 		print("\ntest_special_registers: ", end="")
 		self.assertEqual(self.dbg.return_value, self.dbg.rax)
@@ -220,8 +220,10 @@ class Debugger_memory(unittest.TestCase):
 		self.assertEqual(self.dbg.instruction_pointer, self.dbg.rip)
 
 	# TODO: Test it with multiple inferiors if possible
+	#@unittest.skip
 	def test_alloc(self):
 		print("\ntest_alloc: ", end="")
+		self.dbg.close()
 		self.dbg = Debugger("./cube", aslr=False, from_start=False) # Wait for the libc to be loaded
 		pointer = self.dbg.alloc(16)
 		self.dbg.write(pointer, p64(0xdeadbeeffafa90be))
@@ -256,7 +258,7 @@ class Debbuger_fork(unittest.TestCase):
 			request.append(b"Connection: close")
 		return LINE_TERMINATOR.join(request + [b""])
 
-	@unittest.skip
+	#@unittest.skip
 	def test_continuous_follow(self):
 		print("\ntest_continuous_follow: ", end="")
 		gdbscript = """
@@ -278,7 +280,7 @@ class Debbuger_fork(unittest.TestCase):
 		self.assertEqual(self.dbg.rip, 0x5555555566d5)
 		self.dbg.close()
 	
-	@unittest.skip
+	#@unittest.skip
 	def test_split(self):
 		print("\ntest_split: ", end="")
 		with context.local(arch = "amd64", bits = 64):
@@ -294,21 +296,18 @@ class Debbuger_fork(unittest.TestCase):
 			child = dbg.split_child(n=2)
 			dbg.p.sendline(self.http_request(keepAlive=True))
 			child.b(CALL_TO_B64DECODE)
-			#child.c()
-			#child.wait()
 			child.c(wait=True)
 			self.assertEqual(child.rip, 0x5555555566d5)
 			child.c()
+			child.detach()
 			dbg.execute("set follow-fork-mode child")
 			dbg.p.sendline(self.http_request(keepAlive=True))
-			#dbg.c(wait=False)
-			#dbg.wait()
 			dbg.c(wait=True)
 			self.assertEqual(dbg.rip, 0x5555555566d5)
 			dbg.close()
 			child.close()
 
-	@unittest.skip
+	#@unittest.skip
 	def test_my_split(self):
 		print("\ntest_my_split: ", end="")
 		with context.local(arch = 'amd64'):
@@ -374,7 +373,7 @@ class Debbuger_fork(unittest.TestCase):
 			second_child.close()
 			dbg.close()
 
-@unittest.skip
+#@unittest.skip
 class Debugger_signals(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
@@ -385,67 +384,7 @@ class Debugger_signals(unittest.TestCase):
 		if hasattr(self, "dbg"):
 			self.dbg.close()
 		pass
-
-	#Already present in test_signal_handler. Use it to debug the later if needed
-#	def test_step_until_ret(self):
-#		from queue import Queue
-#		HANDLER_RET = 0x04011ff
-#		CHECK_CALL = 0x0401341
-#		my_instruction_pointer = Queue()
-#		def callback_signal_handler(dbg):
-#			self.dbg.breakpoint(my_instruction_pointer.get(), temporary=True)
-#			return False
-#		self.dbg.breakpoint(HANDLER_RET, callback=callback_signal_handler)
-#		self.dbg.breakpoint(CHECK_CALL, temporary=True)
-#		self.dbg.cont()
-#		self.dbg.p.sendline(b"serial_a_caso")
-#		self.dbg.wait()
-#		self.dbg.step()
-#		self.dbg.next_signal = False
-#		output = []
-#		def callback(dbg):
-#			if self.dbg.next_signal:
-#				my_instruction_pointer.put(self.dbg.instruction_pointer)
-#				self.dbg.execute("signal SIGUSR1")
-#				self.dbg.wait()
-#				self.dbg.next_signal = False
-#			ni = self.dbg.next_inst
-#			if ni.mnemonic == "int3":
-#				self.dbg.next_signal = True
-#				self.dbg.write(self.dbg.instruction_pointer, b"\x90") #Just to avoid problems
-#			else:
-#				output.append(ni.toString())
-#		self.dbg.step_until_ret(callback)
-#		with open("dump_ExceptionalChecking") as fp:
-#			self.assertEqual(output, fp.read().split("\n"))
-
-#	def test_signal_handler(self):
-#		from queue import Queue
-#		HANDLER_RET = 0x04011ff
-#		CHECK_CALL = 0x0401341
-#		self.dbg.breakpoint(CHECK_CALL, temporary=True)
-#		self.dbg.cont()
-#		self.dbg.p.sendline(b"serial_a_caso")
-#		self.dbg.wait()
-#		self.dbg.step()
-#		self.dbg.next_signal = False
-#		output = []
-#		def callback(dbg):
-#			if self.dbg.next_signal:
-#				print("\ncall signal")
-#				self.dbg.signal("SIGUSR1", handler=HANDLER_RET)
-#				self.dbg.next_signal = False
-#			ni = self.dbg.next_inst
-#			if ni.mnemonic == "int3":
-#				print("\nint3")
-#				self.dbg.next_signal = True
-#				self.dbg.write(self.dbg.instruction_pointer, b"\x90") #Just to avoid problems
-#			else:
-#				output.append(ni.toString())
-#		self.dbg.step_until_ret(callback)
-#		with open("dump_ExceptionalChecking") as fp:
-#			self.assertEqual(output, fp.read().split("\n"))
-	
+		
 	# Commented out to not slow down too much the tests
 	#@unittest.skip
 	def test_signal_handler(self):
@@ -460,12 +399,12 @@ class Debugger_signals(unittest.TestCase):
 		output = []
 		def callback(dbg):
 			if self.dbg.next_signal:
-				print("\ncall signal")
+				#print("\ncall signal")
 				self.dbg.signal("SIGUSR1", handler=HANDLER_RET)
 				self.dbg.next_signal = False
 			ni = self.dbg.next_inst
 			if ni.mnemonic == "int3":
-				print("\nint3")
+				#print("\nint3")
 				self.dbg.next_signal = True
 				self.dbg.write(self.dbg.instruction_pointer, b"\x90") #Just to avoid problems
 			else:
@@ -474,7 +413,7 @@ class Debugger_signals(unittest.TestCase):
 		with open("dump_ExceptionalChecking") as fp:
 			self.assertEqual(output, fp.read().split("\n"))
 
-@unittest.skip
+#@unittest.skip
 class Debugger_calls(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
@@ -505,6 +444,7 @@ class Debugger_calls(unittest.TestCase):
 
 	#@unittest.skip
 	def test_syscall_64bit(self):
+		print("\ntest_syscall: ", end="")
 		path = "./data.txt"
 		with context.local(arch="amd64", bits=64):
 			with open(path, "wb") as file:
@@ -546,8 +486,148 @@ class Debugger_calls(unittest.TestCase):
 #		self.dbg.close()
 
 @unittest.skip
-class Debugger_no_wait(unittest.TestCase):
-	pass	
+class Debugger_libdebug(unittest.TestCase):
+	def setUp(self):
+		warnings.simplefilter("ignore", ResourceWarning)
+
+	def tearDown(self):
+		self.dbg.close()
+
+	#@unittest.skip
+	def test_migrate(self):
+		print("\ntest_migrate: ", end="")
+		with context.local(arch="amd64", bits=64):
+			self.dbg = Debugger("./httpd", aslr=False)
+			self.dbg.migrate(libdebug=True)
+			self.assertEqual(self.dbg.instruction_pointer, 0x7ffff7fe32b0)
+			self.dbg.step()
+			self.assertEqual(self.dbg.instruction_pointer, 0x7ffff7fe32b3)
+			self.dbg.migrate(gdb=True)
+			self.assertEqual(self.dbg.instruction_pointer, 0x7ffff7fe32b3)
+			self.dbg.step()
+			self.assertEqual(self.dbg.instruction_pointer, 0x7ffff7fe4050)
+
+	#@unittest.skip
+	def test_continue_until(self):
+		print("\ntest_continue_until [libdebug]: ", end="")
+		with context.local(arch="amd64", bits=64):
+			self.dbg = Debugger("./httpd", aslr=False)
+			self.dbg.migrate(libdebug=True)
+			self.dbg.continue_until("main")
+			self.assertEqual(self.dbg.instruction_pointer, 0x55555555570c)
+
+	@unittest.skip
+	def test_call(self):
+		print("\ntest_call [libdebug]: ", end="")
+		out = []
+		with context.local(arch="amd64", bits=64):
+			self.dbg = Debugger("./cube", aslr=False, debug_from=0x55555555950a) # You must wait for the libc to be loaded to call malloc
+			self.dbg.migrate(libdebug=True)
+			address = self.dbg.call("malloc", [0x100])
+			self.assertEqual(address, 0x55555555d2a0)
+			
+	#@unittest.skip
+	def test_callbacks(self):
+		print("\ntest_callbacks [libdebug]: ", end="")
+		with context.local(arch = 'amd64'):
+			ANTI_DEBUG_TEST_FINISHED = 0x0401590
+			RWX_SECTION = 0x7ffff7ff8000
+			END_UNPACK  = RWX_SECTION + 0x80
+			SYSCALL_TRAP_PTRACE = RWX_SECTION + 0x9e
+			self.dbg = Debugger("./traps_withSymbols", aslr=False, debug_from=ANTI_DEBUG_TEST_FINISHED).set_split_on_fork()
+			
+			self.dbg.continue_until("fork")
+			self.dbg.finish()
+			pid = self.dbg.wait_split()
+			
+			second_child = self.dbg.children[pid]
+			self.dbg.migrate(libdebug=True)
+			second_child.emulate_ptrace_slave(self.dbg)
+			self.dbg.emulate_ptrace_master(second_child)
+			# Continue after fork
+			self.dbg.c(wait=True)
+			second_child.c(wait=True)
+			return
+			# handle signal
+			self.dbg.c(wait=True)
+			second_child.c(wait=True, force=True)
+			self.dbg.p.sendline(b"CSCG{4ND_4LL_0FF_TH1S_W0RK_JU5T_T0_G3T_TH1S_STUUUP1D_FL44G??!!1}")
+			for i in range(1, 22):
+				if second_child.instruction_pointer == RWX_SECTION + 1:
+					# setup unpack
+					self.dbg.c(wait=True)
+					second_child.c(until=END_UNPACK)
+					if i < 4:
+						second_child.c(wait=True)
+						continue
+					elif i == 4:
+						self.dbg.p.recv() # Just receive the prompt
+						# Pass ptrace check
+						second_child.c(until=SYSCALL_TRAP_PTRACE)
+						second_child.step()
+						second_child.return_value = 0x0
+					else:
+						...
+				# Temporary breakpoint to avoid having a \xCC in the dump 
+				# Use breakpoint instead of until so I can wait for both the breakpoint and the exit of the process
+				second_child.b(END_UNPACK, temporary=True)
+				second_child.c(wait=True)
+			
+			self.assertTrue(b"YES !" in dbg.p.recv())
+
+			second_child.close()
+
+	#@unittest.skip
+	def test_inner_debugger(self):	
+		print("\ntest_inner_debugger [libdebug]:")	
+		from sage.all import IntegerModRing, MatrixSpace, vector
+
+		END_ANTI_TRACING = 0x0401590
+		PTRACE_CONT = 0x0401775
+		RWX_SECTION = 0x7ffff7ff8000
+		END_UNPACK  = RWX_SECTION + 0x80
+		TRAP_PTRACE = RWX_SECTION + 0x9e
+		MATRIX_DATA = RWX_SECTION + 0xc2
+
+		def parse_line(data: bytes):
+		    ans = []
+		    for i in range(0, 0x10):
+		        ans.append(u32(data[i*4: (i+1)*4]))
+		    return ans
+
+		self.dbg = Debugger("./traps_withSymbols", aslr=False, debug_from=END_ANTI_TRACING)
+		self.dbg.next()
+		child_pid = self.dbg.return_value
+		# Wait for parent to attach
+		self.dbg.continue_until("waitpid")
+		self.dbg.finish()
+
+		self.dbg.migrate(libdebug=True)
+		child = Inner_Debugger(self.dbg, child_pid)
+
+		self.dbg.p.sendline(b"A"*0x40)
+		A, b = [], []
+		for i in range(1, 21):
+		    if i <= 4:
+		      self.dbg.continue_until(PTRACE_CONT, loop=True)
+		    child.continue_until(END_UNPACK, loop=True)
+		    if i == 4:
+		      child.continue_until(TRAP_PTRACE)
+		      child.step()
+		      child.return_value = 0x0
+		    if i in range(5, 5+0x10):
+		      A.append(parse_line(child.read(MATRIX_DATA, 0x40)))
+		      b.append(u32(child.read(MATRIX_DATA+ 0x40, 4)))
+		R = IntegerModRing(2**32)
+		M = MatrixSpace(R, 0x10, 0x10)
+		A = M(A)
+		b = vector(b)
+		x = A.solve_right(b)
+		flag = b""
+		for n in x:
+		    flag += p32(n)
+		flag = xor(flag, 0xd)
+		self.assertEqual(flag, b"CSCG{4ND_4LL_0FF_TH1S_W0RK_JU5T_T0_G3T_TH1S_STUUUP1D_FL44G??!!1}")
 
 if __name__ == "__main__":
 	with context.quiet:
