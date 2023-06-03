@@ -28,7 +28,6 @@ class Debugger:
         self._canary = None
         self._args = None
         self.closed = Event()
-        self._inferior = 1 # Used to switch between inferiors [03/03/23]
         self.children = {} # Maybe put {self.pid: self} as first one
         self.slaves = {} # to emulate ptrace
         self.master = None
@@ -426,12 +425,11 @@ class Debugger:
             return
 
         # May not be accurate if you switched manually before
-        old_inferior = self._inferior
-        while self.gdb.selected_inferior().num != n:
+        old_inferior = self.current_inferior
+        while self.current_inferior.num != n:
             log.debug(f"switching to inferior {n}")
             self.execute(f"inferior {n}")
             log.debug(f"I'm inferior {self.gdb.selected_inferior()}")
-            self._inferior = n
         self.pid = self.current_inferior.pid
         return old_inferior
 
@@ -787,12 +785,12 @@ class Debugger:
         if self.running == self.running:
             self.interrupted = True
             #self.myStopped.clear()
-            #os.kill(self.inferiors[self._inferior].pid, signal.SIGINT)
+            #os.kill(self.inferiors[self.current_inferior.num].pid, signal.SIGINT)
             #self.wait(legacy=True, timeout=0.1)
             # Need priority if calling interrupt in callback for split while waiting for finish in another thread
             log.debug(f"interrupting inferior: {self.current_inferior} [pid:{self.current_inferior.pid}]")
             self.execute_action("interrupt", sender="interrupt")
-            #os.kill(self.inferiors[self._inferior].pid, signal.SIGSTOP)
+            #os.kill(self.inferiors[self.current_inferior.num].pid, signal.SIGSTOP)
             self.priority_wait()
 
     def interrupt(self):
@@ -1070,11 +1068,8 @@ class Debugger:
 
     # For some reasons we get int3 some times
     # Now it's even worse. SIGABORT after that...
-    def gdb_call(self, function: str, args: list, *, cast = "long", inferior=None):
+    def gdb_call(self, function: str, args: list, *, cast = "long"):
         if not self.elf.statically_linked:
-            if inferior is None:
-                inferior = self.current_inferior
-            old_inferior = self.switch_inferior(inferior.num)
             try:
                 ans = self.execute(f"call ({cast}) {function} ({', '.join([hex(arg) for arg in args])})")
                 if cast == "void":
@@ -1089,9 +1084,8 @@ class Debugger:
                 # For some reason I just get 0x0
                 #return self.return_value()
                 ret = self.gdb_call(function, args) # Should work this time
-            self.switch_inferior(old_inferior)
         elif function in self.symbols:
-            ret = self.call(self.symbols[function], args, inferior=inferior)
+            ret = self.call(self.symbols[function], args)
             
         else:
             raise Exception(f"I don't know how to handle this function! {function} not in symbols")
@@ -1417,10 +1411,10 @@ class Debugger:
     def __read_gdb(self, address: int, size: int, *, inferior = None) -> bytes:
 
         if inferior == None:
-            inferior = self._inferior
+            inferior = self.current_inferior
 
         log.debug(f"reading from inferior {inferior}")
-        return self.inferiors[inferior].read_memory(address, size).tobytes()
+        return self.inferiors[inferior.num].read_memory(address, size).tobytes()
 
     def read(self, address: int, size: int, *, inferior = None, pid = None) -> bytes:
         if inferior is not None:
@@ -1435,9 +1429,9 @@ class Debugger:
     def __write_gdb(self, address: int, byte_array: bytes, *, inferior = None):
 
         if inferior == None:
-            inferior = self._inferior
+            inferior = self.current_inferior
         
-        inferior = self.inferiors[inferior]
+        inferior = self.inferiors[inferior.num]
         log.debug(f"writing {byte_array} in {inferior} at address {hex(address)}")
         # BUG: GDB writes in the wrong inferior...
         #inferior.write_memory(address, byte_array)
@@ -1496,7 +1490,7 @@ class Debugger:
     #(__GI___libc_malloc) will be abandoned.
     #When the function is done executing, GDB will silently stop.
     
-    def alloc(self, n: int, /, *, heap=True, inferior = None) -> int:
+    def alloc(self, n: int, /, *, heap=True) -> int:
         """
         Allocate N bytes in the heap or [if really needed] the bss
 
@@ -1515,7 +1509,7 @@ class Debugger:
         if heap:
             if self.gdb is not None:
                 # Do we wan't to use call for both ? [10/05/23]
-                ret = self.gdb_call("malloc", [n], inferior=inferior)
+                ret = self.gdb_call("malloc", [n])
             elif self.libdebug is not None:
                 ret = self.call("malloc", [n])
             else:
@@ -1528,11 +1522,11 @@ class Debugger:
         
         return ret
 
-    def dealloc(self, pointer: int, len=0, heap=True, inferior = None):
+    def dealloc(self, pointer: int, len=0, heap=True):
         
         if heap:    
             if self.gdb is not None:
-                self.gdb_call("free", [pointer], cast="void", inferior=inferior)
+                self.gdb_call("free", [pointer], cast="void")
             elif self.libdebug is not None:
                 self.call("free", [pointer])
             else:
@@ -1825,6 +1819,7 @@ class Debugger:
 
     # Call shellcode has problems: https://sourceware.org/gdb/onlinedocs/gdb/Registers.html. Can't push rip
     # Warn that the child will still be in the middle of the fork [26/04/23]
+    # TODO support split for libdebug [02/06/23] (Will require a new patch to libdebug)
     def split_child(self, *, pid = None, inferior=None, n=None):
         self.restore_arch()
         if inferior is None:
@@ -1843,15 +1838,15 @@ class Debugger:
         log.debug(f"splitting inferior {inferior}")
         n = inferior.num
         pid = inferior.pid
-        old_n = self.switch_inferior(n)
+        old_inferior = self.switch_inferior(n)
         ip = self.instruction_pointer
-        backup = self.inject_sleep(ip, inferior)
+        backup = self.inject_sleep(ip)
 
         # Now it should be handled by the interrupt in set_split_on_fork [22/05/23]
         ## For some reason it may happend that we receive a SIGINT on the first step. This would kill the process if I detached now [29/04/23] (Always that same bug)
         #self.step() 
         
-        self.switch_inferior(old_n)
+        self.switch_inferior(old_inferior.num)
         log.debug("detaching from child")
         self.execute(f"detach inferiors {n}")
         # Do we include self.gdbscript ? [08/05/23]
@@ -2209,9 +2204,9 @@ class Debugger:
         """
 
         if inferior == None:
-            inferior = self._inferior
+            inferior = self.current_inferior
         
-        old_inferior = self.switch_inferior(inferior)
+        old_inferior = self.switch_inferior(inferior.num)
 
         if address is None:
             log.debug("allocating memory for shellcode")
@@ -2236,7 +2231,7 @@ class Debugger:
             log .debug(f"{context.arch=}")
         ans = self.syscall(constants.SYS_mprotect.real, [address & 0xfffffffffffff000, size, constants.PROT_EXEC | constants.PROT_READ | constants.PROT_WRITE])
         
-        self.switch_inferior(old_inferior)
+        self.switch_inferior(old_inferior.num)
 
         return address
 
