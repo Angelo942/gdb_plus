@@ -1,5 +1,8 @@
 GDB+ 6.3.4: Bruteforce util
 * single thread bruteforce
+* multithread bruteforce
+
+* hotfix race condition in wait
 
 GDB+ 6.3.3: Expand ptrace emulation
 * hotfix transfer breakpoints while migrating
