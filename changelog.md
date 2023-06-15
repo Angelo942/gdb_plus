@@ -1,5 +1,6 @@
 GDB+ 6.3.3: Expand ptrace emulation
 * hotfix transfer breakpoints while migrating
+* reduce race conditions in for ptrace emulation
 
 * single function for ptrace emulation that handles both tracee and tracer.
 	- process isn't limited at being a slave or a master

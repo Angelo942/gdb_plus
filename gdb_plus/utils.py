@@ -2,7 +2,7 @@
 # Redundant with context. May be still used for path and address, but I would remove it.
 
 from pwn import *
-from threading import Event
+from threading import Event, Lock
 from queue import Queue
 from dataclasses import dataclass
 
@@ -82,27 +82,27 @@ class MyEvent(Event):
         self.pid = 0
 
     # I still need a standard wait for actions not initiated by dbg.cont and dbg.next
+    # There seems to be a rare bug where multiple priorities are cleared at the same time [11/06/23]
     def priority_wait(self):
         priority = self.priority
-        log.debug(f"waiting with priority {priority}")
+        log.debug(f"[{self.pid}] waiting with priority {priority}")
         while True:
             super().wait()
-            #self.wait()
             if priority == self.priority:
-                log.debug(f"priority {priority} met for {self.pid}")
-                self.priority -= 1
-                if self.priority < 0:
-                    log.warn(f"I think there is something wrong with the wait! We reached priority {self.priority}")
+                log.debug(f"[{self.pid}] met priority {priority}")
                 break
             # If I call wait again while the event is set it won't block ! [04/04/23]
             self.cleared.wait()
             # I forgot to clear it somewhere... [22/05/23]
             self.cleared.clear()
 
-    
+    # I move the priority -= 1 in here to avoid a race condition on the check priority == self.priority. I hope it won't break because I missed a clear somewhere, but with the cleared.wait; cleared.clear it should already break anyway [13/06/23]
     def clear(self):
         #self.secret.clear()
         if self.is_set():
+            self.priority -= 1
+            if self.priority < 0:
+                log.warn(f"I think there is something wrong with the wait! We reached priority {self.priority}")
             super().clear()
             self.cleared.set()
 
@@ -119,6 +119,32 @@ class Breakpoint:
         self.callback = callback
         self.temporary = temporary
         self.user_defined = user_defined
+
+class MyLock:
+    def __init__(self, event, owner):
+        self.owner = owner
+        self.event = event
+        self.counter = 0
+        # prevent bugs with the counter ? [12/06/23]
+        self.__lock = Lock()
+
+    def log(self, function_name):
+        log.debug(f"[{self.owner.pid}] wrapping {function_name}")
+        return self
+
+    def __enter__(self):
+        with self.__lock:
+            self.event.clear()
+            self.counter += 1
+            log.debug(f"[{self.owner.pid}] entering lock with level {self.counter}")
+
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        with self.__lock:
+            log.debug(f"[{self.owner.pid}] exiting lock with level {self.counter}")
+            self.counter -= 1
+            if self.counter == 0:
+                self.event.set()
+        
 SIGNALS = {
        "SIGHUP":           1, 
        "SIGINT":           2, 
