@@ -113,10 +113,12 @@ class Inner_Breakpoint:
 
 # I need a way to no if the process stopped due to my debugger or an action done manually
 class Breakpoint:
-    def __init__(self, breakpoint, callback = None, temporary = False):
-        self.gdb_breakpoint = breakpoint
+    def __init__(self, breakpoint, address, callback = None, temporary = False, user_defined = True):
+        self.native_breakpoint = breakpoint
+        self.address = address
         self.callback = callback
         self.temporary = temporary
+        self.user_defined = user_defined
 SIGNALS = {
        "SIGHUP":           1, 
        "SIGINT":           2, 

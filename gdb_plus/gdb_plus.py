@@ -7,6 +7,7 @@ from capstone import Cs, CS_ARCH_X86
 from threading import Event
 from queue import Queue
 from gdb_plus.utils import *
+from collections import defaultdict
 #import logging
 
 #log = logging.getLogger("gdb_plus")
@@ -35,7 +36,7 @@ class Debugger:
         self._wait_signal = None
         self._free_bss = None #Used to allocate data in the bss if you can't use the heap
         # Do we want to save temporary breakpoints too ? [17/04/23]
-        self.breakpoints = {} #Save all non temporary breakpoints for easy access # The fact that they can't be temporary is used by the callback [21/03/23]
+        self.breakpoints = defaultdict(list)
         self.gdbscript = script # For non blocking debug_from
         self.debug_from_done = Event()
 
@@ -120,6 +121,41 @@ class Debugger:
                     else:
                         log.warn(f"{timeout}s timeout isn't enought to reach the code... Retrying...")
 
+    def __handle_breakpoints(self, breakpoints):
+        should_continue = self._stop_reason != "SINGLE STEP" # Versione semplice. Se vengo da uno step non devo mai continuare e almeno adesso è già salvato [05/06/23]
+        # I don't set stop after each breakpoint to avoid letting a script continue while another callback is running [06/06/23]
+        set_stop = []
+        log.debug(f"{hex(self.instruction_pointer)}: {len(breakpoints)} breakpoints")
+        # Copy because the list will be modified by delete() [06/06/23]
+        for breakpoint in breakpoints.copy():
+            if breakpoint.temporary:
+                self.delete_breakpoint(breakpoint)
+
+            if breakpoint.callback is None:
+                should_continue = False
+                # Must be set for each breakpoint for the library funtions to work [05/06/23]
+                # Check that the priorities can't be broken by a breakpoint set by the user... [05/06/23]
+                set_stop.append("No callback")  
+                
+            else:           
+                should_stop = breakpoint.callback(self)
+                if should_stop is None or should_stop:
+                    should_continue = False
+                    set_stop.append("callback returned or None")  
+
+                else:
+                    should_continue &= True
+                    log.debug("callback returned False")
+
+        for stop_reason in set_stop:
+            self.__set_stop(stop_reason)
+
+        # TODO IMPROVE THIS [06/06/23]
+        # We have a problem. If I do a next() and hit a breakpoint with a finish(); return False, How should I know not to continue after the finish ?
+        if should_continue: 
+            log.debug("hidden continue")
+            self.__hidden_continue()
+
     # We stopped using gdb's implementation of temporary breakpoints so that we can differentiate an interruption caused by my debugger and cause by the manual use of gdb 
     # Event could tell me which breakpoint has been hit or which signal cause the interruption
     def __stop_handler_gdb(self):
@@ -137,20 +173,20 @@ class Debugger:
 
         # Current inferior will change to the inferior who stopped last
         ip = self.instruction_pointer
-        bp = self.breakpoints.get(ip)
+        breakpoints = self.breakpoints[ip]
 
         log.debug(f"{self.current_inferior.pid} stopped at address: {hex(ip)} for {self._stop_reason}")
         
         # TODO handle stop in 
-        if bp is None:
+        if len(breakpoints) == 0:
             # Is it right to catch SIGSTOP and SIGTRAP ? [04/06/23]
             if self.stepped or self.interrupted:
                 # I hope that the case where we step and still end up on a breakpoint won't cause problems because we would not reset stepped... [29/04/23]
                 self.stepped = False
                 self.interrupted = False
-                self.__set_stop()
+                self.__set_stop("stepped or interrupted")
             elif self._stop_reason in ["SIGSTOP", "SIGTRAP"]: # SIGTRAP to handle known int3 in the code
-                self.__set_stop()
+                self.__set_stop("SIGTRAP or SIGSTOP")
             # Work in progress [04/06/23]
             #elif self._stop_reason == "SIGSEGV":
             #    self.__exit_handler(...)
@@ -158,26 +194,11 @@ class Debugger:
                 log.debug("I stopped for a manual interaction")
             return            
         
-        if bp.temporary:
-            self.delete_breakpoint(ip)
-
-        # TODO, it may be interesting to have the option to put an array of breakpoints for recursive functions [21/03/23]
-        # something like
-        #if type(self.real_callbacks[self.instruction_pointer]) is list:
-        #   callback =  self.real_callbacks[ip].pop()
-        #   if len(self.real_callbacks[ip]) == 0:
-        #       del self.real_callbacks[ip]
-        #else:
-                        
-        # This should let us keep control of the debugger even if we use gdb manually while emulating ptrace
         # Doesn't handle the case where we use ni and hit the breakpoint though... [17/04/23] TODO!
         # Doesn't even handle the case where I step, but I'm waiting in continue until
         # Damn, gdb detects the breakpoint even if we don't run over the INT3... so this doesn't work. We never have reason SINGLE STEP with a breakpoint. We need another indication [10/05/23]
-        if bp.callback is not None and bp.callback(self) == False:# and self._stop_reason != "SINGLE STEP": 
-            log.debug("continuing due to callback False")
-            self.__hidden_continue()
-        else:
-            self.__set_stop()  
+        self.__handle_breakpoints(breakpoints)
+        #context.Thread(target=self.__handle_breakpoints, args=(breakpoints,)).start()
 
     def __stop_handler_libdebug(self):
         """
@@ -188,7 +209,7 @@ class Debugger:
 
         # Current inferior will change to the inferior who stopped last
         ip = self.instruction_pointer
-        bp = self.breakpoints.get(ip)
+        breakpoints = self.breakpoints[ip]
 
         log.debug(f"{self.libdebug.cur_tid} stopped at address: {hex(ip)} with status: {hex(self.libdebug.stop_status)}")
 
@@ -202,7 +223,7 @@ class Debugger:
             #self.libdebug.cont(blocking=False)
             #return
         
-        if bp is None:
+        if len(breakpoints) == 0:
             if self.stepped or self.interrupted:
                 self.stepped = False
                 self.interrupted = False
@@ -213,17 +234,11 @@ class Debugger:
                 return
             else:
                 log.warn(f"why did I stop ??? [{hex(self.libdebug.stop_status)}]")
-            self.__set_stop()
+            self.__set_stop("no breakpoint")
             return            
         
-        if bp.temporary:
-            self.delete_breakpoint(ip)
-                
-        if bp.callback is not None and bp.callback(self) == False:
-            log.debug("continuing due to callback False")
-            self.__hidden_continue()
-        else:
-            self.__set_stop()  
+        self.__handle_breakpoints(breakpoints)
+        #context.Thread(target=self.__handle_breakpoints, args=(breakpoints,)).start()
 
     def __exit_handler(self, event):
         log.debug(f"setting stop because process [{event.inferior.pid}] exited")
@@ -475,34 +490,47 @@ class Debugger:
     # Taken from GEF to handle slave interruption
     @property
     def _stop_reason(self) -> str:
-        res = self.gdb.execute("info program", to_string=True).splitlines()
-        if not res:
-            return "NOT RUNNING"
-
-        for line in res:
-            line = line.strip()
-            if line.startswith("It stopped with signal "):
-                return line.replace("It stopped with signal ", "").split(",", 1)[0]
-            if line == "The program being debugged is not being run.":
+        if self.gdb is not None:
+            res = self.gdb.execute("info program", to_string=True).splitlines()
+            if not res:
                 return "NOT RUNNING"
-            if line == "It stopped at a breakpoint that has since been deleted.":
-                return "TEMPORARY BREAKPOINT"
-            if line.startswith("It stopped at breakpoint "):
-                return "BREAKPOINT"
-            if line == "It stopped after being stepped.":
-                return "SINGLE STEP"
 
-        return "STOPPED"
+            for line in res:
+                line = line.strip()
+                if line.startswith("It stopped with signal "):
+                    return line.replace("It stopped with signal ", "").split(",", 1)[0]
+                if line == "The program being debugged is not being run.":
+                    return "NOT RUNNING"
+                if line == "It stopped at a breakpoint that has since been deleted.":
+                    return "TEMPORARY BREAKPOINT"
+                if line.startswith("It stopped at breakpoint "):
+                    return "BREAKPOINT"
+                if line == "It stopped after being stepped.":
+                    return "SINGLE STEP"
+
+            return "STOPPED"
+
+        # TODO handle it correctly. Is Ox5 only used for step or also breakpoints ? Do we have access to libdebug's stepped variable ? (I would prefer that one at least) [05/06/23]
+        elif self.libdebug is not None:
+            if self.stepped:
+                return "SINGLE STEP"
+            else:
+                return "I DON'T KNOW YET"
 
     @property
     def stop_signal(self) -> int:
-        reason = self._stop_reason
-        if reason == "SINGLE STEP":
-            return 0x5
-        if "BREAKPOINT" in reason:
-            return 0x13 # Not sure
+        if self.gdb is not None:
+            reason = self._stop_reason
+            if reason == "SINGLE STEP":
+                return 0x5
+            if "BREAKPOINT" in reason:
+                return 0x13 # Not sure
+            else:
+                return SIGNALS[reason]
+        elif self.libdebug is not None:
+            return self.libdebug.stop_status >> 0x8
         else:
-            return SIGNALS[reason]
+            ...
 
     @property
     def _details_breakpoint_stopped(self) -> str:
@@ -659,7 +687,7 @@ class Debugger:
             log.warn_once("Be careful that the default behaviour changed. Use loop=True if you want to continue anyway")
             return
             
-        self.b(address, temporary=True)
+        self.b(address, temporary=True, user_defined=False)
         if DEBUG:
             log.debug(f"{self.pid} continuing until {self.reverse_lookup(address)}")
 
@@ -724,14 +752,17 @@ class Debugger:
             log.debug(f"{pid} stopped has been cleared by {name}")
             self.myStopped.clear()
 
-    def __set_stop(self):
+    def __set_stop(self, comment = ""):
         if self.gdb is not None:
             pid = self.current_inferior.pid
         elif self.libdebug is not None:
             pid = self.pid # Handle thread
         else:
             ...        
-        log.debug(f"{pid} setting stopped in {hex(self.instruction_pointer)}")
+        if comment:
+            log.debug(f"{pid} setting stopped in {hex(self.instruction_pointer)} for {comment}")
+        else:
+            log.debug(f"{pid} setting stopped in {hex(self.instruction_pointer)}")
         # handle case where no action are performed after the end of a callback with high priority 
         self.myStopped.pid = pid
         self.__clear_stop("__set_stop")
@@ -890,9 +921,10 @@ class Debugger:
         callback = None
 
         # Remove callback to avoid calling it twice (Nice, this wasn't possible with legacy_callbacks) (I'm not sure if we could simply disable a breakpoint for a turn)
-        if (bp := self.breakpoints.get(old_ip)) is not None:
-            callback = bp.callback
-            bp.callback = None
+        saved_callbacks = []
+        for breakpoint in self.breakpoints[old_ip]:
+            saved_callbacks.append(breakpoint.callback)
+            breakpoint.callback = None
         with context.silent:
             n = self.step_until_condition(lambda self: self.instruction_pointer != old_ip, limit=5)
         if n == -1:
@@ -900,8 +932,8 @@ class Debugger:
         if n > 0:
             log.debug(f"Bug still present. Had to force {n} time(s)")
 
-        if callback is not None:
-            bp.callback = callback
+        for breakpoint, callback in zip(self.breakpoints[old_ip], saved_callbacks):
+            breakpoint.callback = callback
 
     # For backward compatibility
     exit_broken_function = __broken_step
@@ -1033,7 +1065,7 @@ class Debugger:
     def __jump_gdb(self, address):
         # BUG setting rip this way may cause problems with si [30/04/23] 
         #self.instruction_pointer = address
-        self.b(address, temporary=True)
+        self.b(address, temporary=True, user_defined=False)
         self.execute_action(f"jump *{hex(address)}", sender="jump")
         self.priority_wait()
 
@@ -1243,7 +1275,7 @@ class Debugger:
         # I may put a flag to precise if the code is self modifying or not and if it is handle breakpoints
         # If the code is self modifying you must use handler otherwise the breakpoint will be overwritten with bad code [26/02/23]
         if handler is None:
-            self.b(self.instruction_pointer, temporary=True)
+            self.b(self.instruction_pointer, temporary=True, user_defined=False)
         else:
             from queue import Queue
             my_address = Queue()
@@ -1251,9 +1283,9 @@ class Debugger:
             def callback(dbg):
                 address = my_address.get()
                 my_address.put(dbg.instruction_pointer)
-                dbg.b(address, temporary=True)
+                dbg.b(address, temporary=True, user_defined=False)
                 return False  
-            self.b(handler, callback=callback, temporary=True)
+            self.b(handler, callback=callback, temporary=True, user_defined=False)
         
         if type(n) is str:
             n = n.upper()
@@ -1365,7 +1397,7 @@ class Debugger:
     # May want to put breakpoints relative to the libc too?
     # I want to keep legacy breakpoints for the ones I set with the library because we must be able to work manually when emulating ptrace [23/03/23]
     # legacy_callback will be deprecated once I can overwrite gdb's nexti to keep his breakpoint even if the process gets interrupted [27/04/23]
-    def b(self, location: [int, str], callback=None, legacy_callback=None, temporary=False):
+    def b(self, location: [int, str], callback=None, legacy_callback=None, temporary=False, user_defined=True):
         """
         Set a breakpoint in your process.
 
@@ -1379,7 +1411,9 @@ class Debugger:
             callback takes a pointer to the debugger as parameter and should return True if you want to interrupt the execution and False otherwise. If you forget a return value the default behaviour is to interrupt the process when reaching the breakpoint
             You can use Queue to pass data between your exploit and the callbacks
         temporary : BOOL, optional
-        Don't save the breakpoint and disable it when hit
+            Don't save the breakpoint and disable it when hit
+        user_defined : BOOL, restricted
+            Flag to identify breakpoints set by the library from the ones used by the users. Don't touch it.
 
         Returns
         -------
@@ -1399,33 +1433,49 @@ class Debugger:
         log.debug(f"putting breakpoint in {self.reverse_lookup(address)}")
         
         if self.gdb is not None:
-            breakpoint = Breakpoint(self.__breakpoint_gdb(address, legacy_callback).server_breakpoint, callback, temporary)
+            breakpoint = Breakpoint(self.__breakpoint_gdb(address, legacy_callback).server_breakpoint, address, callback, temporary, user_defined)
         elif self.libdebug is not None:
             if legacy_callback is not None:
                 callback = legacy_callback
-            breakpoint = Breakpoint(self.__breakpoint_libdebug(address), callback, temporary)
+            breakpoint = Breakpoint(self.__breakpoint_libdebug(address), address, callback, temporary, user_defined)
         else:
             ...
 
-        self.breakpoints[address] = breakpoint
+        self.breakpoints[address].append(breakpoint)
         return breakpoint
         
     breakpoint = b
 
-    def delete_breakpoint(self, location: [int, str]) -> bool:
+    def delete_breakpoint(self, breakpoint: [int, str, Breakpoint]) -> bool:
+        """
+        Delete a particular breakpoint
+        If an address (or symbol) is passed the only user defined at that address will be deleted
+        
+        If possible pass the breakpoint itself
+        """
+
         if not self.debugging:
             log.warn_once(DEBUG_OFF)
             return
 
-        address = self.parse_address(location)
-        # Is there a case where it isn't ?? [17/04/23]
-        if address in self.breakpoints:
-            if self.gdb is not None:
-                self.breakpoints.pop(address).gdb_breakpoint.delete() # Remove from dict and delete from gdb
-            elif self.libdebug is not None:
-                self.libdebug.del_bp(self.breakpoints.pop(address).gdb_breakpoint)
-            else:
-                ...
+        if type(breakpoint) is not Breakpoint:
+            location = breakpoint
+            address = self.parse_address(location)
+            # Is there a case where it isn't ?? [17/04/23]
+            user_breakpoints = [b for b in self.breakpoints[address] if b.user_defined]
+            if len(user_breakpoints) == 0:
+                raise Exception(f"No breakpoint at address {hex(address)}")
+            if len(user_breakpoints) > 1:
+                raise Exception(f"You set multiple breakpoint at {hex(address)}! Which one should I delete ???")
+            breakpoint = user_breakpoints[0]
+
+        self.breakpoints[breakpoint.address].pop(self.breakpoints[breakpoint.address].index(breakpoint))
+        if self.gdb is not None:
+            breakpoint.gdb_breakpoint.delete() # Remove from dict and delete from gdb
+        elif self.libdebug is not None:
+            self.libdebug.del_bp(breakpoint.gdb_breakpoint)
+        else:
+            ...
 
     ########################## MEMORY ACCESS ##########################
 
@@ -1894,6 +1944,10 @@ class Debugger:
         #            return 0
         #        return int(ip, 16)
 
+    @property
+    def return_pointer(self):
+        return self.__saved_ip
+
     ########################## FORKS ##########################
     # TODO find a better name [28/02/23]
     # TODO make inferior and n the same parameter ? [04/03/23]
@@ -2054,7 +2108,7 @@ class Debugger:
                 return True
                 #return False 
             # WHY IS THE BREAK HIT TWICE ??? [07/03/23]
-            self.b(wait_fun, callback = callback)
+            self.b(wait_fun, callback = callback, user_defined=False)
 
             self.write(self.parse_address("ptrace"), RET)
             def ptrace_callback(dbg):
@@ -2065,7 +2119,7 @@ class Debugger:
                 # Nope... [24/03/23]
                 return False
 
-            self.b(self.symbols["ptrace"], legacy_callback = ptrace_callback)
+            self.b(self.symbols["ptrace"], legacy_callback = ptrace_callback, user_defined=False)
 
         else:
             log.debug("stop emulating slave. Removing waitpid and ptrace breakpoints")
@@ -2142,7 +2196,7 @@ class Debugger:
 
         # Legacy_callback so that the program does run off if we step over the breakpoint manualy
         # Is this still needed ? [05/05/23] # Yes, you have to patch gdb's implementation of nexti and finish first
-        self.b("ptrace", legacy_callback=ptrace_callback)
+        self.b("ptrace", legacy_callback=ptrace_callback, user_defined=False)
 
         # Set breakpoint for wait_attach
         # Not in attach because TRACEME doesn't call attach
@@ -2167,7 +2221,7 @@ class Debugger:
                 log.debug("we hit waitpid")
                 return False
 
-        self.b(self.symbols[wait_fun], legacy_callback = callback_wait)
+        self.b(self.symbols[wait_fun], legacy_callback = callback_wait, user_defined=False)
 
         return self
 
