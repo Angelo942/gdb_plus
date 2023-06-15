@@ -990,6 +990,10 @@ class Debugger:
             log.debug(f"finish found next ip : {hex(ip)}")
             if ip == 0:
                 raise Exception("stack frame is broken or we are not in a function")
+            if ip == self.instruction_pointer:
+                log.warn(f"wait, we already are at the address {hex(ip)}!")
+                log.warn("Trying experimental finish. Use dbg.execute('finish') if this doesn't work")
+                ip = self._find_rip()
             self.continue_until(ip, force=force)
         if done is not None:
             done.set()
@@ -1836,22 +1840,31 @@ class Debugger:
         else:
             self.rip = value
 
-    @property
-    def __saved_ip(self):
-        if self.gdb is not None:
-            return self.gdb.newest_frame().older().pc()
-
-        elif self.libdebug is not None:
-            self.restore_arch()
-            # experimental, but should be better that the native one for libdebug        
-            if self.next_inst.toString() in ["endbr64", "push rbp", "push ebp"]:
+    def _find_rip(self):
+        self.restore_arch()
+        if self.base_pointer:
+            if self.next_inst.toString() in ["endbr64", "push rbp", "push ebp", "ret"]:
                 return_pointer = self.read(self.stack_pointer, context.bytes)
             elif self.next_inst.toString() in ["mov rbp, rsp", "mov ebp, esp"]:
                 return_pointer = self.read(self.stack_pointer + context.bytes, context.bytes) # Remove the base pointer # No need to place it back in rbp
             else:
                 return_pointer = self.read(self.base_pointer + context.bytes, context.bytes)
 
-            return unpack(return_pointer)        
+        else:
+            # At least, this is the case with fork and works better than gdb.
+            return_pointer = self.read(self.stack_pointer, context.bytes)
+
+        return unpack(return_pointer)
+
+    @property
+    def __saved_ip(self):
+        if self.gdb is not None:
+            return self.gdb.newest_frame().older().pc()
+
+        elif self.libdebug is not None:
+            return self._find_rip()
+        else:
+            ...
 
         ## rip = 0x7ffff7fe45b8 in _dl_start_final (./elf/rtld.c:507); saved rip = 0x7ffff7fe32b8
         #data = self.execute("info frame 0").split("\n")
@@ -1902,6 +1915,8 @@ class Debugger:
         # Do we include self.gdbscript ? [08/05/23]
         # Warn to use it only to setup the debugger in general ? No commands because they will be runned by all childs
         child = Debugger(pid, binary=self.elf.path)
+        # Copy libc since child can't take it from process [04/06/23]
+        child.libc = self.libc
         log.debug("new debugger opened")
         child.write(ip, backup)
         log.debug("shellcode patched")
@@ -2354,7 +2369,11 @@ class Debugger:
         if self.elf and name in self.special_registers + self.registers + self.minor_registers:
             self.restore_arch()
             if self.gdb is not None:
-                self.execute(f"set ${name.lower()} = {value % 2**context.bits}")
+                if name.lower not in ["eip, rip"]:
+                    self.execute(f"set ${name.lower()} = {value % 2**context.bits}")
+                else:
+                    # GDB has a bug when setting rip ! [09/06/23]
+                    jump(value)
             elif self.libdebug is not None:
                 setattr(self.libdebug, name, value)
             else:
