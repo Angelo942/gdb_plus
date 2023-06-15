@@ -121,48 +121,12 @@ class Debugger:
                     else:
                         log.warn(f"{timeout}s timeout isn't enought to reach the code... Retrying...")
 
-    def __handle_breakpoints(self, breakpoints):
-        should_continue = self._stop_reason != "SINGLE STEP" # Versione semplice. Se vengo da uno step non devo mai continuare e almeno adesso è già salvato [05/06/23]
-        # I don't set stop after each breakpoint to avoid letting a script continue while another callback is running [06/06/23]
-        set_stop = []
-        log.debug(f"{hex(self.instruction_pointer)}: {len(breakpoints)} breakpoints")
-        # Copy because the list will be modified by delete() [06/06/23]
-        for breakpoint in breakpoints.copy():
-            if breakpoint.temporary:
-                self.delete_breakpoint(breakpoint)
-
-            if breakpoint.callback is None:
-                should_continue = False
-                # Must be set for each breakpoint for the library funtions to work [05/06/23]
-                # Check that the priorities can't be broken by a breakpoint set by the user... [05/06/23]
-                set_stop.append("No callback")  
-                
-            else:           
-                should_stop = breakpoint.callback(self)
-                if should_stop is None or should_stop:
-                    should_continue = False
-                    set_stop.append("callback returned or None")  
-
-                else:
-                    should_continue &= True
-                    log.debug("callback returned False")
-
-        for stop_reason in set_stop:
-            self.__set_stop(stop_reason)
-
-        # TODO IMPROVE THIS [06/06/23]
-        # We have a problem. If I do a next() and hit a breakpoint with a finish(); return False, How should I know not to continue after the finish ?
-        if should_continue: 
-            log.debug("hidden continue")
-            self.__hidden_continue()
-
-    # We stopped using gdb's implementation of temporary breakpoints so that we can differentiate an interruption caused by my debugger and cause by the manual use of gdb 
-    # Event could tell me which breakpoint has been hit or which signal cause the interruption
     def __stop_handler_gdb(self):
         """
         Actions that the debugger performs every time the process is interrupted
         Handle temporary breakpoints and callbacks
         """
+        self.out_of_breakpoint.clear()
         self.restore_arch()
 
         ## I don't want to use interrupt in split_on_fork
@@ -198,6 +162,52 @@ class Debugger:
         # Doesn't even handle the case where I step, but I'm waiting in continue until
         # Damn, gdb detects the breakpoint even if we don't run over the INT3... so this doesn't work. We never have reason SINGLE STEP with a breakpoint. We need another indication [10/05/23]
         self.__handle_breakpoints(breakpoints)
+        self.out_of_breakpoint.set()
+
+    # We stopped using gdb's implementation of temporary breakpoints so that we can differentiate an interruption caused by my debugger and cause by the manual use of gdb 
+    # Event could tell me which breakpoint has been hit or which signal cause the interruption
+    def __stop_handler_gdb(self):
+        """
+        Actions that the debugger performs every time the process is interrupted
+        Handle temporary breakpoints and callbacks
+        """
+        self.out_of_breakpoint.clear()
+        self.restore_arch()
+
+        ## I don't want to use interrupt in split_on_fork
+        #if not self.to_split.empty():
+        #    pid = self.to_split.get()
+        #    log.debug(f"found child {pid} to split out")
+        #    self.children[pid] = self.split_child(pid=pid)
+
+        # Current inferior will change to the inferior who stopped last
+        ip = self.instruction_pointer
+        breakpoints = self.breakpoints[ip]
+
+        log.debug(f"{self.current_inferior.pid} stopped at address: {hex(ip)} for {self._stop_reason}")
+        
+        # TODO handle stop in 
+        if len(breakpoints) == 0:
+            # Is it right to catch SIGSTOP and SIGTRAP ? [04/06/23]
+            if self.stepped or self.interrupted:
+                # I hope that the case where we step and still end up on a breakpoint won't cause problems because we would not reset stepped... [29/04/23]
+                self.stepped = False
+                self.interrupted = False
+                self.__set_stop("stepped or interrupted")
+            elif self._stop_reason in ["SIGSTOP", "SIGTRAP"]: # SIGTRAP to handle known int3 in the code
+                self.__set_stop("SIGTRAP or SIGSTOP")
+            # Work in progress [04/06/23]
+            #elif self._stop_reason == "SIGSEGV":
+            #    self.__exit_handler(...)
+            else:
+                log.debug("I stopped for a manual interaction")
+            self.out_of_breakpoint.set()
+            return            
+        
+        # Doesn't handle the case where we use ni and hit the breakpoint though... [17/04/23] TODO!
+        # Doesn't even handle the case where I step, but I'm waiting in continue until
+        # Damn, gdb detects the breakpoint even if we don't run over the INT3... so this doesn't work. We never have reason SINGLE STEP with a breakpoint. We need another indication [10/05/23]
+        self.__handle_breakpoints(breakpoints)
         #context.Thread(target=self.__handle_breakpoints, args=(breakpoints,)).start()
 
     def __stop_handler_libdebug(self):
@@ -205,6 +215,7 @@ class Debugger:
         Actions that the debugger performs every time the process is interrupted
         Handle temporary breakpoints and callbacks
         """
+        self.out_of_breakpoint.set()
         self.restore_arch()
 
         # Current inferior will change to the inferior who stopped last
@@ -733,8 +744,17 @@ class Debugger:
     # problems when I haven't executed anything
     @property
     def running(self):
-        return not self.myStopped.is_set()
-
+        if self.gdb is not None:
+            try:
+                self.rax
+                return False
+            except:
+                return True
+        elif self.libdebug is not None:
+            return not self.libdebug._test_execution()
+        else:
+            ...
+    
     @property
     def priority(self):
         return self.myStopped.priority
@@ -816,34 +836,34 @@ class Debugger:
     def __interrupt_libdebug(self):
         pass
 
-    # temporarily interrupt the execution of our process to get back control of gdb (equivalent of a manual ctrl+C)
+        # temporarily interrupt the execution of our process to get back control of gdb (equivalent of a manual ctrl+C)
     # don't worry about the "kill"
     # May cause problem with the priority [26/04/23]
     # Why does it allways interrupt the first inferior even when I switch to another one ?? [29/04/23]
-    def interrupt(self):
-        """
-        Stop the process as you would with ctrl+C in gdb
+    #def interrupt(self):
+    #    """
+    #    Stop the process as you would with ctrl+C in gdb
+    #
+    #    Warning: can not YET be put inside a callback
+    #    """
+    #    if not self.debugging:
+    #        log.warn_once(DEBUG_OFF)
+    #        return
+    #    
+    #    # TODO check that self.running is valid and then use execute_action and priority_wait
+    #    # Can not work correctly with multiple inferiors. End up always interrupting the first one... [29/04/23]
+    #    if self.running:
+    #        self.interrupted = True
+    #        #self.myStopped.clear()
+    #        #os.kill(self.inferiors[self.current_inferior.num].pid, signal.SIGINT)
+    #        #self.wait(legacy=True, timeout=0.1)
+    #        # Need priority if calling interrupt in callback for split while waiting for finish in another thread
+    #        log.debug(f"interrupting inferior: {self.current_inferior} [pid:{self.current_inferior.pid}]")
+    #        self.execute_action("interrupt", sender="interrupt")
+    #        #os.kill(self.inferiors[self.current_inferior.num].pid, signal.SIGSTOP)
+    #        self.priority_wait()
 
-        Warning: can not YET be put inside a callback
-        """
-        if not self.debugging:
-            log.warn_once(DEBUG_OFF)
-            return
-        
-        # TODO check that self.running is valid and then use execute_action and priority_wait
-        # Can not work correctly with multiple inferiors. End up always interrupting the first one... [29/04/23]
-        if self.running == self.running:
-            self.interrupted = True
-            #self.myStopped.clear()
-            #os.kill(self.inferiors[self.current_inferior.num].pid, signal.SIGINT)
-            #self.wait(legacy=True, timeout=0.1)
-            # Need priority if calling interrupt in callback for split while waiting for finish in another thread
-            log.debug(f"interrupting inferior: {self.current_inferior} [pid:{self.current_inferior.pid}]")
-            self.execute_action("interrupt", sender="interrupt")
-            #os.kill(self.inferiors[self.current_inferior.num].pid, signal.SIGSTOP)
-            self.priority_wait()
-
-    def interrupt(self):
+    def interrupt(self, strict=True):
         # claim priority asap
         self.execute_action("", sender="interrupt")
 
@@ -851,10 +871,15 @@ class Debugger:
             log.warn_once(DEBUG_OFF)
             return
 
-        # Still not working properly, so let's wait before using running
-        #if not self.running:
-        #    return
+        if strict:
+            log.critical("waiting before interrupt")
+            self.out_of_breakpoint.wait()
 
+        if not self.running:
+            self.__set_stop("I didn't have to stop")
+            return
+
+        self.interrupted = True
         if self.gdb is not None:
             pid = self.current_inferior.pid
         elif self.libdebug is not None:
@@ -864,6 +889,10 @@ class Debugger:
         log.debug(f"interrupting [pid:{self.pid}]")
         os.kill(pid, signal.SIGSTOP)
         self.priority_wait()
+
+        if strict:
+            log.critical('waiting after interrupt')
+            self.out_of_breakpoint.wait()
 
     manual = interrupt
 
