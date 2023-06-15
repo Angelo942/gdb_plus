@@ -278,8 +278,10 @@ class Debugger:
         address = self.instruction_pointer
         backup = self.inject_sleep(address)
 
+        # Maybe put a try except to restore the backup in case of accident [06/06/23]
         if gdb:
             assert self.gdb is None
+            # For some reason detach while not running seems to kill the process [06/06/23]
             # No event on exit to disconnect yet [01/06/23]
             self.detach()
             log.debug("migrating to gdb")
@@ -1987,6 +1989,8 @@ class Debugger:
         child = Debugger(pid, binary=self.elf.path, script=script)
         # Copy libc since child can't take it from process [04/06/23]
         child.libc = self.libc
+        # Set parent for ptrace [08/06/23]
+        child.parent = self
         log.debug("new debugger opened")
         child.write(ip, backup)
         log.debug("shellcode patched")
@@ -2012,7 +2016,7 @@ class Debugger:
             #    del self.breakpoints["fork"]
 
             # Will break if not set on before
-            self.gdb.events.new_inferior.disconnect(self.inferior_handler)
+            self.gdb.events.new_inferior.disconnect(self.fork_handler)
                 
         else:
             self.execute("set detach-on-fork off")
@@ -2045,21 +2049,23 @@ class Debugger:
                                 log.warn("I made a mistake and stepped thinking we would catch an interrupt. I hope this won't be a problem")
                     self.children[pid] = self.split_child(inferior=inferior, script=script)
                     # Should not continue if I reached the breakpoint before the split
+                    self.split.put(pid)
                     if not interrupt and stopped:
                         self.execute("c")
                         # What is the difference ? [05/O5/23 20:30]
                         #self.priority -= 1 # Can i do it this way to keep the priority correct ? [05/05/23 20:00]
                         #self.cont(wait=False)
                     # Put it at the end to avoid any race condition [05/05/23 2O:30]
-                    self.split.put(pid)
                     # I didn't stop due to the signal, but I must be running to split, so we are in the case where we hit a breakpoint (right ??) [29/05/23]
-                    if not stopped:
-                        self.__clear_stop("I did hit a breakpoint while interrupting the process")
-                        self.myStopped.set()
+                    elif not stopped:
+                        self.__set_stop("I did hit a breakpoint while interrupting the process")
+                    elif interrupt:
+                        self.__set_stop("I have been asked to stop after a fork")            
                 ## Non puoi eseguire azioni dentro ad un handler degli eventi quindi lancio in un thread a parte
                 context.Thread(target=split, args = (inferior,)).start()
 
-            self.gdb.events.new_inferior.connect(fork_handler)
+            self.fork_handler = fork_handler
+            self.gdb.events.new_inferior.connect(self.fork_handler)
             
             return self
 

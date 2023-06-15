@@ -4,6 +4,7 @@ GDB+ 6.3.2: hotfix ptrace emulation
 * hotfix nested continue_until with the same destination
 	- For now use a second callback instead of a finish (or even worse a continue_until) 
 	- We will think later how to correctly handle the order of stacked breakpoints on the same address
+* hotfix turn off set_split_on_fork
 * standardise how inferiors are handled
 	- inferiors can be specified only to read and write memory. Split the debugger or use switch_inferior if you have to perform other actions.
 * util functions to read and write ints, longs, and strings
