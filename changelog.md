@@ -16,6 +16,7 @@ GDB+ 6.3.2: hotfix ptrace emulation
 * set correct status for waitpid while emulating ptrace
 * Define gdbscript to execute when splitting a new Debugger
 * inner_debugger write and read from /proc/pid/mem
+* util step_until_call
 
 GDB+ 6.3.1: hotfix libdebug
 * Make libdebug optional since it can't be added as a dependency (thanks PyPI)

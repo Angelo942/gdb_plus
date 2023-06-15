@@ -121,48 +121,40 @@ class Debugger:
                     else:
                         log.warn(f"{timeout}s timeout isn't enought to reach the code... Retrying...")
 
-    def __stop_handler_gdb(self):
-        """
-        Actions that the debugger performs every time the process is interrupted
-        Handle temporary breakpoints and callbacks
-        """
-        self.out_of_breakpoint.clear()
-        self.restore_arch()
+    def __handle_breakpoints(self, breakpoints):
+        should_continue = self._stop_reason != "SINGLE STEP" # Versione semplice. Se vengo da uno step non devo mai continuare e almeno adesso è già salvato [05/06/23]
+        # I don't set stop after each breakpoint to avoid letting a script continue while another callback is running [06/06/23]
+        set_stop = []
+        log.debug(f"{hex(self.instruction_pointer)}: {len(breakpoints)} breakpoints")
+        # Copy because the list will be modified by delete() [06/06/23]
+        for breakpoint in breakpoints.copy():
+            if breakpoint.temporary:
+                self.delete_breakpoint(breakpoint)
 
-        ## I don't want to use interrupt in split_on_fork
-        #if not self.to_split.empty():
-        #    pid = self.to_split.get()
-        #    log.debug(f"found child {pid} to split out")
-        #    self.children[pid] = self.split_child(pid=pid)
+            if breakpoint.callback is None:
+                should_continue = False
+                # Must be set for each breakpoint for the library funtions to work [05/06/23]
+                # Check that the priorities can't be broken by a breakpoint set by the user... [05/06/23]
+                set_stop.append("No callback")  
+                
+            else:           
+                should_stop = breakpoint.callback(self)
+                if should_stop is None or should_stop:
+                    should_continue = False
+                    set_stop.append("callback returned or None")  
 
-        # Current inferior will change to the inferior who stopped last
-        ip = self.instruction_pointer
-        breakpoints = self.breakpoints[ip]
+                else:
+                    should_continue &= True
+                    log.debug("callback returned False")
 
-        log.debug(f"{self.current_inferior.pid} stopped at address: {hex(ip)} for {self._stop_reason}")
-        
-        # TODO handle stop in 
-        if len(breakpoints) == 0:
-            # Is it right to catch SIGSTOP and SIGTRAP ? [04/06/23]
-            if self.stepped or self.interrupted:
-                # I hope that the case where we step and still end up on a breakpoint won't cause problems because we would not reset stepped... [29/04/23]
-                self.stepped = False
-                self.interrupted = False
-                self.__set_stop("stepped or interrupted")
-            elif self._stop_reason in ["SIGSTOP", "SIGTRAP"]: # SIGTRAP to handle known int3 in the code
-                self.__set_stop("SIGTRAP or SIGSTOP")
-            # Work in progress [04/06/23]
-            #elif self._stop_reason == "SIGSEGV":
-            #    self.__exit_handler(...)
-            else:
-                log.debug("I stopped for a manual interaction")
-            return            
-        
-        # Doesn't handle the case where we use ni and hit the breakpoint though... [17/04/23] TODO!
-        # Doesn't even handle the case where I step, but I'm waiting in continue until
-        # Damn, gdb detects the breakpoint even if we don't run over the INT3... so this doesn't work. We never have reason SINGLE STEP with a breakpoint. We need another indication [10/05/23]
-        self.__handle_breakpoints(breakpoints)
-        self.out_of_breakpoint.set()
+        for stop_reason in set_stop:
+            self.__set_stop(stop_reason)
+
+        # TODO IMPROVE THIS [06/06/23]
+        # We have a problem. If I do a next() and hit a breakpoint with a finish(); return False, How should I know not to continue after the finish ?
+        if should_continue: 
+            log.debug("hidden continue")
+            self.__hidden_continue()
 
     # We stopped using gdb's implementation of temporary breakpoints so that we can differentiate an interruption caused by my debugger and cause by the manual use of gdb 
     # Event could tell me which breakpoint has been hit or which signal cause the interruption
@@ -208,14 +200,14 @@ class Debugger:
         # Doesn't even handle the case where I step, but I'm waiting in continue until
         # Damn, gdb detects the breakpoint even if we don't run over the INT3... so this doesn't work. We never have reason SINGLE STEP with a breakpoint. We need another indication [10/05/23]
         self.__handle_breakpoints(breakpoints)
-        #context.Thread(target=self.__handle_breakpoints, args=(breakpoints,)).start()
+        self.out_of_breakpoint.set()
 
     def __stop_handler_libdebug(self):
         """
         Actions that the debugger performs every time the process is interrupted
         Handle temporary breakpoints and callbacks
         """
-        self.out_of_breakpoint.set()
+        self.out_of_breakpoint.clear()
         self.restore_arch()
 
         # Current inferior will change to the inferior who stopped last
@@ -754,7 +746,7 @@ class Debugger:
             return not self.libdebug._test_execution()
         else:
             ...
-    
+
     @property
     def priority(self):
         return self.myStopped.priority
@@ -836,7 +828,7 @@ class Debugger:
     def __interrupt_libdebug(self):
         pass
 
-        # temporarily interrupt the execution of our process to get back control of gdb (equivalent of a manual ctrl+C)
+    # temporarily interrupt the execution of our process to get back control of gdb (equivalent of a manual ctrl+C)
     # don't worry about the "kill"
     # May cause problem with the priority [26/04/23]
     # Why does it allways interrupt the first inferior even when I switch to another one ?? [29/04/23]
@@ -1037,6 +1029,38 @@ class Debugger:
         log.warn_once(f"I made {limit} steps and haven't found what you are looking for...")
         return -1
 
+    def step_until_call(self, callback=None, limit=10_000):
+        """
+        step until a call to a function
+        will look inside the function if the first instruction is already a call
+
+        Arguments:
+            callback: optional function to call at each step
+            limit: number of step before giving up. Set at 10.000 by default
+        """
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+            return
+
+        for i in range(limit):
+            self.step()
+            if callback is not None:
+                callback(self)
+            if self.next_inst.mnemonic == "call":
+                return i
+        else:
+            log.warn_once(f"I made {limit} steps and haven't reached the end of the function...")
+            return -1
+
+    def __next(self, repeat, done):
+        for _ in range(repeat):
+            next_inst = self.next_inst
+            if next_inst.mnemonic == "call":
+                self.continue_until(self.instruction_pointer+next_inst.size)
+            else:
+                self.step()
+        done.set()
+
     def __next(self, repeat, done):
         for _ in range(repeat):
             next_inst = self.next_inst
@@ -1062,6 +1086,29 @@ class Debugger:
             return done
 
     ni = next
+
+    def next_until_call(self, callback=None, limit=10_000):
+        """
+        step until the end of the function
+        will continue over the first finction if called when already before a call
+
+        Arguments:
+            callback: optional function to call at each step
+            limit: number of step before giving up. Set at 10.000 by default
+        """
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+            return
+
+        for i in range(limit):
+            self.next()
+            if callback is not None:
+                callback(self)
+            if self.next_inst.mnemonic == "call":
+                return i
+        else:
+            log.warn_once(f"I made {limit} steps and haven't reached the end of the function...")
+            return -1
 
     def __finish(self, repeat, force, done):
         # Should be possible to take immediatly the corresponding stack frame instead of using a loop [28/04/23]
