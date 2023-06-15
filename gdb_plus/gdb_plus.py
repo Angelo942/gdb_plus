@@ -6,7 +6,7 @@ from functools import partial
 from capstone import Cs, CS_ARCH_X86
 from threading import Event
 from queue import Queue
-from gdb_plus.utils import Arguments, user_regs_struct, context, MyEvent, Breakpoint
+from gdb_plus.utils import *
 #import logging
 
 #log = logging.getLogger("gdb_plus")
@@ -141,12 +141,19 @@ class Debugger:
 
         log.debug(f"{self.current_inferior.pid} stopped at address: {hex(ip)} for {self._stop_reason}")
         
+        # TODO handle stop in 
         if bp is None:
-            if self.stepped or self.interrupted or self._stop_reason in ["SIGSTOP", "SIGTRAP"]: # SIGTRAP to handle known int3 in the code
+            # Is it right to catch SIGSTOP and SIGTRAP ? [04/06/23]
+            if self.stepped or self.interrupted:
                 # I hope that the case where we step and still end up on a breakpoint won't cause problems because we would not reset stepped... [29/04/23]
                 self.stepped = False
                 self.interrupted = False
                 self.__set_stop()
+            elif self._stop_reason in ["SIGSTOP", "SIGTRAP"]: # SIGTRAP to handle known int3 in the code
+                self.__set_stop()
+            # Work in progress [04/06/23]
+            #elif self._stop_reason == "SIGSEGV":
+            #    self.__exit_handler(...)
             else:
                 log.debug("I stopped for a manual interaction")
             return            
@@ -486,6 +493,16 @@ class Debugger:
                 return "SINGLE STEP"
 
         return "STOPPED"
+
+    @property
+    def stop_signal(self) -> int:
+        reason = self._stop_reason
+        if reason == "SINGLE STEP":
+            return 0x5
+        if "BREAKPOINT" in reason:
+            return 0x13 # Not sure
+        else:
+            return SIGNALS[reason]
 
     @property
     def _details_breakpoint_stopped(self) -> str:
@@ -1862,7 +1879,8 @@ class Debugger:
             return self.gdb.newest_frame().older().pc()
 
         elif self.libdebug is not None:
-            return self._find_rip()
+            return self._find_rip()     
+
         else:
             ...
 
@@ -1883,7 +1901,7 @@ class Debugger:
     # Call shellcode has problems: https://sourceware.org/gdb/onlinedocs/gdb/Registers.html. Can't push rip
     # Warn that the child will still be in the middle of the fork [26/04/23]
     # TODO support split for libdebug [02/06/23] (Will require a new patch to libdebug)
-    def split_child(self, *, pid = None, inferior=None, n=None):
+    def split_child(self, *, pid = None, inferior=None, n=None, script=""):
         self.restore_arch()
         if inferior is None:
             for inf_n, inferior in self.inferiors.items():
@@ -1912,9 +1930,7 @@ class Debugger:
         self.switch_inferior(old_inferior.num)
         log.debug("detaching from child")
         self.execute(f"detach inferiors {n}")
-        # Do we include self.gdbscript ? [08/05/23]
-        # Warn to use it only to setup the debugger in general ? No commands because they will be runned by all childs
-        child = Debugger(pid, binary=self.elf.path)
+        child = Debugger(pid, binary=self.elf.path, script=script)
         # Copy libc since child can't take it from process [04/06/23]
         child.libc = self.libc
         log.debug("new debugger opened")
@@ -1926,7 +1942,7 @@ class Debugger:
     # entrambi dovrebbero essere interrotti, il parent alla fine di fork, il child a metà
     # Ho deciso di lasciare correre il parent. Te la gestisci te se vuoi mettere un breakpoint mettilo dopo
     # I just discovered "gdb.events.new_inferior"... I can take the pid from event.inferior.pid, but can I do more ?
-    def set_split_on_fork(self, off=False, c=False, keep_breakpoints=False, interrupt=False):
+    def set_split_on_fork(self, off=False, c=False, keep_breakpoints=False, interrupt=False, script=""):
         """
         split out a new debugging session for the child process every time you hit a fork
 
@@ -1973,7 +1989,7 @@ class Debugger:
                                 self.step(repeat=2)
                             if address != self.instruction_pointer:
                                 log.warn("I made a mistake and stepped thinking we would catch an interrupt. I hope this won't be a problem")
-                    self.children[pid] = self.split_child(inferior=inferior)
+                    self.children[pid] = self.split_child(inferior=inferior, script=script)
                     # Should not continue if I reached the breakpoint before the split
                     if not interrupt and stopped:
                         self.execute("c")
@@ -2015,7 +2031,7 @@ class Debugger:
             log.debug(f"emulating slave proc {self.pid}")
             # patch waitpid
             # Attento che funziona solo su 64 bit, ma è un test per capire da dove appare il sigabort [08/03/23]
-            self.write(self.symbols[wait_fun], RET)
+            self.write(self.parse_address(wait_fun), RET)
             # set breakpoint
             # You can not wait inside the breakpoint otherwise gdb gets blocked before the child can be split away 
             def callback(dbg):
@@ -2038,9 +2054,9 @@ class Debugger:
                 return True
                 #return False 
             # WHY IS THE BREAK HIT TWICE ??? [07/03/23]
-            self.b(self.symbols[wait_fun], callback = callback)
+            self.b(wait_fun, callback = callback)
 
-            self.write(self.symbols["ptrace"], RET)
+            self.write(self.parse_address("ptrace"), RET)
             def ptrace_callback(dbg):
                 ptrace_command = dbg.args[0]
                 assert ptrace_command == constants.PTRACE_TRACEME
@@ -2053,11 +2069,12 @@ class Debugger:
 
         else:
             log.debug("stop emulating slave. Removing waitpid and ptrace breakpoints")
-            self.delete_breakpoint(self.symbols[wait_fun])
-            self.delete_breakpoint(self.symbols["ptrace"])
+            self.delete_breakpoint(wait_fun)
+            self.delete_breakpoint("ptrace")
 
         return self
     
+
     def emulate_ptrace_master(self, slave = None, *, wait_fun = "waitpid", stop_at_waitpid = True):
         """
         Tell the debugger to handle calls to ptrace
@@ -2073,7 +2090,8 @@ class Debugger:
             log.debug(f"emulating master {self.pid} over {slave.pid}")
             self.slaves[slave.pid] = slave
         # patch ptrace
-        self.write(self.symbols["ptrace"], RET)
+        # Do we really want to patch it instead of using a callback ?
+        self.write(self.parse_address("ptrace"), RET)
 
         # Waiting for pwntools update
         if context.arch == "amd64":
@@ -2124,20 +2142,24 @@ class Debugger:
 
         # Legacy_callback so that the program does run off if we step over the breakpoint manualy
         # Is this still needed ? [05/05/23] # Yes, you have to patch gdb's implementation of nexti and finish first
-        self.b(self.symbols["ptrace"], legacy_callback=ptrace_callback)
+        self.b("ptrace", legacy_callback=ptrace_callback)
 
         # Set breakpoint for wait_attach
         # Not in attach because TRACEME doesn't call attach
         # gdb has a bug, [#0] Id 1, Name: "traps_withSymbo", stopped 0x448ac0 in waitpid (), reason: SIGINT. even without a breakpoint
-        self.write(self.symbols[wait_fun], RET)
-        # You have to choose between return False and temporary for now...
+        self.write(self.parse_address(wait_fun), RET)
+        # I want to put a wait child.done before setting the signal... [04/06/23]
+        # How to handle the stops if we move manually with gdb ? I can't put it simply in the stop_handler. Can we force the user to use IPython ? [04/06/23] 
+        log.warn("for now waitpid must be reached after the child has stopped")
         def callback_wait(dbg):
-            dbg.return_value = dbg.args[0] #slave.pid # Not really, but just != 0
+            pid = dbg.args[0]
+            # TODO handle it from the slave [04/06/23]
+            if pid < 1:
+                pid = list(self.children.values())[-1].pid 
             status_pointer = dbg.args[1]
-            # Should be set in relation to the slave... But for now rip
-            wait_signal = self._wait_signal if self._wait_signal is not None else 0x13
-            self._wait_signal = None
-            dbg.write(status_pointer, p32(wait_signal * 0x100 + 0x7f)) # Random status that currently works. For sigabort it is \x13\x7f \x13 is SIGSTOP \x7f means that the process has stopped
+            # TODO what about handling events in status ? [04/06/23]
+            log.debug(f"setting status waitpid: [{hex(self.children[pid].stop_signal * 0x100 + 0x7f)}]")
+            dbg.write(status_pointer, p32(self.children[pid].stop_signal * 0x100 + 0x7f))
             if stop_at_waitpid:
                 log.info(f"parent is waiting for the child [{dbg.args[0]}]. Continue once you are ready.")
                 return True
@@ -2249,8 +2271,7 @@ class Debugger:
 
     def PTRACE_SINGLESTEP(self, _, __, *, slave):
         log.debug("ptrace single step")
-        slave.step()
-        self._wait_signal = 0x5 
+        slave.step(force=True)
         self.return_value = 0
 
     ########################## REV UTILS ##########################

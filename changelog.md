@@ -7,6 +7,9 @@ GDB+ 6.3.2: hotfix ptrace emulation
 	- write functions take an pointer and a value or list of values. If pointer is None the address is allocated in the heap (or in the bss if heap=False). The function returns a pointer to the data
 	- by default read functions return a single value. If the argument n > 1 the function returns an array
 	- the null bytes for the strings are added when writing and removed when reading
+* set correct status for waitpid while emulating ptrace
+* Define gdbscript to execute when splitting a new Debugger
+* inner_debugger write and read from /proc/pid/mem
 
 GDB+ 6.3.1: hotfix libdebug
 * Make libdebug optional since it can't be added as a dependency (thanks PyPI)

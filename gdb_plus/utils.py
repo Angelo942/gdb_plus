@@ -15,6 +15,7 @@ class user_regs_struct:
     def set(self, data):
         for i, register in enumerate(self.registers):
             setattr(self, register, unpack(data[i*context.bytes:(i+1)*context.bytes])) # I said I don't like unpack, but shhh [02/03/23]
+        return self
 
     def get(self):
         data = b""
@@ -60,7 +61,7 @@ class Arguments:
         if context.bits == 64:
             if index < 6:
                 register = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"][index]
-                return setattr(self.dbg, register)
+                return setattr(self.dbg, register, value)
             else:
                 index -= 6
         if self.dbg.next_inst.toString() in ["endbr64", "push rbp", "push ebp"]:
@@ -116,4 +117,46 @@ class Breakpoint:
         self.gdb_breakpoint = breakpoint
         self.callback = callback
         self.temporary = temporary
-        
+SIGNALS = {
+       "SIGHUP":           1, 
+       "SIGINT":           2, 
+       "SIGQUIT":          3, 
+       "SIGILL":           4, 
+       "SIGTRAP":          5, 
+       "SIGABRT":          6, 
+       "SIGIOT":           6, 
+       "SIGBUS":           7, 
+    #    "SIGEMT":           -, 
+       "SIGFPE":           8, 
+       "SIGKILL":          9, 
+       "SIGUSR1":         10, 
+       "SIGSEGV":         11, 
+       "SIGUSR2":         12, 
+       "SIGPIPE":         13, 
+       "SIGALRM":         14, 
+       "SIGTERM":         15, 
+       "SIGSTKFLT":       16, 
+       "SIGCHLD":         17, 
+    #    "SIGCLD":           -,  
+       "SIGCONT":         18, 
+       "SIGSTOP":         19, 
+       "SIGTSTP":         20, 
+       "SIGTTIN":         21, 
+       "SIGTTOU":         22, 
+       "SIGURG":          23, 
+       "SIGXCPU":         24, 
+       "SIGXFSZ":         25, 
+       "SIGVTALRM":       26, 
+       "SIGPROF":         27, 
+       "SIGWINCH":        28, 
+       "SIGIO":           29, 
+       "SIGPOLL":         29, 
+       "SIGPWR":          30, 
+    #    "SIGINFO":          -,
+    #    "SIGLOST":          -,
+       "SIGSYS":          31, 
+       "SIGUNUSED":       31, 
+}
+
+SIGNALS_from_num = ["I DON'T KNOW", "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP", "SIGABRT", "SIGBUS", "SIGFPE", "SIGKILL", "SIGUSR1", "SIGSEGV", "SIGUSR2", "SIGPIPE", "SIGALRM", "SIGTERM", "SIGSTKFLT", "SIGCHLD",   "SIGCONT", "SIGSTOP", "SIGTSTP", "SIGTTIN", "SIGTTOU", "SIGURG", "SIGXCPU", "SIGXFSZ", "SIGVTALRM", "SIGPROF", "SIGWINCH", "SIGPOLL", "SIGPWR", "SIGSYS"]
+

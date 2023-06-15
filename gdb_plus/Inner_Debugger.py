@@ -13,6 +13,7 @@ constants.PTRACE_GETREGS = 0xc
 constants.PTRACE_SETREGS = 0xd
 
 # Only work if parent is tracing child (otherwise why would you need this class ?) and if the child is at a stop [02/03/23]
+# Only works for amd64 binaries.
 class Inner_Debugger:
     def __init__(self, dbg: Debugger, pid: int):
         self.dbg = dbg
@@ -25,6 +26,8 @@ class Inner_Debugger:
         self.__pointer_registers = None
 
         self.dbg.restore_arch()
+
+        assert context.arch == "amd64", f"{context.arch} is not supported for Inner_Debugger"
 
     def get_regs(self):
         registers = user_regs_struct()
@@ -41,24 +44,32 @@ class Inner_Debugger:
         self.dbg.call("ptrace", [constants.PTRACE_SETREGS, self.pid, 0, self.__pointer_registers])
         return registers
     
-    def read_memory(self, addr, size) -> bytes:
-        buffer = self.dbg.alloc(size)
-        self.dbg.syscall(constants.SYS_lseek.real, [self.mem_file, addr, constants.SEEK_SET.real])
-        self.dbg.syscall(constants.SYS_read.real, [self.mem_file, buffer, size])
-        data = self.dbg.read(buffer, size)
-        self.dbg.dealloc(buffer)
-        return data
+    def read_memory(self, address: int, size: int) -> bytes:
+        #buffer = self.dbg.alloc(size)
+        #self.dbg.syscall(constants.SYS_lseek.real, [self.mem_file, addr, constants.SEEK_SET.real])
+        #self.dbg.syscall(constants.SYS_read.real, [self.mem_file, buffer, size])
+        #data = self.dbg.read(buffer, size)
+        #self.dbg.dealloc(buffer)
+        #return data
+
+        with open(f"/proc/{self.pid}/mem", "r+b") as fd:
+            fd.seek(address)
+            return fd.read(size)
         
     read = read_memory
 
     # Maybe it's faster to write a single shellcode and execute that one
-    def write_memory(self, addr: int, data: bytes):
-        size = len(data)
-        buffer = self.dbg.alloc(size)
-        self.dbg.write(buffer, data)
-        self.dbg.syscall(constants.SYS_lseek, [self.mem_file, addr, constants.SEEK_SET])
-        self.dbg.syscall(constants.SYS_write, [self.mem_file, buffer, size])
-        self.dbg.dealloc(buffer)
+    def write_memory(self, address: int, data: bytes):
+        #size = len(data)
+        #buffer = self.dbg.alloc(size)
+        #self.dbg.write(buffer, data)
+        #self.dbg.syscall(constants.SYS_lseek, [self.mem_file, addr, constants.SEEK_SET])
+        #self.dbg.syscall(constants.SYS_write, [self.mem_file, buffer, size])
+        #self.dbg.dealloc(buffer)
+
+        with open(f"/proc/{self.pid}/mem", "r+b") as fd:
+            fd.seek(address)
+            fd.write(byte_array)
         
     write = write_memory
 
