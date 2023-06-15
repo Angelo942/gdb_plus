@@ -3,6 +3,8 @@ GDB+ 6.3.3: Expand ptrace emulation
 
 * single function for ptrace emulation that handles both tracee and tracer.
 	- process isn't limited at being a slave or a master
+* signal handler 
+
 GDB+ 6.3.2: hotfix ptrace emulation
 * hotfix copy libc to child process
 * hotfix correct(ish) finish when inside libc
