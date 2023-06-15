@@ -301,7 +301,9 @@ class Debugger:
             self.write(address, backup)
             self.jump(address)
             for address in self.breakpoints:
-                self.__breakpoint_gdb(address)
+                for breakpoint in self.breakpoints[address]:
+                    bp = self.__breakpoint_gdb(address)
+                    breakpoint.gdb_breakpoint = bp
         elif libdebug:
             from libdebug import Debugger as lib_Debugger
             # Disable hook stop
@@ -316,8 +318,11 @@ class Debugger:
             self.__setup_libdebug()
             self.write(address, backup)
             self.jump(address)
+            # TODO Handle hb too 
             for address in self.breakpoints:
-                self.__breakpoint_libdebug(address)
+                for breakpoint in self.breakpoints[address]:
+                    bp = self.__breakpoint_libdebug(address)
+                    breakpoint.gdb_breakpoint = bp
         else:
             ...
     # Because pwntools isn't perfect
