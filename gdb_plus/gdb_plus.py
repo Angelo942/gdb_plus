@@ -375,8 +375,9 @@ class Debugger:
                 if event is not None:
                     event.wait()
                     log.debug("user finished interaction. Proceeding with debug_from")
-                log.warn("you haven't set an event to let me know when you finished interactiong with the process. I will give you half a second.")
-                sleep(timeout)
+                else:
+                    log.warn_once("you haven't set an event to let me know when you finished interactiong with the process. I will give you half a second.")
+                    sleep(timeout)
                 # Maybe the process is being traced and I can't attach to it yet
                 try:
                     # what happens if there is a continue in script ? It should break the script, but usually it's the last instruction so who cares ? Just warn them in the docs [06/04/23]
