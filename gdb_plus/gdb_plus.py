@@ -231,7 +231,6 @@ class Debugger:
         breakpoints = self.breakpoints[ip]
 
         log.debug(f"[{self.libdebug.cur_tid}] stopped at address: {hex(ip)} with status: {hex(self.libdebug.stop_status)}")
-
         
         if self._stop_reason in SIGNALS and SIGNALS[self._stop_reason] in self.handled_signals:
             should_stop = self.handled_signals[SIGNALS[self._stop_reason]](self)
@@ -459,7 +458,7 @@ class Debugger:
             return
 
         values = []
-        for register in self.special_registers + self.registers[:-1]: # exclude ip
+        for register in self.special_registers + self.registers: # include ip, setattr will cut it out if not needed
             values.append(getattr(self, register))
         return values
         
@@ -470,7 +469,7 @@ class Debugger:
         if not self.debugging:
             return
 
-        for name, value in zip(self.special_registers + self.registers[:-1], backup):
+        for name, value in zip(self.special_registers + self.registers, backup):
                 setattr(self, name, value)
 
     # Return old_inferior to know where to go back
@@ -614,6 +613,7 @@ class Debugger:
                 return
 
         log.debug(f"[{self.pid}] hidden continue")
+        sleep(0.02)
         if self.gdb is not None:
             self.gdb.execute("c")
         elif self.libdebug is not None:
@@ -1504,8 +1504,6 @@ class Debugger:
         else:
             ...
 
-
-
     def __breakpoint_gdb(self, address, legacy_callback=None):
         # Still needed for hidden breakpoint with return False when you want to also use gdb manually [17/04/23]
         if legacy_callback is not None:
@@ -1613,6 +1611,33 @@ class Debugger:
             self.libdebug.del_bp(breakpoint.native_breakpoint)
         else:
             ...
+
+    def bruteforce(self, _to, check, _from=None, setup=None, limit=1000, backup = [], libdebug=False, parallel=None):
+        log.warn("Bruteforce is experimental! Function may break and names may change")
+        if parallel is not None:
+            log.warn("can not parallelize yet")
+        if _from is not None:
+            self.jump(_from)
+        _to = self.parse_address(_to)
+        registers = self.backup()
+        # continue until is too slow ?
+        # Before backup
+        self.b(_to, user_defined=False)
+        saved_memory = []
+        for address, size in backup:
+            saved_memory.append((address, self.read(address, size)))
+        for i in range(limit):
+            if setup is not None:
+                setup(self, i)
+            self.cont()
+            assert self.instruction_pointer == _to, f"[{self.pid}] stopped at {hex(self.instruction_pointer)} instead of {hex(_to)} with {self._stop_reason}!!"
+            if check(self, i):
+                return i
+            # restore backups
+            self.restore_backup(registers)
+            for address, data in saved_memory:
+                self.write(address, data)
+        log.critical("couldn't find a solution")
 
     ########################## MEMORY ACCESS ##########################
 
@@ -2355,11 +2380,9 @@ class Debugger:
     # Should we handle the interruptions in a special way ? Like adding a priority when attaching ? [08/06/23] (But how to handle stop due to a SIGNAL ?)
 
     # We could do a return False or True depending on if we interrupted the process or not. A small indication if we are debugging manually or not [08/06/23]
-    # This should be the only case where I need the lock, because all other calls to ptrace should happend when the process is already at a stop
     def PTRACE_ATTACH(self, pid, _, *, slave, **kwargs):
         log.info(f"pretending to attach to process {pid}")
         self.slaves[pid] = slave
-        slave.out_of_breakpoint.wait()
         if slave.running:
             log.info(f"attach will interrupt the slave")
             slave.interrupt()
@@ -2380,7 +2403,7 @@ class Debugger:
         tracer.slaves[self.pid] = self
         log.info(f"setting {self.pid} as slave for {tracer.pid}")
         self.return_value = 0
-        # garbage left by ptrace that could be checked
+        # dirt left by ptrace that could be checked
         if context.bits == 64:
             self.r8 = -1
         tracer.ptrace_has_stopped.set()
@@ -2581,11 +2604,11 @@ class Debugger:
         if self.elf and name in self.special_registers + self.registers + self.minor_registers:
             self.restore_arch()
             if self.gdb is not None:
-                if name.lower not in ["eip, rip"]:
-                    self.execute(f"set ${name.lower()} = {value % 2**context.bits}")
-                else:
+                if name.lower in ["eip, rip"] and value != self.instruction_pointer:
                     # GDB has a bug when setting rip ! [09/06/23]
                     jump(value)
+                else:
+                    self.execute(f"set ${name.lower()} = {value % 2**context.bits}")
             elif self.libdebug is not None:
                 setattr(self.libdebug, name, value)
             else:

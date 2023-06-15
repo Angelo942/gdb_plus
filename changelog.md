@@ -1,3 +1,6 @@
+GDB+ 6.3.4: Bruteforce util
+* single thread bruteforce
+
 GDB+ 6.3.3: Expand ptrace emulation
 * hotfix transfer breakpoints while migrating
 * reduce race conditions in for ptrace emulation
