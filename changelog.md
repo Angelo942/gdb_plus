@@ -21,6 +21,8 @@ GDB+ 6.3.2: hotfix ptrace emulation
 * hotfix nested continue_until with the same destination
 	- For now use a second callback instead of a finish (or even worse a continue_until) 
 	- We will think later how to correctly handle the order of stacked breakpoints on the same address
+* hotfix migrate back to gdb
+	- let program run before detaching
 * hotfix turn off set_split_on_fork
 * hotfix correct running property
 
