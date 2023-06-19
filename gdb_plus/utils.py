@@ -2,7 +2,7 @@
 # Redundant with context. May be still used for path and address, but I would remove it.
 
 from pwn import *
-from threading import Event
+from threading import Event, Lock
 from queue import Queue
 from dataclasses import dataclass
 
@@ -15,6 +15,7 @@ class user_regs_struct:
     def set(self, data):
         for i, register in enumerate(self.registers):
             setattr(self, register, unpack(data[i*context.bytes:(i+1)*context.bytes])) # I said I don't like unpack, but shhh [02/03/23]
+        return self
 
     def get(self):
         data = b""
@@ -60,7 +61,7 @@ class Arguments:
         if context.bits == 64:
             if index < 6:
                 register = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"][index]
-                return setattr(self.dbg, register)
+                return setattr(self.dbg, register, value)
             else:
                 index -= 6
         if self.dbg.next_inst.toString() in ["endbr64", "push rbp", "push ebp"]:
@@ -72,6 +73,7 @@ class Arguments:
         return self.dbg.write(pointer, pack(value))
 
 # Warning. Calling wait() before clear() returns immediatly!
+# TODO add a counter on when to stop treating return False as continues
 class MyEvent(Event):
     def __init__(self):
         super().__init__()
@@ -79,31 +81,70 @@ class MyEvent(Event):
         #self.secret = Event()
         self.priority = 0
         self.pid = 0
+        self.flag_enforce_stop = None
 
     # I still need a standard wait for actions not initiated by dbg.cont and dbg.next
-    def priority_wait(self):
-        priority = self.priority
-        log.debug(f"waiting with priority {priority}")
+    # There seems to be a rare bug where multiple priorities are cleared at the same time [11/06/23]
+    def priority_wait(self, comment = "", priority=None):
+        if priority is None:
+            priority = self.priority
+        log.debug(f"[{self.pid}] waiting with priority {priority} for {comment}")
         while True:
+            # Unfortunately you can not use the number of threads waiting to find the max priority [18/06/23]
             super().wait()
-            #self.wait()
-            if priority == self.priority:
-                log.debug(f"priority {priority} met for {self.pid}")
-                self.priority -= 1
-                if self.priority < 0:
-                    log.warn(f"I think there is something wrong with the wait! We reached priority {self.priority}")
+            log.debug(f"wait [{priority}] finished")
+            # Make sure all threads know the current priority
+            backup_priority = self.priority
+            sleep(0.05)
+            if priority == backup_priority:
+                log.debug(f"[{self.pid}] met priority {priority} for {comment}")
+                self.lower_priority(comment)
+                # perchè non funzia ?
+                #super().clear()
                 break
             # If I call wait again while the event is set it won't block ! [04/04/23]
             self.cleared.wait()
             # I forgot to clear it somewhere... [22/05/23]
+            # Wait, what happens if we have 3 threads waiting ??
             self.cleared.clear()
+        #return priority
 
-    
-    def clear(self):
+    # I move the priority -= 1 in here to avoid a race condition on the check priority == self.priority. I hope it won't break because I missed a clear somewhere, but with the cleared.wait; cleared.clear it should already break anyway [13/06/23]
+    def clear(self, comment):
         #self.secret.clear()
         if self.is_set():
             super().clear()
             self.cleared.set()
+
+    #def hidden_clear(self):
+    #    if self.is_set():
+    #        super().clear()
+    #        self.cleared.set()
+
+    def raise_priority(self, comment):
+        log.debug(f"[{self.pid}] raising priority [{self.priority}] -> [{self.priority + 1}] for {comment}")
+        self.priority += 1
+
+    def lower_priority(self, comment):
+        log.debug(f"[{self.pid}] lowering priority [{self.priority - 1}] <- [{self.priority}] for {comment}")
+        self.priority -= 1
+        if self.priority < 0:
+            log.warn(f"I think there is something wrong with the wait! We reached priority {self.priority}")
+        if self.priority == 0:
+            # Should reset when reaching 0, but also when debugging manually ? [18/06/23]
+            log.debug("reset enforce stop")
+            self.flag_enforce_stop = None    
+
+    # If we enforce a stop on level 5 through a breakpoint, a return False on level 7 should still continue, but not on level 3
+    # If we enforce a stop because we are using gdb manually, a return False on level 7 should stop because we don't want to loose control, but not on level 3
+    # Wait, I'm not convinced...
+    @property
+    def enforce_stop(self):
+        if self.flag_enforce_stop is None:
+            return False
+        else:
+            log.debug(f"priority is {self.priority}. Enforce is {self.flag_enforce_stop}")
+            return self.priority >= self.flag_enforce_stop
 
 @dataclass
 class Inner_Breakpoint:
@@ -112,8 +153,78 @@ class Inner_Breakpoint:
 
 # I need a way to no if the process stopped due to my debugger or an action done manually
 class Breakpoint:
-    def __init__(self, breakpoint, callback = None, temporary = False):
-        self.gdb_breakpoint = breakpoint
+    def __init__(self, breakpoint, address, callback = None, temporary = False, user_defined = True):
+        self.native_breakpoint = breakpoint
+        self.address = address
         self.callback = callback
         self.temporary = temporary
+        self.user_defined = user_defined
+
+class MyLock:
+    def __init__(self, event, owner):
+        self.owner = owner
+        self.event = event
+        self.counter = 0
+        # prevent bugs with the counter ? [12/06/23]
+        self.__lock = Lock()
+
+    def log(self, function_name):
+        log.debug(f"[{self.owner.pid}] wrapping {function_name}")
+        return self
+
+    def __enter__(self):
+        with self.__lock:
+            self.event.clear()
+            self.counter += 1
+            log.debug(f"[{self.owner.pid}] entering lock with level {self.counter}")
+
+    def __exit__(self, exc_type, exc_value, exc_traceback):
+        with self.__lock:
+            log.debug(f"[{self.owner.pid}] exiting lock with level {self.counter}")
+            self.counter -= 1
+            if self.counter == 0:
+                self.event.set()
         
+SIGNALS = {
+       "SIGHUP":           1, 
+       "SIGINT":           2, 
+       "SIGQUIT":          3, 
+       "SIGILL":           4, 
+       "SIGTRAP":          5, 
+       "SIGABRT":          6, 
+       "SIGIOT":           6, 
+       "SIGBUS":           7, 
+    #    "SIGEMT":           -, 
+       "SIGFPE":           8, 
+       "SIGKILL":          9, 
+       "SIGUSR1":         10, 
+       "SIGSEGV":         11, 
+       "SIGUSR2":         12, 
+       "SIGPIPE":         13, 
+       "SIGALRM":         14, 
+       "SIGTERM":         15, 
+       "SIGSTKFLT":       16, 
+       "SIGCHLD":         17, 
+    #    "SIGCLD":           -,  
+       "SIGCONT":         18, 
+       "SIGSTOP":         19, 
+       "SIGTSTP":         20, 
+       "SIGTTIN":         21, 
+       "SIGTTOU":         22, 
+       "SIGURG":          23, 
+       "SIGXCPU":         24, 
+       "SIGXFSZ":         25, 
+       "SIGVTALRM":       26, 
+       "SIGPROF":         27, 
+       "SIGWINCH":        28, 
+       "SIGIO":           29, 
+       "SIGPOLL":         29, 
+       "SIGPWR":          30, 
+    #    "SIGINFO":          -,
+    #    "SIGLOST":          -,
+       "SIGSYS":          31, 
+       "SIGUNUSED":       31, 
+}
+
+SIGNALS_from_num = ["I DON'T KNOW", "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP", "SIGABRT", "SIGBUS", "SIGFPE", "SIGKILL", "SIGUSR1", "SIGSEGV", "SIGUSR2", "SIGPIPE", "SIGALRM", "SIGTERM", "SIGSTKFLT", "SIGCHLD",   "SIGCONT", "SIGSTOP", "SIGTSTP", "SIGTTIN", "SIGTTOU", "SIGURG", "SIGXCPU", "SIGXFSZ", "SIGVTALRM", "SIGPROF", "SIGWINCH", "SIGPOLL", "SIGPWR", "SIGSYS"]
+

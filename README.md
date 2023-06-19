@@ -176,13 +176,36 @@ dbg.delete_breakpoint("main+0x124")
 ## Memory access
 
 All registers are accessible as properties
+**Warning**
+You can script anything inside your callbacks, but be careful not to break the execution flow of your script. A putting a callback with `finish()` inside a function you are stepping over with `ni()` may cause problems. The alternative would be to set a second callback on the return_pointer of your function.  
 
 ```py
-dbg.rax = 0xdeadbeefdeadbeef
-dbg.eax = 0xfafafafa
-dbg.ax  = 0xbabe
-dbg.ah = 0x90
-assert dbg.rax == 0xdeadbeeffafa90be
+from gdb_plus import *
+from queue import Queue
+
+# I let the process run in this example to reinforce the need for the interrupt later
+gdbinit = """
+handle SIGALRM nopass
+"""
+
+dbg = Debugger("./challenge", script=gdbinit).remote("leet.pwn.com", 31337)
+
+# Does work, but you may lose control of your script if you try to step over a call to waitpid
+def dangerous_callback(dbg):
+    status = dbg.args[1]
+    dbg.finish()
+    log.info(f"Child stopped with status : {hex(u32(dbg.read(status, 4)))}")
+    return False
+
+def safe_callback(dbg):
+    status = dbg.args[1]
+    def second_callback(dbg):
+        log.info(f"Child stopped with status : {hex(u32(dbg.read(status, 4)))}")
+        return False
+    dbg.b(dbg.return_pointer, callback=second_callback, temporary=True)
+    return False
+
+dbg.b("waitpid", callback=safe_callback)
 ```
 
 You can allocate chunks on the heap (or the bss if you don't have the libc), write and read in the ram and read the canary from anywhere.

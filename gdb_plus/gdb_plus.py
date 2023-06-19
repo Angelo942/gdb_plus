@@ -6,7 +6,12 @@ from functools import partial
 from capstone import Cs, CS_ARCH_X86
 from threading import Event
 from queue import Queue
-from gdb_plus.utils import Arguments, user_regs_struct, context, MyEvent, Breakpoint
+from gdb_plus.utils import *
+from collections import defaultdict
+from queue import Queue
+from math import ceil
+from multiprocessing import Process, Event as p_Event, Queue as p_Queue, cpu_count
+
 #import logging
 
 #log = logging.getLogger("gdb_plus")
@@ -15,6 +20,13 @@ RET = b"\xc3"
 DEBUG_OFF = "Debug is off, commands won't be executed"
 # Yah, there should be a way to handle the logs and hide those from the library, but will look into it another day.
 DEBUG = True #True # Flag for when I'm debugging the library
+
+def lock_decorator(func):
+    def parse(self, *args, **kwargs):
+        with self.ptrace_lock.log(func.__name__):
+            result = func(self, *args, **kwargs)
+            return result
+    return parse
 
 class Debugger:
     # If possible patch the rpath (spwn and pwninit do it automatically) instead of using env to load the correct libc. This will let you get a shell not having problems trying to preload bash too
@@ -28,15 +40,25 @@ class Debugger:
         self._canary = None
         self._args = None
         self.closed = Event()
-        self._inferior = 1 # Used to switch between inferiors [03/03/23]
+        self.parent = None
         self.children = {} # Maybe put {self.pid: self} as first one
-        self.slaves = {} # to emulate ptrace
-        self.master = None
-        # Maybe use a queue. Maybe even share the same one between slave and master so you don't need the pid. [26/03/23]
-        self._wait_signal = None
+        self.slaves = {} # I keep it to be sure I am tracing them 
+        self.ptrace_breakpoints = []
+        self.ptrace_backups = {}
+
+        # Ptrace_cont
+        self.out_of_breakpoint = Event()
+        self.ptrace_lock = MyLock(self.out_of_breakpoint, owner=self)
+        self.ptrace_can_continue = Event()
+        self.ptrace_has_stopped = Event()  
         self._free_bss = None #Used to allocate data in the bss if you can't use the heap
         # Do we want to save temporary breakpoints too ? [17/04/23]
-        self.breakpoints = {} #Save all non temporary breakpoints for easy access # The fact that they can't be temporary is used by the callback [21/03/23]
+        self.breakpoints = defaultdict(list)
+        # Let's try to reduce race conditions [19/06/23]
+        self.stops_to_enforce = 0
+        self.breakpoint_handled = Event()
+
+        self.handled_signals = {}
         self.gdbscript = script # For non blocking debug_from
         self.debug_from_done = Event()
 
@@ -121,8 +143,55 @@ class Debugger:
                     else:
                         log.warn(f"{timeout}s timeout isn't enought to reach the code... Retrying...")
 
+    def __handle_breakpoints(self, breakpoints):
+        should_continue = self._stop_reason != "SINGLE STEP" # Versione semplice. Se vengo da uno step non devo mai continuare e almeno adesso è già salvato [05/06/23]
+        # I don't set stop after each breakpoint to avoid letting a script continue while another callback is running [06/06/23]
+        set_stop = []
+        address = self.instruction_pointer
+        log.debug(f"{hex(address)}: {len(breakpoints)} breakpoints")
+        # Copy because the list will be modified by delete() [06/06/23]
+        for breakpoint in breakpoints.copy():
+            if breakpoint.temporary:
+                self.delete_breakpoint(breakpoint)
+
+            if breakpoint.callback is None:
+                should_continue = False
+                # Must be set for each breakpoint for the library funtions to work [05/06/23]
+                # Check that the priorities can't be broken by a breakpoint set by the user... [05/06/23]
+                set_stop.append(f"No callback")
+            else:           
+                should_stop = breakpoint.callback(self)
+                should_stop = True if should_stop is None else should_stop
+                if should_stop:
+                    should_continue = False
+                    set_stop.append(f"callback returned True or None")  
+
+                else:
+                    should_continue &= True
+                    log.debug(f"[{self.pid}] callback returned False")
+
+        # Be sure to be in the last stop
+        if address == self.instruction_pointer:
+            log.debug(f"saving remaining stops: {len(set_stop)}")
+            self.stops_to_enforce = len(set_stop)
+
+        for stop_reason in set_stop:
+            self.breakpoint_handled.clear()
+            self.__set_stop(stop_reason)
+            self.breakpoint_handled.wait()
+            #self.__enforce_stop(stop_reason)
+
+        # TODO IMPROVE THIS [06/06/23]
+        # We have a problem. If I do a next() and hit a breakpoint with a finish(); return False, How should I know not to continue after the finish ?
+        # If this is the only breakpoint that stop we can continue [19/06/23]
+        if should_continue and self.stops_to_enforce <= 1:#not self.myStopped.enforce_stop: 
+            self.__hidden_continue()
+        log.debug("setting breakpoint handled")
+        self.breakpoint_handled.set()
+
     # We stopped using gdb's implementation of temporary breakpoints so that we can differentiate an interruption caused by my debugger and cause by the manual use of gdb 
     # Event could tell me which breakpoint has been hit or which signal cause the interruption
+    @lock_decorator
     def __stop_handler_gdb(self):
         """
         Actions that the debugger performs every time the process is interrupted
@@ -130,49 +199,44 @@ class Debugger:
         """
         self.restore_arch()
 
-        ## I don't want to use interrupt in split_on_fork
-        #if not self.to_split.empty():
-        #    pid = self.to_split.get()
-        #    log.debug(f"found child {pid} to split out")
-        #    self.children[pid] = self.split_child(pid=pid)
-
         # Current inferior will change to the inferior who stopped last
         ip = self.instruction_pointer
-        bp = self.breakpoints.get(ip)
+        breakpoints = self.breakpoints[ip]
 
-        log.debug(f"{self.current_inferior.pid} stopped at address: {hex(ip)} for {self._stop_reason}")
+        log.debug(f"[{self.current_inferior.pid}] stopped at address: {self.reverse_lookup(ip)} for {self._stop_reason}")
         
-        if bp is None:
-            if self.stepped or self.interrupted or self._stop_reason in ["SIGSTOP", "SIGTRAP"]: # SIGTRAP to handle known int3 in the code
+        if self._stop_reason in SIGNALS and SIGNALS[self._stop_reason] in self.handled_signals:
+            should_stop = self.handled_signals[SIGNALS[self._stop_reason]](self)
+            if should_stop == False:
+                self.__hidden_continue()
+            else:
+                self.__set_stop(f"signal {self._stop_reason} handled")
+                self.ptrace_has_stopped.set()
+            return  
+        # TODO handle stop in 
+        if len(breakpoints) == 0:
+            # Is it right to catch SIGSTOP and SIGTRAP ? [04/06/23]
+            if self.stepped or self.interrupted:
                 # I hope that the case where we step and still end up on a breakpoint won't cause problems because we would not reset stepped... [29/04/23]
                 self.stepped = False
                 self.interrupted = False
-                self.__set_stop()
+                self.__set_stop("stepped or interrupted")
+            #elif self._stop_reason == "SIGSEGV":
+            #    self.__exit_handler(...)
+            elif self._stop_reason in SIGNALS:
+                self.__set_stop(f"signal: {self._stop_reason}")
+                self.ptrace_has_stopped.set()
             else:
-                log.debug("I stopped for a manual interaction")
+                log.debug(f"[{self.pid}] stopped for a manual interaction")
+                self.__enforce_stop("manual interaction")
             return            
         
-        if bp.temporary:
-            self.delete_breakpoint(ip)
-
-        # TODO, it may be interesting to have the option to put an array of breakpoints for recursive functions [21/03/23]
-        # something like
-        #if type(self.real_callbacks[self.instruction_pointer]) is list:
-        #   callback =  self.real_callbacks[ip].pop()
-        #   if len(self.real_callbacks[ip]) == 0:
-        #       del self.real_callbacks[ip]
-        #else:
-                        
-        # This should let us keep control of the debugger even if we use gdb manually while emulating ptrace
         # Doesn't handle the case where we use ni and hit the breakpoint though... [17/04/23] TODO!
         # Doesn't even handle the case where I step, but I'm waiting in continue until
         # Damn, gdb detects the breakpoint even if we don't run over the INT3... so this doesn't work. We never have reason SINGLE STEP with a breakpoint. We need another indication [10/05/23]
-        if bp.callback is not None and bp.callback(self) == False:# and self._stop_reason != "SINGLE STEP": 
-            log.debug("continuing due to callback False")
-            self.__hidden_continue()
-        else:
-            self.__set_stop()  
+        self.__handle_breakpoints(breakpoints)
 
+    @lock_decorator
     def __stop_handler_libdebug(self):
         """
         Actions that the debugger performs every time the process is interrupted
@@ -180,44 +244,50 @@ class Debugger:
         """
         self.restore_arch()
 
+
         # Current inferior will change to the inferior who stopped last
         ip = self.instruction_pointer
-        bp = self.breakpoints.get(ip)
+        breakpoints = self.breakpoints[ip]
 
-        log.debug(f"{self.libdebug.cur_tid} stopped at address: {hex(ip)} with status: {hex(self.libdebug.stop_status)}")
-
+        log.debug(f"[{self.libdebug.cur_tid}] stopped at address: {hex(ip)} with status: {hex(self.libdebug.stop_status)}")
+        
+        if self._stop_reason in SIGNALS and SIGNALS[self._stop_reason] in self.handled_signals:
+            should_stop = self.handled_signals[SIGNALS[self._stop_reason]](self)
+            if should_stop == False:
+                self.__hidden_continue()
+            else:
+                self.__set_stop(f"signal {self._stop_reason} handled")
+                self.ptrace_has_stopped.set()
+            return  
         # I hope I won't touch a breakpoint at the same time
         # Usually if I hit a breakpoint it should stop again. At least with step we have the step and then the sigchld 
         # Will be a problem while stepping, but amen
-        if self.libdebug.stop_status == 0x117f:
+        elif self.libdebug.stop_status == 0x117f:
             if DEBUG:
                 log.info("the child stopped and libdebug caught it. Let's continue waiting for Mario to change the options...")
             # We have problems with the wait after the step...
             #self.libdebug.cont(blocking=False)
             #return
         
-        if bp is None:
+        if len(breakpoints) == 0:
             if self.stepped or self.interrupted:
                 self.stepped = False
                 self.interrupted = False
-            elif self.libdebug.stop_status == 0x57f:
-                # Look into how to handle steps in libdebug [21/05/23]
-                if DEBUG:
-                    log.warn("I supose libdebug just stepped so let's pretend nothing happened")
-                return
+            # This should now be handled by libdebug [08/06/23]
+            #elif self.libdebug.stop_status == 0x57f:
+            #    # Look into how to handle steps in libdebug [21/05/23]
+            #
+            #    if DEBUG:
+            #        log.warn("I supose libdebug just stepped so let's pretend nothing happened")
+            #    return
             else:
                 log.warn(f"why did I stop ??? [{hex(self.libdebug.stop_status)}]")
-            self.__set_stop()
+                self.ptrace_has_stopped.set()
+            self.__set_stop("no breakpoint")
             return            
         
-        if bp.temporary:
-            self.delete_breakpoint(ip)
-                
-        if bp.callback is not None and bp.callback(self) == False:
-            log.debug("continuing due to callback False")
-            self.__hidden_continue()
-        else:
-            self.__set_stop()  
+        self.__handle_breakpoints(breakpoints)
+        #context.Thread(target=self.__handle_breakpoints, args=(breakpoints,)).start()
 
     def __exit_handler(self, event):
         log.debug(f"setting stop because process [{event.inferior.pid}] exited")
@@ -229,18 +299,13 @@ class Debugger:
         """
         setup of gdb's events
         """
-        self.gdb.events.stop.connect(lambda event: context.Thread(target=self.__stop_handler_gdb).start())
-        
-        
-
+        self.gdb.events.stop.connect(lambda event: context.Thread(target=self.__stop_handler_gdb, name=f"[{self.pid}] stop_handler_gdb").start())
         self.gdb.events.exited.connect(self.__exit_handler)
 
         # Manually set by split_child
         self.split = Queue()
 
-        # Ptrace_cont
-        self.master_wants_you_to_continue = Event()
-        self.slave_has_stopped = Event()  
+        self.myStopped.pid = self.pid
 
     def __setup_libdebug(self):
         self.libdebug.handle_stop = self.__stop_handler_libdebug
@@ -254,11 +319,12 @@ class Debugger:
             log.warn_once(DEBUG_OFF)
             return
 
-        address = self.instruction_pointer
-        backup = self.inject_sleep(address)
-
+        # Maybe put a try except to restore the backup in case of accident [06/06/23]
         if gdb:
             assert self.gdb is None
+            address = self.instruction_pointer
+            backup = self.inject_sleep(address)
+            # For some reason detach while not running seems to kill the process [06/06/23]
             # No event on exit to disconnect yet [01/06/23]
             self.detach()
             log.debug("migrating to gdb")
@@ -269,10 +335,16 @@ class Debugger:
             self.write(address, backup)
             self.jump(address)
             for address in self.breakpoints:
-                self.__breakpoint_gdb(address)
+                for breakpoint in self.breakpoints[address]:
+                    bp = self.__breakpoint_gdb(address)
+                    breakpoint.native_breakpoint = bp
         elif libdebug:
             from libdebug import Debugger as lib_Debugger
             # Disable hook stop
+            assert self.libdebug is None
+            assert self.gdb is not None
+            address = self.instruction_pointer
+            backup = self.inject_sleep(address)
             self.gdb.events.exited.disconnect(self.__exit_handler)
             self.detach()
             assert self.libdebug is None
@@ -284,8 +356,11 @@ class Debugger:
             self.__setup_libdebug()
             self.write(address, backup)
             self.jump(address)
+            # TODO Handle hb too 
             for address in self.breakpoints:
-                self.__breakpoint_libdebug(address)
+                for breakpoint in self.breakpoints[address]:
+                    bp = self.__breakpoint_libdebug(address)
+                    breakpoint.native_breakpoint = bp
         else:
             ...
     # Because pwntools isn't perfect
@@ -320,8 +395,9 @@ class Debugger:
                 if event is not None:
                     event.wait()
                     log.debug("user finished interaction. Proceeding with debug_from")
-                log.warn("you haven't set an event to let me know when you finished interactiong with the process. I will give you half a second.")
-                sleep(timeout)
+                else:
+                    log.warn_once("you haven't set an event to let me know when you finished interactiong with the process. I will give you half a second.")
+                    sleep(timeout)
                 # Maybe the process is being traced and I can't attach to it yet
                 try:
                     # what happens if there is a continue in script ? It should break the script, but usually it's the last instruction so who cares ? Just warn them in the docs [06/04/23]
@@ -337,7 +413,7 @@ class Debugger:
                     break
                 else:
                     log.warn(f"{timeout}s timeout isn't enought to reach the code... Retrying...")
-        context.Thread(target=action).start()
+        context.Thread(target=action, name=f"[{self.pid}] debug_from").start()
         return self
 
     # Use as : dbg = Debugger("file").remote(IP, PORT)
@@ -403,7 +479,7 @@ class Debugger:
             return
 
         values = []
-        for register in self.special_registers + self.registers[:-1]: # exclude ip
+        for register in self.special_registers + self.registers: # include ip, setattr will cut it out if not needed
             values.append(getattr(self, register))
         return values
         
@@ -414,7 +490,7 @@ class Debugger:
         if not self.debugging:
             return
 
-        for name, value in zip(self.special_registers + self.registers[:-1], backup):
+        for name, value in zip(self.special_registers + self.registers, backup):
                 setattr(self, name, value)
 
     # Return old_inferior to know where to go back
@@ -426,12 +502,12 @@ class Debugger:
             return
 
         # May not be accurate if you switched manually before
-        old_inferior = self._inferior
-        while self.gdb.selected_inferior().num != n:
+        old_inferior = self.current_inferior
+        while self.current_inferior.num != n:
             log.debug(f"switching to inferior {n}")
             self.execute(f"inferior {n}")
             log.debug(f"I'm inferior {self.gdb.selected_inferior()}")
-            self._inferior = n
+            sleep(0.1)
         self.pid = self.current_inferior.pid
         return old_inferior
 
@@ -470,24 +546,48 @@ class Debugger:
     # Taken from GEF to handle slave interruption
     @property
     def _stop_reason(self) -> str:
-        res = self.gdb.execute("info program", to_string=True).splitlines()
-        if not res:
-            return "NOT RUNNING"
-
-        for line in res:
-            line = line.strip()
-            if line.startswith("It stopped with signal "):
-                return line.replace("It stopped with signal ", "").split(",", 1)[0]
-            if line == "The program being debugged is not being run.":
+        if self.gdb is not None:
+            res = self.gdb.execute("info program", to_string=True).splitlines()
+            if not res:
                 return "NOT RUNNING"
-            if line == "It stopped at a breakpoint that has since been deleted.":
-                return "TEMPORARY BREAKPOINT"
-            if line.startswith("It stopped at breakpoint "):
-                return "BREAKPOINT"
-            if line == "It stopped after being stepped.":
-                return "SINGLE STEP"
 
-        return "STOPPED"
+            for line in res:
+                line = line.strip()
+                if line.startswith("It stopped with signal "):
+                    return line.replace("It stopped with signal ", "").split(",", 1)[0]
+                if line == "The program being debugged is not being run.":
+                    return "NOT RUNNING"
+                if line == "It stopped at a breakpoint that has since been deleted.":
+                    return "TEMPORARY BREAKPOINT"
+                if line.startswith("It stopped at breakpoint "):
+                    return "BREAKPOINT"
+                if line == "It stopped after being stepped.":
+                    return "SINGLE STEP"
+
+            return "STOPPED"
+
+        # TODO handle it correctly. Is Ox5 only used for step or also breakpoints ? Do we have access to libdebug's stepped variable ? (I would prefer that one at least) [05/06/23]
+        elif self.libdebug is not None:
+            if self.stepped:
+                return "SINGLE STEP"
+            # Check 0x5 as step or breakpoint ?
+            else:
+                return SIGNALS_from_num[self.stop_signal]
+
+    @property
+    def stop_signal(self) -> int:
+        if self.gdb is not None:
+            reason = self._stop_reason
+            if reason == "SINGLE STEP":
+                return 0x5
+            if "BREAKPOINT" in reason:
+                return 0x13 # Not sure
+            else:
+                return SIGNALS[reason]
+        elif self.libdebug is not None:
+            return self.libdebug.stop_status >> 0x8
+        else:
+            ...
 
     @property
     def _details_breakpoint_stopped(self) -> str:
@@ -515,7 +615,7 @@ class Debugger:
             log.warn_once(DEBUG_OFF)
             return
 
-        self.priority += 1
+        priority = self.raise_priority(sender)
         self.__clear_stop(sender if sender is not None else command)
         if self.gdb is not None:
             self.execute(command)
@@ -523,9 +623,20 @@ class Debugger:
             command()
         else:
             ...
+        return priority
 
     # Simplify continue after callback so that it can still work after migrating inside the callback
-    def __hidden_continue(self):
+    @lock_decorator
+    def __hidden_continue(self, force=False):
+        address = self.instruction_pointer
+        if force:
+            self.step(force=True)
+            if address == self.instruction_pointer:
+                log.debug(f"[{self.pid}] I think I stopped my step for a good reason so I won't continue")
+                return
+
+        log.debug(f"[{self.pid}] hidden continue")
+        sleep(0.02)
         if self.gdb is not None:
             self.gdb.execute("c")
         elif self.libdebug is not None:
@@ -534,19 +645,24 @@ class Debugger:
             ...
 
     def __continue_gdb(self, force, wait, done):
-        self.step(force=True)
-        if self._stop_reason != "SINGLE STEP":
-            if DEBUG:
+        # Do I check the address instead ? Like hidden_continue [09/06/23]
+        with self.ptrace_lock.log("__continue_gdb"):
+            priority = self.raise_priority("avoid race condition in continue")
+            self.step(force=True)
+            if self._stop_reason != "SINGLE STEP":
                 if "BREAKPOINT" not in self._stop_reason:
                     log.warn(f"unknown interuption! {self._stop_reason}")
                 log.debug(f"step in continue already reached the breakpoint")
-            done.set()
-            return
-        self.execute_action("continue", sender="continue")
+                self.lower_priority("avoid race condition in continue")
+                done.set()
+                return
+            self.execute_action("continue", sender="continue")
         # Damn, I may not want to wait at all... [22/05/23]
-        if wait:
-            self.priority_wait()
-            done.set()
+        #if wait:
+        # Keep priority intact, so I have to wait
+        self.priority_wait(comment="continue", priority = priority + 1)
+        done.set()
+        self.lower_priority("avoid race condition in continue")
 
     def __continue_libdebug(self, force, wait, done):
         # Continue in libdebug is already stepping [21/05/23]
@@ -555,13 +671,16 @@ class Debugger:
         ## I hit a breakpoint
         #if self.instruction_pointer in self.breakpoints or self.instruction_pointer == self.last_breakpoint_deleted:
         #    return
-        self.execute_action(lambda: context.Thread(target=self.libdebug.cont, kwargs={"blocking": False}).start(), sender="continue")
-        if wait:
-            self.priority_wait()
-            done.set()
+        # I don't need the thread, right ? And this way I can lock the step [12/06/23]
+        with self.ptrace_lock.log("__continue_libdebug"):
+            self.execute_action(lambda: self.libdebug.cont(blocking=False), sender="continue")
+        #self.execute_action(lambda: context.Thread(target=self.libdebug.cont, kwargs={"blocking": False}).start(), sender="continue")
+        #if wait:
+        self.priority_wait(comment="continue")
+        done.set()
         
     # TODO make the option to have "until" be non blocking with an event when we reach the address [28/04/23] In other words migrate wait=False to wait=Event()
-    def c(self, *, wait=True, force = False, until = None):
+    def c(self, *, wait=True, force = False):
         """
         Continue execution of the process
 
@@ -577,18 +696,14 @@ class Debugger:
             log.warn_once(DEBUG_OFF)
             return
 
-        if until is not None:
-            log.warn_once("dbg.cont(until=ADDRESS) is deprecated, use dbg.continue_until(ADDRESS) instead!")
-            return self.continue_until(until, wait=True)
-    
         # I have to use an event instead of priority_wait() because I may have to stop after the step [22/05/23]
         done = Event()
 
         if self.gdb is not None:
-            self.__continue_gdb(force, wait, done)
+            context.Thread(target=self.__continue_gdb, args=(force, wait, done), name=f"[{self.pid}] continue").start() 
 
         elif self.libdebug is not None:
-            self.__continue_libdebug(force, wait, done)
+            context.Thread(target=self.__continue_libdebug, args=(force, wait, done), name=f"[{self.pid}] continue").start() 
 
         else:
             ...
@@ -605,23 +720,27 @@ class Debugger:
         #Force = True is not needed since once we step the sigint will be caught and continue won't stop. I disable the warning since the user can do nothing about it [08/05/23]
         #Force = True IS needed if you have a callback on that address... [10/05/23]
         # I will keep the step this way to warn the user
+        priority = self.raise_priority("avoid race condition in continue until")
         self.cont(wait=True, force=force)
         # Should we take into consideration the inferior too ? [29/04/23]
         while self.instruction_pointer != address:
-            log.info(f"debugger {self.pid} stopped at {hex(self.instruction_pointer)} for '{self._stop_reason}' instead of {hex(address)}")
+            log.info(f"[{self.pid}] stopped at {hex(self.instruction_pointer)} for '{self._stop_reason}' instead of {hex(address)}")
             log.warn_once("I assume this happened because you are using gdb manually. Finish what you are doing and let the process run. I will handle the rest")
-            self.execute_action("", sender="continue just to reset the wait")
-            self.priority_wait()
+            wont_use_this_priority = self.execute_action("", sender="continue just to reset the wait")
+            # I don't trust the previous priority, while the first one should be safe
+            self.priority_wait(comment="continue_until", priority = priority + 1)
+        self.lower_priority("avoid race condition in continue until")
         done.set()
 
     def __continue_until_libdebug(self, address, done, force):
         self.cont(wait=True, force=force)
         if self.instruction_pointer != address:
             log.critical("error in continue until")
-            raise Exception(f"debugger {self.pid} stopped at {hex(self.instruction_pointer)} with status {hex(self.libdebug.stop_status)} instead of {hex(address)}")
+            raise Exception(f"[{self.pid}] stopped at {hex(self.instruction_pointer)} with status {hex(self.libdebug.stop_status)} instead of {hex(address)}")
         done.set()
             
-
+    # I'm worried about how to handle the lock in this case [12/06/23] I want to block until I send the continue
+    # I would like to keep the same priority for step and continue [18/06/23]
     def continue_until(self, location, /, *, wait=True, force=False, loop = False):
         """
         Continue until a specific address
@@ -629,32 +748,35 @@ class Debugger:
         It the function is called from the address you want to reach the intended behaviour is to do nothing and return. Set loop=True to continue anyway
         
         """ 
-        done = Event()
+        with self.ptrace_lock.log("continue_until"):
+            done = Event()
 
-        if not self.debugging:
-            done.set()
-            log.warn_once(DEBUG_OFF)
-            return done
+            if not self.debugging:
+                done.set()
+                log.warn_once(DEBUG_OFF)
+                return done
 
-        self.restore_arch()
+            self.restore_arch()
 
-        address = self.parse_address(location)
-        if not loop and address == self.instruction_pointer:
-            log.warn(f"I'm already at {self.reverse_lookup(address)}")
-            log.warn_once("Be careful that the default behaviour changed. Use loop=True if you want to continue anyway")
-            return
-            
-        self.b(address, temporary=True)
-        if DEBUG:
-            log.debug(f"{self.pid} continuing until {self.reverse_lookup(address)}")
+            address = self.parse_address(location)
+            if not loop and address == self.instruction_pointer:
+                log.warn(f"I'm already at {self.reverse_lookup(address)}")
+                log.warn_once("Be careful that the default behaviour changed. Use loop=True if you want to continue anyway")
+                return
+                
+            self.b(address, temporary=True, user_defined=False)
+            if DEBUG:
+                log.debug(f"[{self.pid}] continuing until {self.reverse_lookup(address)}")
 
-        if self.gdb is not None:
-            context.Thread(target=self.__continue_until_gdb, args=(address, done, force)).start()
-        elif self.libdebug is not None:
-            context.Thread(target=self.__continue_until_libdebug, args=(address, done, force)).start()
-        else:
-            ...
-            
+            if self.gdb is not None:
+                context.Thread(target=self.__continue_until_gdb, args=(address, done, force), name=f"[{self.pid}] continue_until").start()
+            elif self.libdebug is not None:
+                context.Thread(target=self.__continue_until_libdebug, args=(address, done, force), name=f"[{self.pid}] continue_until").start()
+            else:
+                ...
+            # Wait for the next lock to be set
+            sleep(0.02)
+
         if wait:
             done.wait()
         else:
@@ -675,20 +797,29 @@ class Debugger:
         if legacy:
             self.myStopped.wait(timeout)
         else:
-            self.priority_wait()
+            self.priority_wait("standard wait")
 
     # This should only be used under the hood, but how do we let the other one to the user without generating problems ? [14/04/23]
-    def priority_wait(self):
+    def priority_wait(self, comment="?", priority=None):
         if not self.debugging:
             log.warn_once(DEBUG_OFF)
             return
 
-        self.myStopped.priority_wait()
+        self.myStopped.priority_wait(comment, priority)
             
     # problems when I haven't executed anything
     @property
     def running(self):
-        return not self.myStopped.is_set()
+        if self.gdb is not None:
+            try:
+                self.rax
+                return False
+            except:
+                return True
+        elif self.libdebug is not None:
+            return not self.libdebug._test_execution()
+        else:
+            ...
 
     @property
     def priority(self):
@@ -698,6 +829,14 @@ class Debugger:
     def priority(self, value):
         self.myStopped.priority = value
 
+    def raise_priority(self, comment):
+        self.myStopped.raise_priority(comment)
+        return self.priority
+
+    def lower_priority(self, comment):
+        self.myStopped.lower_priority(comment)
+        return self.priority
+
     def __clear_stop(self, name="someone", /):
         if self.gdb is not None:
             pid = self.current_inferior.pid
@@ -705,22 +844,41 @@ class Debugger:
             pid = self.pid # Handle thread
         else:
             ...
-        if self.myStopped.is_set():
-            log.debug(f"{pid} stopped has been cleared by {name}")
-            self.myStopped.clear()
 
-    def __set_stop(self):
+        if self.myStopped.is_set():
+            log.debug(f"[{pid}] stopped has been cleared by {name}")
+            self.myStopped.clear(name)
+
+    #def __hidden_stop(self, name="someone", /):
+    #    if self.gdb is not None:
+    #        pid = self.current_inferior.pid
+    #    elif self.libdebug is not None:
+    #        pid = self.pid # Handle thread
+    #    else:
+    #        ...
+    #    if self.myStopped.is_set():
+    #        log.debug(f"[{pid}] stopped has been hidden_cleared by {name}")
+    #        self.myStopped.hidden_clear()
+
+    def __set_stop(self, comment = ""):
         if self.gdb is not None:
             pid = self.current_inferior.pid
         elif self.libdebug is not None:
             pid = self.pid # Handle thread
         else:
             ...        
-        log.debug(f"{pid} setting stopped in {hex(self.instruction_pointer)}")
+        if comment:
+            log.debug(f"[{pid}] setting stopped in {hex(self.instruction_pointer)} for {comment}")
+        else:
+            log.debug(f"[{pid}] setting stopped in {hex(self.instruction_pointer)}")
         # handle case where no action are performed after the end of a callback with high priority 
         self.myStopped.pid = pid
-        self.__clear_stop("__set_stop")
+        self.__clear_stop(comment)
         self.myStopped.set()
+
+    def __enforce_stop(self, comment):
+        self.myStopped.flag_enforce_stop = self.myStopped.priority
+        log.debug(f"enforcing stop from level {self.myStopped.flag_enforce_stop} for reason: {comment}")
 
     #def wait_fork(self):
     #    self.gdb.forked.wait()
@@ -754,13 +912,21 @@ class Debugger:
         self.closed.wait()
 
     def wait_master(self):
-        self.master_wants_you_to_continue.wait()
-        self.master_wants_you_to_continue.clear()
+        self.ptace_can_continue.wait()
+        self.ptace_can_continue.clear()
 
-    # Should handle multiple slaves ?
-    def wait_slave(self):
-        self.slave_has_stopped.wait()
-        self.slave_has_stopped.clear()
+    def wait_slave(self, options=0x40000000):
+        if options == 0x1: # WHNOHANG
+            log.info("waitpid WNOHANG! Won't stop")
+            stopped = self.ptrace_has_stopped.is_set()
+        else: 
+            self.ptrace_has_stopped.wait()
+            stopped = True
+
+        if stopped:
+            self.ptrace_has_stopped.clear()
+
+        return stopped
 
     def __interrupt_gdb(self):
         pass
@@ -772,41 +938,46 @@ class Debugger:
     # don't worry about the "kill"
     # May cause problem with the priority [26/04/23]
     # Why does it allways interrupt the first inferior even when I switch to another one ?? [29/04/23]
-    def interrupt(self):
-        """
-        Stop the process as you would with ctrl+C in gdb
+    #def interrupt(self):
+    #    """
+    #    Stop the process as you would with ctrl+C in gdb
+    #
+    #    Warning: can not YET be put inside a callback
+    #    """
+    #    if not self.debugging:
+    #        log.warn_once(DEBUG_OFF)
+    #        return
+    #    
+    #    # TODO check that self.running is valid and then use execute_action and priority_wait
+    #    # Can not work correctly with multiple inferiors. End up always interrupting the first one... [29/04/23]
+    #    if self.running:
+    #        self.interrupted = True
+    #        #self.myStopped.clear()
+    #        #os.kill(self.inferiors[self.current_inferior.num].pid, signal.SIGINT)
+    #        #self.wait(legacy=True, timeout=0.1)
+    #        # Need priority if calling interrupt in callback for split while waiting for finish in another thread
+    #        log.debug(f"interrupting inferior: {self.current_inferior} [pid:{self.current_inferior.pid}]")
+    #        self.execute_action("interrupt", sender="interrupt")
+    #        #os.kill(self.inferiors[self.current_inferior.num].pid, signal.SIGSTOP)
+    #        self.priority_wait()
 
-        Warning: can not YET be put inside a callback
-        """
-        if not self.debugging:
-            log.warn_once(DEBUG_OFF)
-            return
-        
-        # TODO check that self.running is valid and then use execute_action and priority_wait
-        # Can not work correctly with multiple inferiors. End up always interrupting the first one... [29/04/23]
-        if self.running == self.running:
-            self.interrupted = True
-            #self.myStopped.clear()
-            #os.kill(self.inferiors[self._inferior].pid, signal.SIGINT)
-            #self.wait(legacy=True, timeout=0.1)
-            # Need priority if calling interrupt in callback for split while waiting for finish in another thread
-            log.debug(f"interrupting inferior: {self.current_inferior} [pid:{self.current_inferior.pid}]")
-            self.execute_action("interrupt", sender="interrupt")
-            #os.kill(self.inferiors[self._inferior].pid, signal.SIGSTOP)
-            self.priority_wait()
-
-    def interrupt(self):
+    # Maybe should be the one returning if the process did stop due to the interrupt or not [13/06/23]
+    @lock_decorator
+    def interrupt(self, strict=True):
         # claim priority asap
-        self.execute_action("", sender="interrupt")
+        priority = self.execute_action("", sender="interrupt")
 
         if not self.debugging:
             log.warn_once(DEBUG_OFF)
             return
 
-        # Still not working properly, so let's wait before using running
-        #if not self.running:
-        #    return
+        if not self.running:
+            self.priority_wait(comment="release interrupt", priority = priority)
+            # Must go after the lower_priority() to let other threads see it [19/06/23]
+            self.__set_stop("Release interrupt. I didn't have to stop")
+            return False
 
+        self.interrupted = True
         if self.gdb is not None:
             pid = self.current_inferior.pid
         elif self.libdebug is not None:
@@ -814,26 +985,19 @@ class Debugger:
         else:
             ...
         log.debug(f"interrupting [pid:{self.pid}]")
-        os.kill(pid, signal.SIGSTOP)
-        self.priority_wait()
+        # SIGSTOP is too common in gdb
+        #os.kill(pid, signal.SIGSTOP)
+        os.kill(pid, signal.SIGINT)
+        self.priority_wait(comment="interrupt", priority = priority)
+        return True
 
     manual = interrupt
-
-    def __step_gdb(self):
-        self.execute_action("si", sender="step")
-        self.priority_wait() 
-            
-    def __step_libdebug(self):
-        #self.libdebug.step() # Already waits
-        # shouldn't I use execute_action anyway ? # What if I hit a callback ?
-        # And is needed for clear_stop
-        self.execute_action(self.libdebug.step, sender="step")
-        self.priority_wait()
 
     # Next may break again on the same address, but not step
     # Why isn't force = True the default behaviour ? [29/04/23]
     # I don't use force=True by default because there are instructions that keep the instruction pointer at the same address even if executed [05/05/23]
     # You need force=True on continue to avoid double call to callbacks [30/05/23]
+    @lock_decorator
     def step(self, repeat:int=1, *, force=False):
         """
         execute a single instruction
@@ -847,7 +1011,6 @@ class Debugger:
             return
 
         self.restore_arch()
-        log.debug(f"{self.pid} stepping")
         # Should only be the first step, right ? [08/05/23]
         if force:
             self.__broken_step()
@@ -855,38 +1018,45 @@ class Debugger:
 
         for _ in range(repeat):
             address = self.instruction_pointer
-            
+        
             self.stepped = True
 
+            log.debug(f"[{self.pid}] stepping")
             if self.gdb is not None:
-                self.__step_gdb()
+                priority = self.execute_action("si", sender="step")
             elif self.libdebug is not None:
-                self.__step_libdebug()
+                priority = self.execute_action(self.libdebug.step, sender="step")
             else:
                 ...
+            self.priority_wait(comment="step", priority = priority)
 
             if address == self.instruction_pointer:
                 log.warn("You stepped, but the address didn't change. This may be due to a bug in gdb. If this wasn't the intended behaviour use force=True in the function step or continue you just called")
 
     si = step
 
+    # I should catch SIGSTOP, but not other exceptions
     def __broken_step(self):
         old_ip = self.instruction_pointer
         callback = None
 
         # Remove callback to avoid calling it twice (Nice, this wasn't possible with legacy_callbacks) (I'm not sure if we could simply disable a breakpoint for a turn)
-        if (bp := self.breakpoints.get(old_ip)) is not None:
-            callback = bp.callback
-            bp.callback = None
+        saved_callbacks = []
+        for breakpoint in self.breakpoints[old_ip]:
+            saved_callbacks.append(breakpoint.callback)
+            breakpoint.callback = None
         with context.silent:
-            n = self.step_until_condition(lambda self: self.instruction_pointer != old_ip, limit=5)
+            # Let's talk... Usually the problem is with SIGSTOP, right ? There are cases where we jump on a signal, so we won't always have a SINGLE STEP. 
+            #n = self.step_until_condition(lambda self: self.instruction_pointer != old_ip or self._stop_reason == "SINGLE STEP", limit=5)
+            # I don't understand how you can have a stop for single step without changing, but it happens [12/06/23]
+            n = self.step_until_condition(lambda self: self.instruction_pointer != old_ip or self._stop_reason not in ["SIGSTOP", "SINGLE STEP"], limit=5)
         if n == -1:
             raise Exception("Could not force step!")
         if n > 0:
             log.debug(f"Bug still present. Had to force {n} time(s)")
 
-        if callback is not None:
-            bp.callback = callback
+        for breakpoint, callback in zip(self.breakpoints[old_ip], saved_callbacks):
+            breakpoint.callback = callback
 
     # For backward compatibility
     exit_broken_function = __broken_step
@@ -959,6 +1129,38 @@ class Debugger:
         log.warn_once(f"I made {limit} steps and haven't found what you are looking for...")
         return -1
 
+    def step_until_call(self, callback=None, limit=10_000):
+        """
+        step until a call to a function
+        will look inside the function if the first instruction is already a call
+
+        Arguments:
+            callback: optional function to call at each step
+            limit: number of step before giving up. Set at 10.000 by default
+        """
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+            return
+
+        for i in range(limit):
+            self.step()
+            if callback is not None:
+                callback(self)
+            if self.next_inst.mnemonic == "call":
+                return i
+        else:
+            log.warn_once(f"I made {limit} steps and haven't reached the end of the function...")
+            return -1
+
+    def __next(self, repeat, done):
+        for _ in range(repeat):
+            next_inst = self.next_inst
+            if next_inst.mnemonic == "call":
+                self.continue_until(self.instruction_pointer+next_inst.size)
+            else:
+                self.step()
+        done.set()
+
     def __next(self, repeat, done):
         for _ in range(repeat):
             next_inst = self.next_inst
@@ -977,7 +1179,7 @@ class Debugger:
             log.warn_once(DEBUG_OFF)
             return done
         
-        context.Thread(target=self.__next, args=(repeat, done)).start()
+        context.Thread(target=self.__next, args=(repeat, done), name=f"[{self.pid}] next").start()
         if wait:
             done.wait()
         else:
@@ -985,13 +1187,40 @@ class Debugger:
 
     ni = next
 
+    def next_until_call(self, callback=None, limit=10_000):
+        """
+        step until the end of the function
+        will continue over the first finction if called when already before a call
+
+        Arguments:
+            callback: optional function to call at each step
+            limit: number of step before giving up. Set at 10.000 by default
+        """
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+            return
+
+        for i in range(limit):
+            self.next()
+            if callback is not None:
+                callback(self)
+            if self.next_inst.mnemonic == "call":
+                return i
+        else:
+            log.warn_once(f"I made {limit} steps and haven't reached the end of the function...")
+            return -1
+
     def __finish(self, repeat, force, done):
         # Should be possible to take immediatly the corresponding stack frame instead of using a loop [28/04/23]
         for _ in range(repeat):
             ip = self.__saved_ip
-            log.debug(f"finish found next ip : {hex(ip)}")
+            log.debug(f"[{self.pid}] finish found next ip : {hex(ip)}")
             if ip == 0:
                 raise Exception("stack frame is broken or we are not in a function")
+            if ip == self.instruction_pointer:
+                log.warn(f"wait, we already are at the address {hex(ip)}!")
+                log.warn("Trying experimental finish. Use dbg.execute('finish') if this doesn't work")
+                ip = self._find_rip()
             self.continue_until(ip, force=force)
         if done is not None:
             done.set()
@@ -1005,7 +1234,7 @@ class Debugger:
             log.warn_once(DEBUG_OFF)
             return done
         
-        context.Thread(target=self.__finish, args=(repeat, force, done)).start()
+        context.Thread(target=self.__finish, args=(repeat, force, done), name=f"[{self.pid}] finish").start()
         if wait:
             done.wait()
         else:
@@ -1014,9 +1243,9 @@ class Debugger:
     def __jump_gdb(self, address):
         # BUG setting rip this way may cause problems with si [30/04/23] 
         #self.instruction_pointer = address
-        self.b(address, temporary=True)
-        self.execute_action(f"jump *{hex(address)}", sender="jump")
-        self.priority_wait()
+        self.b(address, temporary=True, user_defined=False)
+        priority = self.execute_action(f"jump *{hex(address)}", sender="jump")
+        self.priority_wait(comment="jump", priority = priority)
 
     def __jump_libdebug(self, address):
         self.instruction_pointer = address
@@ -1035,11 +1264,11 @@ class Debugger:
         address = self.parse_address(location)
 
         if address == self.instruction_pointer:
-            log.debug(f"not jumping because I'm already at {self.reverse_lookup(address)}")
+            log.debug(f"[{self.pid}] not jumping because I'm already at {self.reverse_lookup(address)}")
             return
         
         if DEBUG:
-            log.debug(f"jumping to {self.reverse_lookup(address)}")
+            log.debug(f"[{self.pid}] jumping to {self.reverse_lookup(address)}")
         if self.gdb is not None:
             self.__jump_gdb(address)
         elif self.libdebug is not None:
@@ -1070,11 +1299,8 @@ class Debugger:
 
     # For some reasons we get int3 some times
     # Now it's even worse. SIGABORT after that...
-    def gdb_call(self, function: str, args: list, *, cast = "long", inferior=None):
+    def gdb_call(self, function: str, args: list, *, cast = "long"):
         if not self.elf.statically_linked:
-            if inferior is None:
-                inferior = self.current_inferior
-            old_inferior = self.switch_inferior(inferior.num)
             try:
                 ans = self.execute(f"call ({cast}) {function} ({', '.join([hex(arg) for arg in args])})")
                 if cast == "void":
@@ -1089,9 +1315,8 @@ class Debugger:
                 # For some reason I just get 0x0
                 #return self.return_value()
                 ret = self.gdb_call(function, args) # Should work this time
-            self.switch_inferior(old_inferior)
         elif function in self.symbols:
-            ret = self.call(self.symbols[function], args, inferior=inferior)
+            ret = self.call(self.symbols[function], args)
             
         else:
             raise Exception(f"I don't know how to handle this function! {function} not in symbols")
@@ -1198,12 +1423,21 @@ class Debugger:
         self.jump(address)
 
         return_value = Queue()
-        context.Thread(target=self.__continue_call, args=(backup, to_free, heap, return_address, return_value, alignement)).start()
+        context.Thread(target=self.__continue_call, args=(backup, to_free, heap, return_address, return_value, alignement), name=f"[{self.pid}] call").start()
         if wait:
             return return_value.get()
         else:
             log.warn_once("you decided not to wait for the call to finish. I return a queue to the return value of the function. When you need it use .get() to wait for the call to finish")
             return return_value
+
+    def handle_signal(self, signal: [int, str], callback):
+        if type(signal) is str:
+            signal = signal.upper()
+        else:
+            SIGNALS_from_num[signal]
+        if self.gdb is not None:
+            self.execute(f"handle {signal} stop nopass")
+        self.handled_signals[SIGNALS[signal]] = callback
 
     # Can be used with signal code or name. Case insensitive.
     # TODO handle priority_wait
@@ -1228,7 +1462,7 @@ class Debugger:
         # I may put a flag to precise if the code is self modifying or not and if it is handle breakpoints
         # If the code is self modifying you must use handler otherwise the breakpoint will be overwritten with bad code [26/02/23]
         if handler is None:
-            self.b(self.instruction_pointer, temporary=True)
+            self.b(self.instruction_pointer, temporary=True, user_defined=False)
         else:
             from queue import Queue
             my_address = Queue()
@@ -1236,14 +1470,14 @@ class Debugger:
             def callback(dbg):
                 address = my_address.get()
                 my_address.put(dbg.instruction_pointer)
-                dbg.b(address, temporary=True)
+                dbg.b(address, temporary=True, user_defined=False)
                 return False  
-            self.b(handler, callback=callback, temporary=True)
+            self.b(handler, callback=callback, temporary=True, user_defined=False)
         
         if type(n) is str:
             n = n.upper()
-        self.execute_action(f"signal {n}", sender="signal")
-        self.priority_wait()
+        priority = self.execute_action(f"signal {n}", sender="signal")
+        self.priority_wait(comment="signal", priority = priority)
 
     def syscall(self, code: int, args: list, *, heap = True):
         log.debug(f"syscall {code}: {args}")
@@ -1269,11 +1503,10 @@ class Debugger:
             log.debug("%s setted to %s", register, arg)
             setattr(self, register, arg)
     
-        self.step()
+        self.step(force=True)
         res = self.return_value
-        self.restore_backup(backup_registers)
         self.write(return_address, backup_memory)
-        self.jump(return_address)
+        self.restore_backup(backup_registers)
         for pointer, n in to_free[::-1]: #I do it backward to have a coherent behaviour with heap=False, but I still don't really know if I should implement a free in that case
             self.dealloc(pointer, len=n, heap=heap)
         
@@ -1320,8 +1553,6 @@ class Debugger:
         else:
             ...
 
-
-
     def __breakpoint_gdb(self, address, legacy_callback=None):
         # Still needed for hidden breakpoint with return False when you want to also use gdb manually [17/04/23]
         if legacy_callback is not None:
@@ -1344,13 +1575,13 @@ class Debugger:
         
         return res
 
-    def __breakpoint_libdebug(self, address):
-        return self.libdebug.breakpoint(address)
+    def __breakpoint_libdebug(self, address, hw=False):
+        return self.libdebug.breakpoint(address, hw=hw)
 
     # May want to put breakpoints relative to the libc too?
     # I want to keep legacy breakpoints for the ones I set with the library because we must be able to work manually when emulating ptrace [23/03/23]
     # legacy_callback will be deprecated once I can overwrite gdb's nexti to keep his breakpoint even if the process gets interrupted [27/04/23]
-    def b(self, location: [int, str], callback=None, legacy_callback=None, temporary=False):
+    def b(self, location: [int, str], callback=None, legacy_callback=None, temporary=False, user_defined=True, hw=False):
         """
         Set a breakpoint in your process.
 
@@ -1364,7 +1595,9 @@ class Debugger:
             callback takes a pointer to the debugger as parameter and should return True if you want to interrupt the execution and False otherwise. If you forget a return value the default behaviour is to interrupt the process when reaching the breakpoint
             You can use Queue to pass data between your exploit and the callbacks
         temporary : BOOL, optional
-        Don't save the breakpoint and disable it when hit
+            Don't save the breakpoint and disable it when hit
+        user_defined : BOOL, restricted
+            Flag to identify breakpoints set by the library from the ones used by the users. Don't touch it.
 
         Returns
         -------
@@ -1381,46 +1614,172 @@ class Debugger:
 
         address = self.parse_address(location)
 
-        log.debug(f"putting breakpoint in {self.reverse_lookup(address)}")
+        log.debug(f"[{self.pid}] putting breakpoint in {self.reverse_lookup(address)}")
         
         if self.gdb is not None:
-            breakpoint = Breakpoint(self.__breakpoint_gdb(address, legacy_callback).server_breakpoint, callback, temporary)
+            breakpoint = Breakpoint(self.__breakpoint_gdb(address, legacy_callback).server_breakpoint, address, callback, temporary, user_defined)
         elif self.libdebug is not None:
             if legacy_callback is not None:
                 callback = legacy_callback
-            breakpoint = Breakpoint(self.__breakpoint_libdebug(address), callback, temporary)
+            breakpoint = Breakpoint(self.__breakpoint_libdebug(address, hw=hw), address, callback, temporary, user_defined)
         else:
             ...
 
-        self.breakpoints[address] = breakpoint
+        self.breakpoints[address].append(breakpoint)
         return breakpoint
         
     breakpoint = b
 
-    def delete_breakpoint(self, location: [int, str]) -> bool:
+    def delete_breakpoint(self, breakpoint: [int, str, Breakpoint]) -> bool:
+        """
+        Delete a particular breakpoint
+        If an address (or symbol) is passed the only user defined at that address will be deleted
+        
+        If possible pass the breakpoint itself
+        """
+
         if not self.debugging:
             log.warn_once(DEBUG_OFF)
             return
 
-        address = self.parse_address(location)
-        # Is there a case where it isn't ?? [17/04/23]
-        if address in self.breakpoints:
-            if self.gdb is not None:
-                self.breakpoints.pop(address).gdb_breakpoint.delete() # Remove from dict and delete from gdb
-            elif self.libdebug is not None:
-                self.libdebug.del_bp(self.breakpoints.pop(address).gdb_breakpoint)
-            else:
-                ...
+        if type(breakpoint) is not Breakpoint:
+            location = breakpoint
+            address = self.parse_address(location)
+            # Is there a case where it isn't ?? [17/04/23]
+            user_breakpoints = [b for b in self.breakpoints[address] if b.user_defined]
+            if len(user_breakpoints) == 0:
+                raise Exception(f"No breakpoint at address {hex(address)}")
+            if len(user_breakpoints) > 1:
+                raise Exception(f"You set multiple breakpoint at {hex(address)}! Which one should I delete ???")
+            breakpoint = user_breakpoints[0]
+
+        self.breakpoints[breakpoint.address].pop(self.breakpoints[breakpoint.address].index(breakpoint))
+        if self.gdb is not None:
+            breakpoint.native_breakpoint.delete() # Remove from dict and delete from gdb
+        elif self.libdebug is not None:
+            self.libdebug.del_bp(breakpoint.native_breakpoint)
+        else:
+            ...
+
+    def __bruteforce(self, init, setup, _to, check, range, backup, result, shutdown, libdebug):
+        self.restore_arch()
+        # Riconnetti gli eventi di gdb con il nuovo processo 
+        self.migrate(libdebug=True)
+        if not libdebug:
+            self.migrate(gdb=True)
+        if init is not None:
+            init(self)
+        registers = self.backup()
+        # continue_until would be too slow, so I use a single breakpoint # Warning for self modifying code
+        self.b(_to, user_defined=False)
+        saved_memory = []
+        for address, size in backup:
+            saved_memory.append((address, self.read(address, size)))
+        for i in range:
+            if shutdown.is_set():
+                return
+            if setup is not None:
+                setup(self, i)
+            self.cont()
+            assert self.instruction_pointer == _to, f"[{self.pid}] stopped at {hex(self.instruction_pointer)} instead of {hex(_to)} with {self._stop_reason}!!"
+            if check(self, i):
+                result.put(i)
+            # restore backups
+            self.restore_backup(registers)
+            for address, data in saved_memory:
+                self.write(address, data)
+        result.put(None)
+
+    def __bruteforce(self, threads, init, setup, _to, check, backup, result, shutdown, libdebug):
+        self.restore_arch()
+        # Riconnetti gli eventi di gdb con il nuovo processo 
+        for child, _ in threads:
+            child.migrate(libdebug=True)
+            if not libdebug:
+                child.migrate(gdb=True)
+        for child, range in threads:
+            context.Thread(target=child.__bruteforce_thread, args=(init, setup, _to, check, range, backup, result, shutdown, libdebug), name=f"[{self.pid}] bruteforce [{range.start}:{range.stop}]").start()
+        shutdown.wait()
+
+    def __bruteforce_thread(self, init, setup, _to, check, range, backup, result, shutdown, libdebug):
+        if init is not None:
+            init(self)
+        registers = self.backup()
+        # continue_until would be too slow, so I use a single breakpoint # Warning for self modifying code
+        self.b(_to, user_defined=False)
+        saved_memory = []
+        for address, size in backup:
+            saved_memory.append((address, self.read(address, size)))
+        for i in range:
+            if shutdown.is_set():
+                return
+            if setup is not None:
+                setup(self, i)
+            self.cont()
+            assert self.instruction_pointer == _to, f"[{self.pid}] stopped at {hex(self.instruction_pointer)} instead of {hex(_to)} with {self._stop_reason}!!"
+            if check(self, i):
+                result.put(i)
+            # restore backups
+            self.restore_backup(registers)
+            for address, data in saved_memory:
+                self.write(address, data)
+        result.put(None)
+
+    def bruteforce(self, _to, check, _from=None, setup=None, init=None, limit=1000, backup = [], libdebug=False, n_threads=1, n_processes=cpu_count()):
+        log.warn("Bruteforce is experimental! Function may break and names may change")
+        parallel = n_threads * n_processes
+        result = p_Queue()
+        shutdown = p_Event()
+        processes = []
+        if _from is not None:
+            self.jump(_from)
+        _to = self.parse_address(_to)
+        n = ceil(limit / parallel)
+        if self.gdb is None:
+            log.warn_once("debugger must be set on gdb... migrating to gdb")
+            self.migrate(gdb=True)
+        self.set_split_on_fork(interrupt=True)
+        progress = log.progress("setting up processes...")
+        for i in range(0, parallel, n_threads):
+            threads = []
+            for j in range(n_threads):
+                idx = i+j
+                progress.status(f"Process {i+1}/{n_processes}, Thread {j+1}/{n_threads}")
+                # Why return negative value, but still split ?
+                self.syscall(constants.SYS_fork, [])
+                pid = self.wait_split()
+                child = self.children[pid]
+                # The shellcode hasn't been removed in the child process
+                child.write(self.instruction_pointer, self.read(self.instruction_pointer, child.instruction_pointer + 1 - self.instruction_pointer))
+                child.jump(self.instruction_pointer)
+                threads.append((child, range(idx*n, (idx+1)*n)))
+            processes.append(Process(target=child.__bruteforce, args=(threads, init, setup, _to, check, backup, result, shutdown, libdebug)))
+        progress.success("all threads are ready")
+        self.detach()
+        #if libdebug:
+        #    log.debug(f"{self.gdb=}")
+        #    self.migrate(libdebug=True)
+        #processes.append(context.Thread(target=self.__bruteforce, args=(init, setup, _to, check, range(n), backup, result, shutdown, libdebug)))
+        for t in processes:
+            log.info(f"starting {t}")
+            t.start()
+        for _ in range(parallel):
+            res = result.get()
+            if res is not None:
+                shutdown.set()
+                return res
+        else:
+            log.critical("couldn't find a solution")
 
     ########################## MEMORY ACCESS ##########################
 
     def __read_gdb(self, address: int, size: int, *, inferior = None) -> bytes:
 
         if inferior == None:
-            inferior = self._inferior
+            inferior = self.current_inferior
 
         log.debug(f"reading from inferior {inferior}")
-        return self.inferiors[inferior].read_memory(address, size).tobytes()
+        return self.inferiors[inferior.num].read_memory(address, size).tobytes()
 
     def read(self, address: int, size: int, *, inferior = None, pid = None) -> bytes:
         if inferior is not None:
@@ -1435,16 +1794,15 @@ class Debugger:
     def __write_gdb(self, address: int, byte_array: bytes, *, inferior = None):
 
         if inferior == None:
-            inferior = self._inferior
-        
-        inferior = self.inferiors[inferior]
-        log.debug(f"writing {byte_array} in {inferior} at address {hex(address)}")
-        # BUG: GDB writes in the wrong inferior...
-        #inferior.write_memory(address, byte_array)
-        fd = os.open(f"/proc/{inferior.pid}/mem", os.O_RDWR)
-        os.lseek(fd, address, os.SEEK_SET)
-        os.write(fd, byte_array)
-        os.close(fd)
+            inferior = self.current_inferior
+        #
+        #inferior = self.inferiors[inferior.num]
+        #log.debug(f"writing {byte_array} in {inferior} at address {hex(address)}")
+        inferior.write_memory(address, byte_array)
+        #fd = os.open(f"/proc/{inferior.pid}/mem", os.O_RDWR)
+        #os.lseek(fd, address, os.SEEK_SET)
+        #os.write(fd, byte_array)
+        #os.close(fd)
 
     # How to handle multiple processes ?
     def __write_libdebug(self, address: int, byte_array: bytes, *, pid = None):
@@ -1457,10 +1815,66 @@ class Debugger:
         if pid is None:
             pid = self.pid
 
-        log.debug(f"writing {byte_array.hex()} at {hex(address)}")
+        log.debug(f"[{self.pid}] writing {byte_array.hex()} at {hex(address)}")
+        
+        # BUG: GDB writes in the wrong inferior...
+        if self.gdb is not None and inferior is None:
+            return self.__write_gdb(address, byte_array)
+
+        # Fail if area not writable
         with open(f"/proc/{pid}/mem", "r+b") as fd:
             fd.seek(address)
             fd.write(byte_array)
+
+    # Names should be singular or plurals ? I wanted singular for read and plural for write but it should be consistent [02/06/23]
+    # I assume little endianess [02/06/23]
+    def read_ints(self, address, n=1) -> [list, int]:
+        data = self.read(address, n*4)
+        res = [u32(data[i*4:(i+1)*4]) for i in range(n)]
+        return res[0] if n == 1 else res
+
+    def read_longs(self, address, n=1) -> [list, int]:
+        data = self.read(address, n*8)
+        res = [u64(data[i*8:(i+1)*8]) for i in range(n)]
+        return res[0] if n == 1 else res
+
+    # Should we return the null bytes ? No, consistent with write_strings [02/06/23]
+    def read_strings(self, address, n=1) -> [list, bytes]:
+        chunk = 0x100
+        data = b""
+        i = 0
+        while len(data.split(b"\x00")) <= n:
+            data += self.read(address + chunk*i, chunk)
+            i += 1
+        res = data.split(b"\x00")
+        return res[0] if n == 1 else res[:n]
+
+    def write_ints(self, address, values, *, heap = True) -> int:
+        if type(values) is int:
+            values = [values]
+        data = b"".join([p32(x) for x in values])
+        if address is None:
+            address = self.alloc(len(data), heap=heap)
+        self.write(address, data)
+        return address
+
+    def write_longs(self, address, values, *, heap = True) -> int:
+        if type(values) is int:
+            values = [values]
+        data = b"".join([p64(x) for x in values])
+        if address is None:
+            address = self.alloc(len(data), heap=heap)
+        self.write(address, data)
+        return address
+
+    def write_strings(self, address, values, *, heap = True) -> int:
+        if type(values) is bytes:
+            values = [values]
+        data = b"\x00".join(values)
+        if address is None:
+            address = self.alloc(len(data), heap=heap)
+        self.write(address, data)
+        return address
 
     def push(self, value: int):
         """
@@ -1496,7 +1910,7 @@ class Debugger:
     #(__GI___libc_malloc) will be abandoned.
     #When the function is done executing, GDB will silently stop.
     
-    def alloc(self, n: int, /, *, heap=True, inferior = None) -> int:
+    def alloc(self, n: int, /, *, heap=True) -> int:
         """
         Allocate N bytes in the heap or [if really needed] the bss
 
@@ -1515,7 +1929,7 @@ class Debugger:
         if heap:
             if self.gdb is not None:
                 # Do we wan't to use call for both ? [10/05/23]
-                ret = self.gdb_call("malloc", [n], inferior=inferior)
+                ret = self.gdb_call("malloc", [n])
             elif self.libdebug is not None:
                 ret = self.call("malloc", [n])
             else:
@@ -1528,11 +1942,11 @@ class Debugger:
         
         return ret
 
-    def dealloc(self, pointer: int, len=0, heap=True, inferior = None):
+    def dealloc(self, pointer: int, len=0, heap=True):
         
         if heap:    
             if self.gdb is not None:
-                self.gdb_call("free", [pointer], cast="void", inferior=inferior)
+                self.gdb_call("free", [pointer], cast="void")
             elif self.libdebug is not None:
                 self.call("free", [pointer])
             else:
@@ -1542,6 +1956,17 @@ class Debugger:
             self._free_bss -= len
             #I know it's not perfect, but damn I don't want to implement a heap logic for the bss ahahah
             #Just use the heap if you can
+
+    # Quick attempt to find maps
+    @property
+    def maps(self):
+        maps_raw = open(f"/proc/{self.pid}/maps").read()
+        maps = {}
+        for line in maps_raw.splitlines():
+            line = line.split()
+            start, end = line[0].split("-")
+            maps[int(start, 16)] = int(end, 16) - int(start, 16)
+        return maps
 
     # I copied it from pwntools to have access to it even if I attach directly to a pid
     def libs(self):
@@ -1610,7 +2035,7 @@ class Debugger:
             #    line = line.strip()
             #    if line.startswith("Entry point:"):
             #        address = int(line.split()[-1], 16)
-            #        print(f"Entry point = {hex(address)}")
+            #        log.debug(f"Entry point = {hex(address)}")
             #        return address - address%0x1000 #Not always true...
                     
 
@@ -1792,26 +2217,36 @@ class Debugger:
         else:
             self.rip = value
 
-    @property
-    def __saved_ip(self):
-        if self.gdb is not None:
-            return self.gdb.newest_frame().older().pc()
-
-        elif self.libdebug is not None:
-            self.restore_arch()
-            # experimental, but should be better that the native one for libdebug        
-            if self.next_inst.toString() in ["endbr64", "push rbp", "push ebp"]:
+    def _find_rip(self):
+        self.restore_arch()
+        if self.base_pointer:
+            if self.next_inst.toString() in ["endbr64", "push rbp", "push ebp", "ret"]:
                 return_pointer = self.read(self.stack_pointer, context.bytes)
             elif self.next_inst.toString() in ["mov rbp, rsp", "mov ebp, esp"]:
                 return_pointer = self.read(self.stack_pointer + context.bytes, context.bytes) # Remove the base pointer # No need to place it back in rbp
             else:
                 return_pointer = self.read(self.base_pointer + context.bytes, context.bytes)
 
-            return unpack(return_pointer)        
+        else:
+            # At least, this is the case with fork and works better than gdb.
+            return_pointer = self.read(self.stack_pointer, context.bytes)
+
+        return unpack(return_pointer)
+
+    @property
+    def __saved_ip(self):
+        if self.gdb is not None:
+            return self.gdb.newest_frame().older().pc()
+
+        elif self.libdebug is not None:
+            return self._find_rip()     
+
+        else:
+            ...
 
         ## rip = 0x7ffff7fe45b8 in _dl_start_final (./elf/rtld.c:507); saved rip = 0x7ffff7fe32b8
         #data = self.execute("info frame 0").split("\n")
-        #print(data)
+        #log.debug(data)
         #for line in data:
         #    if " saved " in line and "ip = " in line:
         #        ip = line.split("saved ")[-1].split("= ")[-1]
@@ -1819,13 +2254,18 @@ class Debugger:
         #            return 0
         #        return int(ip, 16)
 
+    @property
+    def return_pointer(self):
+        return self.__saved_ip
+
     ########################## FORKS ##########################
     # TODO find a better name [28/02/23]
     # TODO make inferior and n the same parameter ? [04/03/23]
 
     # Call shellcode has problems: https://sourceware.org/gdb/onlinedocs/gdb/Registers.html. Can't push rip
     # Warn that the child will still be in the middle of the fork [26/04/23]
-    def split_child(self, *, pid = None, inferior=None, n=None):
+    # TODO support split for libdebug [02/06/23] (Will require a new patch to libdebug)
+    def split_child(self, *, pid = None, inferior=None, n=None, script=""):
         self.restore_arch()
         if inferior is None:
             for inf_n, inferior in self.inferiors.items():
@@ -1843,20 +2283,22 @@ class Debugger:
         log.debug(f"splitting inferior {inferior}")
         n = inferior.num
         pid = inferior.pid
-        old_n = self.switch_inferior(n)
+        old_inferior = self.switch_inferior(n)
         ip = self.instruction_pointer
-        backup = self.inject_sleep(ip, inferior)
+        backup = self.inject_sleep(ip)
 
         # Now it should be handled by the interrupt in set_split_on_fork [22/05/23]
         ## For some reason it may happend that we receive a SIGINT on the first step. This would kill the process if I detached now [29/04/23] (Always that same bug)
         #self.step() 
         
-        self.switch_inferior(old_n)
-        log.debug("detaching from child")
+        self.switch_inferior(old_inferior.num)
+        log.debug(f"detaching from child [{pid}]")
         self.execute(f"detach inferiors {n}")
-        # Do we include self.gdbscript ? [08/05/23]
-        # Warn to use it only to setup the debugger in general ? No commands because they will be runned by all childs
-        child = Debugger(pid, binary=self.elf.path)
+        child = Debugger(pid, binary=self.elf.path, script=script)
+        # Copy libc since child can't take it from process [04/06/23]
+        child.libc = self.libc
+        # Set parent for ptrace [08/06/23]
+        child.parent = self
         log.debug("new debugger opened")
         child.write(ip, backup)
         log.debug("shellcode patched")
@@ -1866,7 +2308,7 @@ class Debugger:
     # entrambi dovrebbero essere interrotti, il parent alla fine di fork, il child a metà
     # Ho deciso di lasciare correre il parent. Te la gestisci te se vuoi mettere un breakpoint mettilo dopo
     # I just discovered "gdb.events.new_inferior"... I can take the pid from event.inferior.pid, but can I do more ?
-    def set_split_on_fork(self, off=False, c=False, keep_breakpoints=False, interrupt=False):
+    def set_split_on_fork(self, off=False, c=False, keep_breakpoints=False, interrupt=False, script=""):
         """
         split out a new debugging session for the child process every time you hit a fork
 
@@ -1882,7 +2324,7 @@ class Debugger:
             #    del self.breakpoints["fork"]
 
             # Will break if not set on before
-            self.gdb.events.new_inferior.disconnect(self.inferior_handler)
+            self.gdb.events.new_inferior.disconnect(self.fork_handler)
                 
         else:
             self.execute("set detach-on-fork off")
@@ -1893,129 +2335,137 @@ class Debugger:
                 pid = inferior.pid        
                 #self.to_split.put(pid)
                 def split(inferior):
+                    # claim priority asap
+                    priority = self.execute_action("", sender="split")
+                    #self.raise_priority("split")
+
                     self.restore_arch()
                     
                     log.info(f"splitting child: {inferior.pid}")
+                    # Am I the reason why the process stopped ?
                     stopped = False
-                    if self.running:
-                        self.interrupt()
-                        # How to handle the case where we interrupt at the address of a temporary breakpoint ? [05/05/23]
-                        #if self.instruction_pointer not in self.breakpoints and self.instruction_pointer != self.last_breakpoint_deleted:
-                        if "BREAKPOINT" not in self._stop_reason:
-                            if DEBUG:
-                                log.debug(f"stopped with {self._stop_reason}")
+                    signal_sent = self.interrupt(strict=False)
+                    # How to handle the case where we interrupt at the address of a temporary breakpoint ? [05/05/23]
+                    #if self.instruction_pointer not in self.breakpoints and self.instruction_pointer != self.last_breakpoint_deleted:
+                    # I have to consider a single step to handle self.syscall(fork)
+                    # Maybe handle part of it in interrupt [19/06/23]
+                    if signal_sent:
+                        if "SIGINT" == self._stop_reason:
                             stopped = True
+                        elif "BREAKPOINT" not in self._stop_reason and "SINGLE STEP" != self._stop_reason:
+                            log.debug(f"parrent stopped with {self._stop_reason}")
                         else:
-                            if DEBUG:
-                                log.debug("I tried interrupting, but we where already on a breakpoint, so I won't continue later")
+                            log.debug("I tried interrupting, but we where already on a breakpoint, so I won't continue later")
                             address = self.instruction_pointer
+                            log.debug("trying to catch SIGINT from interrupt")
                             with context.silent:
-                                self.step(repeat=2)
+                                self.step_until_condition(lambda dbg: dbg._stop_reason == "SIGINT")
                             if address != self.instruction_pointer:
                                 log.warn("I made a mistake and stepped thinking we would catch an interrupt. I hope this won't be a problem")
-                    self.children[pid] = self.split_child(inferior=inferior)
+                    self.children[pid] = self.split_child(inferior=inferior, script=script)
                     # Should not continue if I reached the breakpoint before the split
-                    if not interrupt and stopped:
-                        self.execute("c")
-                        # What is the difference ? [05/O5/23 20:30]
-                        #self.priority -= 1 # Can i do it this way to keep the priority correct ? [05/05/23 20:00]
-                        #self.cont(wait=False)
-                    # Put it at the end to avoid any race condition [05/05/23 2O:30]
+                    if signal_sent:
+                        if not interrupt and stopped:
+                            self.__hidden_continue()
+                            # What is the difference ? [05/O5/23 20:30]
+                            #self.priority -= 1 # Can i do it this way to keep the priority correct ? [05/05/23 20:00]
+                            #self.cont(wait=False)
+                        # Put it at the end to avoid any race condition [05/05/23 2O:30]
+                        # I didn't stop due to the signal, but I must be running to split, so we are in the case where we hit a breakpoint (right ??) [29/05/23]
+                        elif not stopped:
+                            self.__set_stop("I did hit a breakpoint while interrupting the process")
+                        elif interrupt:
+                            self.__set_stop("I have been asked to stop after a fork")
+                    #self.lower_priority("release split")
+                    self.priority_wait("Release split", priority = priority)
+                    # Is it a good idea to set a stop ? I do need a way to let lower priority catch previous stops hidden by the fact that I was in here, but maybe it is better to check for those and set myStopped.cleared instead
+                    self.__set_stop("Released split")
                     self.split.put(pid)
-                    # I didn't stop due to the signal, but I must be running to split, so we are in the case where we hit a breakpoint (right ??) [29/05/23]
-                    if not stopped:
-                        self.__clear_stop("I did hit a breakpoint while interrupting the process")
-                        self.myStopped.set()
                 ## Non puoi eseguire azioni dentro ad un handler degli eventi quindi lancio in un thread a parte
-                context.Thread(target=split, args = (inferior,)).start()
+                context.Thread(target=split, args = (inferior,), name=f"[{self.pid}] split_fork").start()
 
-            self.gdb.events.new_inferior.connect(fork_handler)
+            self.fork_handler = fork_handler
+            self.gdb.events.new_inferior.connect(self.fork_handler)
             
             return self
 
-    # Non dovrebbe gestire gli int3 piuttosto ? Un set event if not in breakpoints execute code ? [06/03/23]
-    # Boh, tanto si ferma e basta... 
-    # Però si, dovrebbe dirlo al master
-    # Il problema è che spesso si ferma prima di sapere chi sia il master
-    # Maybe add a callback for SIGSTOP... [25/03/23]
-    # TODO set in __stop_handler an action to sent to the master why we stopped [27/04/23]
-    def emulate_ptrace_slave(self, master = None, *, off = False, wait_fun="waitpid"):
-        """
-        Emulate calls to ptrace as a slave process [and one day send back informations to the master]
+    # Take all processes related
+    @property
+    def ptrace_group(self):
+        if self.parent is not None:
+            return self.parent.ptrace_group
 
-        Arguments:
-            off: Stop emulating ptrace
-            master: pointer to the master if you need to send back informations on the interruptions. Can be set later writing self.master
-            wait_fun: symbol or address of the function used to wait for the master. Default: "waitpid"
-        """
-        if master is not None:
-            self.master = master
+        return {p.pid: p for p in self.recursive_children}
 
-        if not off:
-            log.debug(f"emulating slave proc {self.pid}")
-            # patch waitpid
-            # Attento che funziona solo su 64 bit, ma è un test per capire da dove appare il sigabort [08/03/23]
-            self.write(self.symbols[wait_fun], RET)
-            # set breakpoint
-            # You can not wait inside the breakpoint otherwise gdb gets blocked before the child can be split away 
-            def callback(dbg):
-                log.debug("slave waiting for instructions")
+    # Take all grand-children
+    @property
+    def recursive_children(self):
+        group = {self}
+        for child in self.children.values():
+            group |= child.recursive_children
+        return group
 
-                # Do it for int3 instead
-                #if dbg.master is not None:
-                #    dbg.master.slave_has_stopped.set() 
+    # I want a single function so that each process can be both master and slave [08/06/23]
+    # I use real callback as long as we are breaking on the function it should work. The problem is if we start catch the syscall instead [08/06/23]
+    def emulate_ptrace(self, *, off=False, wait_fun="waitpid", manual=True):
+        self.restore_arch()
 
-                def thread(dbg):
-                    log.critical("slave thread stopped")
-                    dbg.wait_master()
-                    dbg.__clear_stop("thread slave")
-                    log.critical("slave thread can continue")
-                    #log.debug("I won't run dbg.c(), see if you still get the breakpoint hit twice")
-                    dbg.exit_broken_function()
-                    #dbg.c() # There are some strange things happening here. Without this continue I need 2 ni to execute the ret since the first just restore the thread in gdb (Try without GEF)
-                # I decided to avoid breaking. Is there a reason to do otherwise ? You are not blocking the master and the slave has nothing else to do
-                context.Thread(target=thread, args=(dbg,)).start()
+        if off:
+            for bp in self.ptrace_breakpoints:
+                self.delete_breakpoint(bp)
+
+            for address, backup in self.ptrace_backups.items():
+                self.write(address, backup)
+            return
+
+        if len(self.ptrace_breakpoints):
+            raise Exception(f"[self.pid] is already emulating ptrace")
+
+        log.debug(f"emulating ptrace for proc [{self.pid}]")
+
+        shellcode = RET
+        address = self.parse_address(wait_fun)
+        backup = self.read(address, len(shellcode))
+        self.write(address, shellcode)
+        self.ptrace_backups[address] = backup
+
+        def callback_wait(dbg):
+            pid = dbg.args[0]
+            status_pointer = dbg.args[1]
+            options = dbg.args[2]
+
+            if pid == 2**32 - 1:
+                assert len(dbg.slaves) == 1, "For now I can only handle waitpid(-1) if there is only one slave"
+                pid = list(dbg.slaves.keys())[0]
+                log.debug(f"waiting for -1...")
+            
+            log.info(f'waitpid for process [{pid}]')
+            #tracee = self.ptrace_group[pid]
+            # can only be a slave, write ?
+            tracee = dbg.slaves[pid]
+            stopped = tracee.wait_slave(options)
+
+            # TODO what about handling events in status ? [04/06/23]
+            status = (tracee.stop_signal * 0x100 + 0x7f) * stopped
+            log.info(f"setting status waitpid: {hex(status_pointer)} -> [{hex(status)}]")
+            dbg.write(status_pointer, p32(status))
+            # I don't handle the errors yet [19/06/23]
+            if stopped:
+                dbg.return_value = pid
+            else:
+                dbg.return_value = 0
+            # I would have liked it, but for now we have a bug if ret jumps on an address where we have a breakpoint that should stop, but our return False let the process run anyway [09/06/23]
+            #dbg.ret()
+            # Don't stop for a NOHANG [09/06/23]
+            if manual and stopped:
                 return True
-                #return False 
-            # WHY IS THE BREAK HIT TWICE ??? [07/03/23]
-            self.b(self.symbols[wait_fun], callback = callback)
-
-            self.write(self.symbols["ptrace"], RET)
-            def ptrace_callback(dbg):
-                ptrace_command = dbg.args[0]
-                assert ptrace_command == constants.PTRACE_TRACEME
-                dbg.PTRACE_TRACEME()
-                # The only reason to call this function is to be sure it will stop, right ?
-                # Nope... [24/03/23]
+            else:
                 return False
 
-            self.b(self.symbols["ptrace"], legacy_callback = ptrace_callback)
-
-        else:
-            log.debug("stop emulating slave. Removing waitpid and ptrace breakpoints")
-            self.delete_breakpoint(self.symbols[wait_fun])
-            self.delete_breakpoint(self.symbols["ptrace"])
-
-        return self
-    
-    def emulate_ptrace_master(self, slave = None, *, wait_fun = "waitpid", stop_at_waitpid = True):
-        """
-        Tell the debugger to handle calls to ptrace
-        
-        Arguments:
-            slave: pointer to a debugger of the tracee. If not set will look for the corresponding debugger in self.children
-            wait_fun: function used to wait for the tracee
-            stop_at_waitpid: flag to set a breakpoint on the wait function (Default True to help manual debugging)
-        """
-        if slave is None:
-            log.debug(f"emulating master {self.pid}. You haven't set the slave yet")
-        else:
-            log.debug(f"emulating master {self.pid} over {slave.pid}")
-            self.slaves[slave.pid] = slave
-        # patch ptrace
-        self.write(self.symbols["ptrace"], RET)
+        self.ptrace_breakpoints.append(self.b(wait_fun, callback=callback_wait, user_defined=False))
 
         # Waiting for pwntools update
+        constants.PTRACE_SEIZE = 0x4206
         if context.arch == "amd64":
             constants.PTRACE_GETREGS = 12
             constants.PTRACE_SETREGS = 13
@@ -2025,126 +2475,143 @@ class Debugger:
             constants.PTRACE_O_MASK     = 0x003000ff
 
 
-        ptrace_dict = {constants.PTRACE_POKEDATA: self.PTRACE_POKETEXT,
+        ptrace_dict = {constants.PTRACE_TRACEME: self.PTRACE_TRACEME,
+            constants.PTRACE_POKEDATA: self.PTRACE_POKETEXT,
             constants.PTRACE_POKETEXT: self.PTRACE_POKETEXT, 
             constants.PTRACE_PEEKTEXT: self.PTRACE_PEEKTEXT, 
             constants.PTRACE_PEEKDATA: self.PTRACE_PEEKTEXT, 
             constants.PTRACE_GETREGS: self.PTRACE_GETREGS, 
             constants.PTRACE_SETREGS: self.PTRACE_SETREGS,
             constants.PTRACE_ATTACH: self.PTRACE_ATTACH,
+            constants.PTRACE_SEIZE: self.PTRACE_SEIZE,
             constants.PTRACE_CONT: self.PTRACE_CONT,
             constants.PTRACE_DETACH: self.PTRACE_DETACH,
             constants.PTRACE_SETOPTIONS: self.PTRACE_SETOPTIONS,
             constants.PTRACE_SINGLESTEP: self.PTRACE_SINGLESTEP,}
+
+        shellcode = RET
+        address = self.parse_address("ptrace")
+        backup = self.read(address, len(shellcode))
+        self.write(address, shellcode)
+        self.ptrace_backups[address] = backup
 
         def ptrace_callback(dbg):
             ptrace_command = dbg.args[0]
             pid = dbg.args[1]
             arg1 = dbg.args[2]
             arg2 = dbg.args[3]
-            if pid in dbg.slaves:
-                slave = dbg.slaves[pid]
-            elif pid in dbg.children:
-                assert ptrace_command in [constants.PTRACE_ATTACH, constants.PTRACE_SEIZE]
-                slave = dbg.children[pid]
-                log.debug(f"the slave for {self.pid} will be {pid}")
-                dbg.slaves[pid]
+            
+            log.info(f"[{dbg.pid}] ptrace {pid} -> {ptrace_command}: ({hex(arg1)}, {hex(arg2)})")
+            action = ptrace_dict[ptrace_command]
+
+            if ptrace_command == constants.PTRACE_TRACEME:
+                tracer = dbg if dbg.parent is None else dbg.parent
+                
+                if dbg.pid not in tracer.slaves:
+                    log.info(f"TRACEME: [{dbg.pid}] will be trace by [{tracer.pid}]")
+                    action(tracer, manual=manual)
+                    return False
+
+                else:
+                    log.warn(f"[{dbg.pid}] is already traced !")
+                    dbg.return_value = -1
+                    return False
+
+            elif ptrace_command in [constants.PTRACE_ATTACH, constants.PTRACE_SEIZE]:
+                
+                if pid in dbg.slaves:
+                    log.warn(f"[{pid}] is already traced !")
+                    dbg.return_value = -1
+                    return False
+
+                else:
+                    tracee = dbg.ptrace_group[pid]
+                    action(pid, arg2, slave=tracee, manual=manual)
+
             else:
-                raise Exception(f"master tried to trace {pid}, which isn't known as a child nor a slave")
+                tracee = dbg.slaves[pid]
+                should_stop = action(arg1, arg2, slave=tracee, manual=manual)
 
-            log.debug(f"ptrace {pid} -> {ptrace_command}: ({hex(arg1)}, {hex(arg2)})")
-            action = ptrace_dict[ptrace_command] # The slave can be a parent
-
-            # Why am I using a context.Thread since I can't use dbg.next() ?
-            #context.Thread(target = action, args = (arg1, arg2), kwargs = {"slave": slave}).start() # Magari fa problemi di sincronizzazione con le wait
-            action(arg1, arg2, slave=slave)
-
-            # The problem with return False is that if I walk over the breakpoint manualy I loose control of the debugger because the program continues
-            return False
+            return should_stop
 
         # Legacy_callback so that the program does run off if we step over the breakpoint manualy
         # Is this still needed ? [05/05/23] # Yes, you have to patch gdb's implementation of nexti and finish first
-        self.b(self.symbols["ptrace"], legacy_callback=ptrace_callback)
-
-        # Set breakpoint for wait_attach
-        # Not in attach because TRACEME doesn't call attach
-        # gdb has a bug, [#0] Id 1, Name: "traps_withSymbo", stopped 0x448ac0 in waitpid (), reason: SIGINT. even without a breakpoint
-        self.write(self.symbols[wait_fun], RET)
-        # You have to choose between return False and temporary for now...
-        def callback_wait(dbg):
-            dbg.return_value = dbg.args[0] #slave.pid # Not really, but just != 0
-            status_pointer = dbg.args[1]
-            # Should be set in relation to the slave... But for now rip
-            wait_signal = self._wait_signal if self._wait_signal is not None else 0x13
-            self._wait_signal = None
-            dbg.write(status_pointer, p32(wait_signal * 0x100 + 0x7f)) # Random status that currently works. For sigabort it is \x13\x7f \x13 is SIGSTOP \x7f means that the process has stopped
-            if stop_at_waitpid:
-                log.info(f"parent is waiting for the child [{dbg.args[0]}]. Continue once you are ready.")
-                return True
-            else:
-                log.debug("we hit waitpid")
-                return False
-
-        self.b(self.symbols[wait_fun], legacy_callback = callback_wait)
+        # I will use a normal callback. Just use IPython dbg.next() if you have to step manually [08/06/23]
+        self.ptrace_breakpoints.append(self.b("ptrace", callback=ptrace_callback, user_defined=False))
 
         return self
 
     ########################## PTRACE EMULATION ##########################
-    def PTRACE_ATTACH(self, pid, _, *, slave):
-        log.debug(f"pretending to attach to process {pid}")
-        slave.master = self
-        # I don't think it is needed to stop the child
-        #slave.interrupt() ?
-        self.slave_has_stopped.set()
+    # If attach and interrupt stop the process I want continue and detach to let it run again, otherwise just set ptrace_can_continue [08/06/23]
+    # Should we handle the interruptions in a special way ? Like adding a priority when attaching ? [08/06/23] (But how to handle stop due to a SIGNAL ?)
+
+    # We could do a return False or True depending on if we interrupted the process or not. A small indication if we are debugging manually or not [08/06/23]
+    def PTRACE_ATTACH(self, pid, _, *, slave, **kwargs):
+        log.info(f"pretending to attach to process {pid}")
+        self.slaves[pid] = slave
+        if slave.running:
+            log.info(f"attach will interrupt the slave")
+            slave.interrupt()
+            # It makes no sense because any signal interruption would not be hable to distinguish if we were manually debugging or not [08/06/23] (Not really, but it would require a lot of work)
+            #slave.ptrace_interrupted = True
+        slave.ptrace_has_stopped.set()
         self.return_value = 0
 
-    # Copied from attach for now
-    def PTRACE_SEIZE(self, pid, options, *, slave):
-        raise Exception("not implemented yet")
-        log.debug(f"pretending to seize process {slave.pid}")
-        slave.master = self
-        self.PTRACE_SETOPTIONS(pid, options, slave=self.slave)
-        # I don't think it is needed to stop the child
-        #slave.interrupt() ?
-        self.slave_has_stopped.set()
+    def PTRACE_SEIZE(self, pid, options, *, slave, **kwargs):
+        log.info(f"pretending to seize process {slave.pid}")
+        self.PTRACE_SETOPTIONS(pid, options, slave=slave)
+        self.slaves[pid] = slave
         self.return_value = 0
+        return False
 
     # Only function called by the slave
-    def PTRACE_TRACEME(self):
-        log.debug("slave wants to be traced")
+    def PTRACE_TRACEME(self, tracer, **kwargs):
+        log.info("slave wants to be traced")
+        tracer.slaves[self.pid] = self
+        log.info(f"setting {self.pid} as slave for {tracer.pid}")
         self.return_value = 0
+        # dirt left by ptrace that could be checked
         if context.bits == 64:
             self.r8 = -1
-        # TODO: Wait for a master
-        if self.pid not in self.master.slaves:
-            log.debug(f"setting {self.pid} as slave for {self.master.pid}")
-            self.master.slaves[self.pid] = self
-        self.master.slave_has_stopped.set()
+        tracer.ptrace_has_stopped.set()
+        return False
 
-    def PTRACE_CONT(self, _, __, *, slave):
-        print("slave can continue !")
-        slave.master_wants_you_to_continue.set()
+    def PTRACE_CONT(self, _, __, *, slave, manual, **kwargs):
+        if not manual:
+            log.info(f"[{self.pid}] PTRACE_CONT will let the slave [{slave.pid}] continue")
+            slave.__hidden_continue(force=True)
+            return False
+        else:
+            slave.ptrace_can_continue.set()
+            log.info("slave can continue !")
+            return True
 
-    def PTRACE_DETACH(self, _, __, *, slave):
-        log.debug(f"ptrace detached from {slave.pid}")
-        slave.master_wants_you_to_continue.set()
-        slave.master = None
+    def PTRACE_DETACH(self, _, __, *, slave, manual, **kwargs):
+        log.ingo(f"ptrace detached from {slave.pid}")
+        self.slaves.pop(pid)
+        slave.ptrace_can_continue.set()
+        if not manual:
+            log.info(f"detach will let the slave continue")
+            self.__hidden_continue(force=True)
+        return False
 
-    def PTRACE_POKETEXT(self, address, data, *, slave):
-        log.debug(f"poking {hex(data)} into process {slave.pid} at address {hex(address)}")
+    def PTRACE_POKETEXT(self, address, data, *, slave, **kwargs):
+        log.info(f"poking {hex(data)} into process {slave.pid} at address {hex(address)}")
         slave.write(address, pack(data))
         self.return_value = 0 # right ?
+        return False
 
-    def PTRACE_PEEKTEXT(self, address, _, *, slave):
+    def PTRACE_PEEKTEXT(self, address, _, *, slave, **kwargs):
         data = unpack(slave.read(address, context.bytes))
-        log.debug(f"peeking {hex(data)} from process {slave.pid} at address {hex(address)}")
+        log.info(f"peeking {hex(data)} from process {slave.pid} at address {hex(address)}")
         self.return_value = data
+        return False
 
-    def PTRACE_GETREGS(self, _, pointer_registers, *, slave):
+    def PTRACE_GETREGS(self, _, pointer_registers, *, slave, **kwargs):
         registers = user_regs_struct()
         for register in slave.registers:
             value = getattr(slave, register)
-            log.debug(f"reading child's register {register}: {hex(value)}")
+            log.debug(f"[{self.pid}] reading [{slave.pid}]'s register {register}: {hex(value)}")
             #if register in ["rip", "eip"]:
             #    register = "ip"
             #elif register in ["rsp", "esp"]:
@@ -2153,8 +2620,10 @@ class Debugger:
             setattr(registers, register, value)
         self.write(pointer_registers, registers.get())
         self.return_value = 0 # right ?
-    
-    def PTRACE_SETREGS(self, _, pointer_registers, *, slave):
+        return False
+
+    # ATTENTO CHE setattr ritorna prima che vanga fatto correttamente la jump per mettere rip. Quindi potresti avere una race condition [09/06/23]
+    def PTRACE_SETREGS(self, _, pointer_registers, *, slave, **kwargs):
         registers = user_regs_struct()
         registers.set(self.read(pointer_registers, registers.size))
         for register in slave.registers:
@@ -2164,21 +2633,22 @@ class Debugger:
             #    register = "sp"
             assert register in registers.registers
             value = getattr(registers, register)
-            log.debug(f"setting child's register {register}: {hex(value)}")
+            log.debug(f"[{self.pid}] setting [{slave.pid}]'s register {register}: {hex(value)}")
             setattr(slave, register, value)
         self.return_value = 0 
+        return False
 
-    def PTRACE_SETOPTIONS(self, _, options, *, slave):
+    def PTRACE_SETOPTIONS(self, _, options, *, slave, **kwargs):
         log.debug(hex(options))
         if options & constants.PTRACE_O_EXITKILL:
             options -= constants.PTRACE_O_EXITKILL
-            log.debug("Option EXITKILL set")
+            log.info("Option EXITKILL set")
             #log.debug("They want to kill the slave if you remove the master")
             log.debug(hex(options))
         
         if options & constants.PTRACE_O_TRACESYSGOOD:
             options -= constants.PTRACE_O_TRACESYSGOOD
-            log.debug("Option TRACESYSGOOD set")
+            log.info("Option TRACESYSGOOD set")
             #log.debug("")
             log.debug(hex(options))
 
@@ -2186,12 +2656,14 @@ class Debugger:
             raise(f"{hex(options)}: Not implemented yet")
 
         self.return_value = 0
+        return False
 
-    def PTRACE_SINGLESTEP(self, _, __, *, slave):
-        log.debug("ptrace single step")
-        slave.step()
-        self._wait_signal = 0x5 
+    def PTRACE_SINGLESTEP(self, _, __, *, slave, **kwargs):
+        log.info("ptrace single step")
+        slave.step(force=True)
+        slave.ptrace_has_stopped.set()
         self.return_value = 0
+        return False
 
     ########################## REV UTILS ##########################
 
@@ -2209,9 +2681,9 @@ class Debugger:
         """
 
         if inferior == None:
-            inferior = self._inferior
+            inferior = self.current_inferior
         
-        old_inferior = self.switch_inferior(inferior)
+        old_inferior = self.switch_inferior(inferior.num)
 
         if address is None:
             log.debug("allocating memory for shellcode")
@@ -2236,7 +2708,7 @@ class Debugger:
             log .debug(f"{context.arch=}")
         ans = self.syscall(constants.SYS_mprotect.real, [address & 0xfffffffffffff000, size, constants.PROT_EXEC | constants.PROT_READ | constants.PROT_WRITE])
         
-        self.switch_inferior(old_inferior)
+        self.switch_inferior(old_inferior.num)
 
         return address
 
@@ -2259,7 +2731,7 @@ class Debugger:
         """
         print memory infos as in gdb
         """
-        print(self.execute("context"))
+        log.debug(self.execute("context"))
 
     #Works only with GEF. I use them to avoid writing down print(self.execute("heap bins")) every time
     def bins(self):
@@ -2309,7 +2781,11 @@ class Debugger:
         if self.elf and name in self.special_registers + self.registers + self.minor_registers:
             self.restore_arch()
             if self.gdb is not None:
-                self.execute(f"set ${name.lower()} = {value % 2**context.bits}")
+                if name.lower in ["eip, rip"] and value != self.instruction_pointer:
+                    # GDB has a bug when setting rip ! [09/06/23]
+                    jump(value)
+                else:
+                    self.execute(f"set ${name.lower()} = {value % 2**context.bits}")
             elif self.libdebug is not None:
                 setattr(self.libdebug, name, value)
             else:
