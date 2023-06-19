@@ -69,7 +69,7 @@ class Inner_Debugger:
 
         with open(f"/proc/{self.pid}/mem", "r+b") as fd:
             fd.seek(address)
-            fd.write(byte_array)
+            fd.write(data)
         
     write = write_memory
 
