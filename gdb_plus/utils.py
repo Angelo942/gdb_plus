@@ -73,6 +73,7 @@ class Arguments:
         return self.dbg.write(pointer, pack(value))
 
 # Warning. Calling wait() before clear() returns immediatly!
+# TODO add a counter on when to stop treating return False as continues
 class MyEvent(Event):
     def __init__(self):
         super().__init__()
@@ -80,31 +81,70 @@ class MyEvent(Event):
         #self.secret = Event()
         self.priority = 0
         self.pid = 0
+        self.flag_enforce_stop = None
 
     # I still need a standard wait for actions not initiated by dbg.cont and dbg.next
     # There seems to be a rare bug where multiple priorities are cleared at the same time [11/06/23]
-    def priority_wait(self):
-        priority = self.priority
-        log.debug(f"[{self.pid}] waiting with priority {priority}")
+    def priority_wait(self, comment = "", priority=None):
+        if priority is None:
+            priority = self.priority
+        log.debug(f"[{self.pid}] waiting with priority {priority} for {comment}")
         while True:
+            # Unfortunately you can not use the number of threads waiting to find the max priority [18/06/23]
             super().wait()
-            if priority == self.priority:
-                log.debug(f"[{self.pid}] met priority {priority}")
+            log.debug(f"wait [{priority}] finished")
+            # Make sure all threads know the current priority
+            backup_priority = self.priority
+            sleep(0.05)
+            if priority == backup_priority:
+                log.debug(f"[{self.pid}] met priority {priority} for {comment}")
+                self.lower_priority(comment)
+                # perchè non funzia ?
+                #super().clear()
                 break
             # If I call wait again while the event is set it won't block ! [04/04/23]
             self.cleared.wait()
             # I forgot to clear it somewhere... [22/05/23]
+            # Wait, what happens if we have 3 threads waiting ??
             self.cleared.clear()
+        #return priority
 
     # I move the priority -= 1 in here to avoid a race condition on the check priority == self.priority. I hope it won't break because I missed a clear somewhere, but with the cleared.wait; cleared.clear it should already break anyway [13/06/23]
-    def clear(self):
+    def clear(self, comment):
         #self.secret.clear()
         if self.is_set():
-            self.priority -= 1
-            if self.priority < 0:
-                log.warn(f"I think there is something wrong with the wait! We reached priority {self.priority}")
             super().clear()
             self.cleared.set()
+
+    #def hidden_clear(self):
+    #    if self.is_set():
+    #        super().clear()
+    #        self.cleared.set()
+
+    def raise_priority(self, comment):
+        log.debug(f"[{self.pid}] raising priority [{self.priority}] -> [{self.priority + 1}] for {comment}")
+        self.priority += 1
+
+    def lower_priority(self, comment):
+        log.debug(f"[{self.pid}] lowering priority [{self.priority - 1}] <- [{self.priority}] for {comment}")
+        self.priority -= 1
+        if self.priority < 0:
+            log.warn(f"I think there is something wrong with the wait! We reached priority {self.priority}")
+        if self.priority == 0:
+            # Should reset when reaching 0, but also when debugging manually ? [18/06/23]
+            log.debug("reset enforce stop")
+            self.flag_enforce_stop = None    
+
+    # If we enforce a stop on level 5 through a breakpoint, a return False on level 7 should still continue, but not on level 3
+    # If we enforce a stop because we are using gdb manually, a return False on level 7 should stop because we don't want to loose control, but not on level 3
+    # Wait, I'm not convinced...
+    @property
+    def enforce_stop(self):
+        if self.flag_enforce_stop is None:
+            return False
+        else:
+            log.debug(f"priority is {self.priority}. Enforce is {self.flag_enforce_stop}")
+            return self.priority >= self.flag_enforce_stop
 
 @dataclass
 class Inner_Breakpoint:

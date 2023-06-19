@@ -3,6 +3,8 @@ GDB+ 6.3.4: Bruteforce util
 * multithread bruteforce
 
 * hotfix race condition in wait
+* force the order in which actions should be resolved
+* interrupt uses SIGINT instead of SIGSTOP to reduce confusion with gdb's bugs
 
 GDB+ 6.3.3: Expand ptrace emulation
 * hotfix transfer breakpoints while migrating
