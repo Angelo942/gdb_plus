@@ -69,6 +69,7 @@ class Debugger:
         # To know that I'm responsible for the interruption even if there is no callback
         self.stepped = False
         self.interrupted = False
+        self.detached = False
         # Maybe not needed (see set_split_on_fork)
         self.last_breakpoint_deleted = 0 # Keep track of the last temporary breakpoint deleted if we realy have to know if we hit something
 
@@ -244,6 +245,10 @@ class Debugger:
         """
         self.restore_arch()
 
+        # If we detach there will be a step to shutdown waitpid, but libdebug will have detached before we can execute the handler, so let's just skip it.
+        if self.detached:
+            log.debug(f"libdebug [{self.pid}] stopped waitpid")
+            return
 
         # Current inferior will change to the inferior who stopped last
         ip = self.instruction_pointer
@@ -273,6 +278,9 @@ class Debugger:
             if self.stepped or self.interrupted:
                 self.stepped = False
                 self.interrupted = False
+                if self.stop_signal not in [0x5, 0x2, 0x13]:
+                    log.warn(f"I wanted to step or interrupt, but stopped due to signal: {self._stop_reason}")
+                    self.ptrace_has_stopped.set()
             # This should now be handled by libdebug [08/06/23]
             #elif self.libdebug.stop_status == 0x57f:
             #    # Look into how to handle steps in libdebug [21/05/23]
@@ -322,18 +330,19 @@ class Debugger:
         # Maybe put a try except to restore the backup in case of accident [06/06/23]
         if gdb:
             assert self.gdb is None
-            address = self.instruction_pointer
-            backup = self.inject_sleep(address)
-            # For some reason detach while not running seems to kill the process [06/06/23]
-            # No event on exit to disconnect yet [01/06/23]
-            self.detach()
+            self.detach(block=True)
             log.debug("migrating to gdb")
             self.libdebug = None
+            self.detached  = False
             _, self.gdb = pwn.gdb.attach(self.pid, api=True)
             self.__setup_gdb()
+            # Catch SIGSTOP
+            address = self.instruction_pointer
+            with context.silent:
+                self.step(repeat=4)
+            if address != self.instruction_pointer:
+                log.warn("I made a mistake trying to catch the SIGSTOP after attaching with gdb")
             # I must get back before setting the breakpoints otherwise I may overwrite them
-            self.write(address, backup)
-            self.jump(address)
             for address in self.breakpoints:
                 for breakpoint in self.breakpoints[address]:
                     bp = self.__breakpoint_gdb(address)
@@ -343,19 +352,23 @@ class Debugger:
             # Disable hook stop
             assert self.libdebug is None
             assert self.gdb is not None
-            address = self.instruction_pointer
-            backup = self.inject_sleep(address)
             self.gdb.events.exited.disconnect(self.__exit_handler)
-            self.detach()
-            assert self.libdebug is None
+            self.detach(block=True)
             log.debug("migrating to libdebug")
             self.gdb = None
-            self.libdebug = lib_Debugger()
-            self.libdebug.attach(self.pid, options=False)
+            self.detached  = False
+            self.libdebug = lib_Debugger(multithread=False)
+            while not self.libdebug.attach(self.pid, options=False):
+                log.warn("error attaching with libdebug... Retrying...")
+                continue
             assert not self.libdebug.running
             self.__setup_libdebug()
-            self.write(address, backup)
-            self.jump(address)
+            # Catch SIGSTOP
+            address = self.instruction_pointer
+            with context.silent:
+                self.step()
+            if address != self.instruction_pointer:
+                log.warn("I made a mistake trying to catch the SIGSTOP after attaching with libdebug")
             # TODO Handle hb too 
             for address in self.breakpoints:
                 for breakpoint in self.breakpoints[address]:
@@ -363,6 +376,7 @@ class Debugger:
                     breakpoint.native_breakpoint = bp
         else:
             ...
+
     # Because pwntools isn't perfect
     def restore_arch(self):
         """
@@ -425,13 +439,19 @@ class Debugger:
             self.p = remote(host, port)
         return self
 
-    def detach(self, quit = True):
+    def detach(self, quit = True, block = False):
         if not self.debugging:
             log.warn_once(DEBUG_OFF)
             return
 
+        # Must be stopped
+        self.interrupt()
+        self.detached = True
+
         if self.gdb is not None:
             try:
+                if block:
+                    os.kill(self.pid, signal.SIGSTOP)
                 self.execute("detach")
             except:
                 log.debug("process already stopped")
@@ -442,6 +462,8 @@ class Debugger:
 
         elif self.libdebug is not None:
             self.libdebug.detach()
+            if not block:
+                os.kill(self.pid, signal.SIGCONT)
 
         else:
             ...
@@ -810,16 +832,17 @@ class Debugger:
     # problems when I haven't executed anything
     @property
     def running(self):
-        if self.gdb is not None:
-            try:
-                self.rax
-                return False
-            except:
-                return True
-        elif self.libdebug is not None:
-            return not self.libdebug._test_execution()
-        else:
-            ...
+        with context.silent:
+            if self.gdb is not None:
+                try:
+                    self.rax
+                    return False
+                except:
+                    return True
+            elif self.libdebug is not None:
+                return not self.libdebug._test_execution()
+            else:
+                ...
 
     @property
     def priority(self):
@@ -2796,7 +2819,7 @@ class Debugger:
                 else:
                     self.execute(f"set ${name.lower()} = {value % 2**context.bits}")
             elif self.libdebug is not None:
-                setattr(self.libdebug, name, value)
+                setattr(self.libdebug, name, value % 2**context.bits)
             else:
                 ...
         else:

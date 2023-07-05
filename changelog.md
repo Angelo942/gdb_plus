@@ -1,6 +1,7 @@
 GDB+ 6.3.4: Bruteforce util
 * single thread bruteforce
 * multithread bruteforce
+* support new version of libdebug
 
 * hotfix race condition in wait
 * force the order in which actions should be resolved
