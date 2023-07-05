@@ -2180,7 +2180,7 @@ class Debugger:
             self.rsp = value
 
         while self.stack_pointer != value:
-            if self.gdb is not None:
+            if self.gdb is None:
                 raise Exception("Error setting stack pointer!")
             log.debug("forcing last frame")
             self.execute("select-frame 0") # I don't know what frames are for, but if you need to push or pop you just want to work on the current frame i guess ? [04/03/23]
