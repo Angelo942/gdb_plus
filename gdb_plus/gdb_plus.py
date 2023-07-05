@@ -23,7 +23,7 @@ DEBUG = True #True # Flag for when I'm debugging the library
 
 def lock_decorator(func):
     def parse(self, *args, **kwargs):
-        with self.ptrace_lock.log(func.__name__):
+        with self.ptrace_lock:#log(func.__name__):
             result = func(self, *args, **kwargs)
             return result
     return parse
@@ -45,6 +45,9 @@ class Debugger:
         self.slaves = {} # I keep it to be sure I am tracing them 
         self.ptrace_breakpoints = []
         self.ptrace_backups = {}
+
+        self.gdb = None
+        self.libdebug = None
 
         # Ptrace_cont
         self.out_of_breakpoint = Event()
@@ -289,7 +292,8 @@ class Debugger:
             #        log.warn("I supose libdebug just stepped so let's pretend nothing happened")
             #    return
             else:
-                log.warn(f"why did I stop ??? [{hex(self.libdebug.stop_status)}]")
+                # Once to let know there may be a problem, but not spamming when it is part of the challenge.
+                log.warn_once(f"why did I stop ??? [{hex(self.libdebug.stop_status)}]")
                 self.ptrace_has_stopped.set()
             self.__set_stop("no breakpoint")
             return            
@@ -298,6 +302,7 @@ class Debugger:
         #context.Thread(target=self.__handle_breakpoints, args=(breakpoints,)).start()
 
     def __exit_handler(self, event):
+        # Should I kill all children ? []
         log.debug(f"setting stop because process [{event.inferior.pid}] exited")
         self.myStopped.pid = self.current_inferior.pid
         self.myStopped.set()
@@ -595,6 +600,9 @@ class Debugger:
             # Check 0x5 as step or breakpoint ?
             else:
                 return SIGNALS_from_num[self.stop_signal]
+
+        else:
+            ...
 
     @property
     def stop_signal(self) -> int:
@@ -941,6 +949,7 @@ class Debugger:
     def wait_slave(self, options=0x40000000):
         if options == 0x1: # WHNOHANG
             log.info("waitpid WNOHANG! Won't stop")
+            # Check first that the slave isn't running in case ptrace_has_stopped hasn't been cleared correctly ? Clear it in hidden_continue instead of PTRACE_CONT ? [27/06/23]
             stopped = self.ptrace_has_stopped.is_set()
         else: 
             self.ptrace_has_stopped.wait()
@@ -1044,7 +1053,7 @@ class Debugger:
         
             self.stepped = True
 
-            log.debug(f"[{self.pid}] stepping")
+            log.debug(f"[{self.pid}] stepping from {hex(self.instruction_pointer)}")
             if self.gdb is not None:
                 priority = self.execute_action("si", sender="step")
             elif self.libdebug is not None:
@@ -1282,6 +1291,8 @@ class Debugger:
         if not self.debugging:
             log.warn_once(DEBUG_OFF)
             return
+
+        self.restore_arch()
 
         #log.warn_once("jump is deprecated. Overwrite directly the instruction pointer instead")
         address = self.parse_address(location)
@@ -2439,7 +2450,7 @@ class Debugger:
 
     # I want a single function so that each process can be both master and slave [08/06/23]
     # I use real callback as long as we are breaking on the function it should work. The problem is if we start catch the syscall instead [08/06/23]
-    def emulate_ptrace(self, *, off=False, wait_fun="waitpid", manual=True):
+    def emulate_ptrace(self, *, off=False, wait_fun="waitpid", manual=False, silent=False):
         self.restore_arch()
 
         if off:
@@ -2451,7 +2462,7 @@ class Debugger:
             return
 
         if len(self.ptrace_breakpoints):
-            raise Exception(f"[self.pid] is already emulating ptrace")
+            raise Exception(f"[{self.pid}] is already emulating ptrace")
 
         log.debug(f"emulating ptrace for proc [{self.pid}]")
 
@@ -2763,7 +2774,7 @@ class Debugger:
         """
         print memory infos as in gdb
         """
-        log.debug(self.execute("context"))
+        print(self.execute("context"))
 
     #Works only with GEF. I use them to avoid writing down print(self.execute("heap bins")) every time
     def bins(self):
@@ -2783,11 +2794,8 @@ class Debugger:
     def __getattr__(self, name):
     #    log.debug(f"looking for attr {name}")
     #    #getattr is only called when an attribute is NOT found in the instance's dictionary
-    #    #I may wan't to use this instead of the 300 lines of registers, but have to check how to handle the setter
         if name in ["p", "elf"]: #If __getattr__ is called with p it means I haven't finished initializing the class so I shouldn't call self.registers in __setattr__
             return False
-        if name in ["gdb", "libdebug"]:
-            return None
         if name in self.special_registers + self.registers + self.minor_registers:
             if self.gdb is not None:
                 try:
@@ -2824,3 +2832,10 @@ class Debugger:
                 ...
         else:
             super().__setattr__(name, value)
+
+    def __repr__(self) -> str:
+        if self.running:
+            msg = "<running>"
+        else:
+            msg = f"<not running> {hex(self.instruction_pointer)} [{self._stop_reason}]"
+        return "Debugger [{:d}] {:s}".format(self.pid, msg)

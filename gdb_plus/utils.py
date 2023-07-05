@@ -167,12 +167,18 @@ class MyLock:
         self.counter = 0
         # prevent bugs with the counter ? [12/06/23]
         self.__lock = Lock()
+        # Block from ptrace (strict interrupt)
+        # I'm not sure if it makes sense. Maybe in the interrupt strict after having removed the lock there.
+        #self.can_run = Event()
+        #self.can_run.set()
+
 
     def log(self, function_name):
-        log.debug(f"[{self.owner.pid}] wrapping {function_name}")
+        #log.debug(f"[{self.owner.pid}] wrapping {function_name}")
         return self
 
     def __enter__(self):
+        #self.can_run.wait()
         with self.__lock:
             self.event.clear()
             self.counter += 1
@@ -182,6 +188,7 @@ class MyLock:
         with self.__lock:
             log.debug(f"[{self.owner.pid}] exiting lock with level {self.counter}")
             self.counter -= 1
+            # What about if we want to interrupt a continue until ? [21/06/23]
             if self.counter == 0:
                 self.event.set()
         
