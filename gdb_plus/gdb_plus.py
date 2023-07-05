@@ -1828,53 +1828,62 @@ class Debugger:
 
     # Names should be singular or plurals ? I wanted singular for read and plural for write but it should be consistent [02/06/23]
     # I assume little endianess [02/06/23]
-    def read_ints(self, address, n=1) -> [list, int]:
+    def read_ints(self, address: int, n: int) -> list:
         data = self.read(address, n*4)
-        res = [u32(data[i*4:(i+1)*4]) for i in range(n)]
-        return res[0] if n == 1 else res
+        return [u32(data[i*4:(i+1)*4]) for i in range(n)]
+    
+    def read_int(self, address: int) -> int:
+        return self.read_ints(address, 1)[0]
 
-    def read_longs(self, address, n=1) -> [list, int]:
+    def read_longs(self, address: int, n: int) -> list:
         data = self.read(address, n*8)
-        res = [u64(data[i*8:(i+1)*8]) for i in range(n)]
-        return res[0] if n == 1 else res
+        return [u64(data[i*8:(i+1)*8]) for i in range(n)]
+
+    def read_long(self, address: int) -> int:
+        return self.read_longs(address, 1)[0]
 
     # Should we return the null bytes ? No, consistent with write_strings [02/06/23]
-    def read_strings(self, address, n=1) -> [list, bytes]:
+    def read_strings(self, address: int, n: int) -> list:
         chunk = 0x100
         data = b""
         i = 0
-        while len(data.split(b"\x00")) <= n:
+        while data.count(b"\x00") <= n:
             data += self.read(address + chunk*i, chunk)
             i += 1
-        res = data.split(b"\x00")
-        return res[0] if n == 1 else res[:n]
+        return data.split(b"\x00")[:n]
+        
+    def read_string(self, address: int) -> bytes:
+        return self.read_strings(address, 1)[0]
 
-    def write_ints(self, address, values, *, heap = True) -> int:
-        if type(values) is int:
-            values = [values]
+    def write_ints(self, address: int, values: list, *, heap = True) -> int:
         data = b"".join([p32(x) for x in values])
         if address is None:
             address = self.alloc(len(data), heap=heap)
         self.write(address, data)
         return address
 
-    def write_longs(self, address, values, *, heap = True) -> int:
-        if type(values) is int:
-            values = [values]
+    def write_int(self, address: int, value: int, *, heap = True) -> int:
+        return self.write_ints(address, [value], heap = heap)
+
+    def write_longs(self, address: int, values: list, *, heap = True) -> int:
         data = b"".join([p64(x) for x in values])
         if address is None:
             address = self.alloc(len(data), heap=heap)
         self.write(address, data)
         return address
 
+    def write_long(self, address: int, value: int, *, heap = True) -> int:
+        return self.write_longs(address, [value], heap = heap)
+
     def write_strings(self, address, values, *, heap = True) -> int:
-        if type(values) is bytes:
-            values = [values]
-        data = b"\x00".join(values)
+        data = b"\x00".join(values) + b"\x00"
         if address is None:
             address = self.alloc(len(data), heap=heap)
         self.write(address, data)
         return address
+
+    def write_string(self, address: int, value: bytes, *, heap = True) -> int:
+        return self.write_strings(address, [value], heap = heap)
 
     def push(self, value: int):
         """
