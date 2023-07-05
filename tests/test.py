@@ -125,6 +125,17 @@ class Debugger_process(unittest.TestCase):
 			dbg.b(0x433494, callback=callback)
 			dbg.next()		
 			self.assertEqual(callback_finished[0], 0x401586)
+
+	def test_close_breakpoints(self):
+		print("\ntest_close_breakpoints: ", end="")
+		with context.local(arch="amd64", bits=64):
+			dbg = Debugger("./traps_withSymbols", aslr=False)
+			self.debuggers.append(dbg)
+			dbg.b(0x401802)
+			dbg.b(0x401801, callback=lambda x: False)
+			dbg.c()
+			self.assertEqual(dbg.rip, 0x401802)
+
 @unittest.skip
 class Debugger_actions(unittest.TestCase):
 	def setUp(self):
@@ -554,7 +565,7 @@ class Debugger_calls(unittest.TestCase):
 #		self.dbg.write(pointer, p64(0xdeadbeeffafa90be))
 #		self.dbg.close()
 
-#@unittest.skip
+@unittest.skip
 class Debugger_libdebug(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
