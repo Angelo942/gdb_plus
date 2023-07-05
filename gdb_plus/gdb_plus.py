@@ -849,7 +849,7 @@ class Debugger:
         with context.silent:
             if self.gdb is not None:
                 try:
-                    self.rax
+                    getattr(self, self.registers[0])
                     return False
                 except:
                     return True
