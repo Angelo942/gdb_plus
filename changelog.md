@@ -6,11 +6,14 @@ GDB+ 6.3.4: Bruteforce util
 * hotfix race condition in wait
 * force the order in which actions should be resolved
 * interrupt uses SIGINT instead of SIGSTOP to reduce confusion with gdb's bugs
+* hotfix missing variable in emulate_ptrace
+* remove race conditions when emulating PTRACE_INTERRUPT and PTRACE_ATTACH
+* hotfix crash in waitpid if slave didn't stop
+* hotfix emulate_ptrace detect stop when PTRACE_CONT can't run the slave due to a SIGILL 
 * hotfix setting stack_pointer
 
 GDB+ 6.3.3: Expand ptrace emulation
 * hotfix transfer breakpoints while migrating
-* reduce race conditions in for ptrace emulation
 * correct debug_from when event is set
 
 * single function for ptrace emulation that handles both tracee and tracer.
