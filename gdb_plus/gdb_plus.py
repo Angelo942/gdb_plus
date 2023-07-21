@@ -1036,6 +1036,8 @@ class Debugger:
         self.priority_wait(comment="interrupt", priority = priority)
         # For now it will be someone else problem the fact that we sent the SIGINT when we arived on a breakpoint or something similar. [21/07/23] Think about how to catch it without breaking the other threads that are waiting
         if self._stop_reason != "SIGINT":
+            # Catch del SIGINT
+            self.step_until_condition(lambda dbg: dbg._stop_reason == "SIGINT")
             return False
         return True
 
