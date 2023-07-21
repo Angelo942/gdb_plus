@@ -715,6 +715,55 @@ class Debugger_libdebug(unittest.TestCase):
 		self.assertEqual(flag, b"CSCG{4ND_4LL_0FF_TH1S_W0RK_JU5T_T0_G3T_TH1S_STUUUP1D_FL44G??!!1}")
 		self.assertFalse(self.dbg.priority)
 
+#@unittest.skip
+class Debugger_ARM(unittest.TestCase):
+	def setUp(self):
+		warnings.simplefilter("ignore", ResourceWarning)
+		warnings.simplefilter("ignore", ImportWarning)
+
+	def tearDown(self):
+		self.dbg.close()
+
+	@unittest.skip
+	def test_continue_until(self):
+		with context.local(arch="aarch64"):
+			self.dbg = Debugger("./run_prog_with_symbols")
+			print("\ntest_continue_until [ARM]: ", end="")
+			self.dbg.continue_until("main")
+			self.assertEqual(self.dbg.instruction_pointer, 0x23baf8)
+			self.assertFalse(self.dbg.priority)
+		
+	@unittest.skip
+	def test_syscall(self):
+		print("\ntest_syscall [ARM]: ", end="")
+		with context.local(arch="aarch64"):
+			self.dbg = Debugger("./run_prog_with_symbols")
+			path = "./data.txt"
+			with open(path, "wb") as file:
+				file.write(b"") 
+			self.dbg.continue_until("main") # You must wait for the libc to be loaded to call malloc
+			fd = self.dbg.syscall(constants.SYS_openat, [constants.AT_FDCWD, path, constants.O_WRONLY, 0x0])
+			data = b"ciao, come stai ?"
+			self.dbg.syscall(constants.SYS_write, [fd, data, len(data)])
+			self.dbg.syscall(constants.SYS_close, [fd])
+			with open(path, "rb") as file:
+				self.assertEqual(file.read(), data)
+			self.assertFalse(self.dbg.priority)
+
+	#@unittest.skip
+	def test_call(self):
+		print("\ntest_call: ", end="")
+		out = []
+		with context.local(arch="aarch64"):
+			self.dbg = Debugger("./test_arm_call") # You must wait for the libc to be loaded to call malloc
+			for i in [3, 6, 1]:
+				self.dbg.call("forkexample", [i])
+				assertEqual(dbg.p.recvline(), f"{i}\n".encode())
+			dbg.c()
+			assertEqual(dbg.p.recvline(), b"all done!\n")
+			self.assertFalse(self.dbg.priority)
+
+
 if __name__ == "__main__":
 	with context.quiet:
 		unittest.main()

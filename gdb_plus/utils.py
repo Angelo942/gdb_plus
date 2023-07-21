@@ -32,6 +32,7 @@ class user_regs_struct:
 
 
 # Only works to read and set the arguments of the CURRENT function
+# Handle aarch64 [05/06/23]
 class Arguments:
     def __init__(self, dbg):
         self.dbg = dbg
@@ -235,3 +236,11 @@ SIGNALS = {
 
 SIGNALS_from_num = ["I DON'T KNOW", "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP", "SIGABRT", "SIGBUS", "SIGFPE", "SIGKILL", "SIGUSR1", "SIGSEGV", "SIGUSR2", "SIGPIPE", "SIGALRM", "SIGTERM", "SIGSTKFLT", "SIGCHLD",   "SIGCONT", "SIGSTOP", "SIGTSTP", "SIGTTIN", "SIGTTOU", "SIGURG", "SIGXCPU", "SIGXFSZ", "SIGVTALRM", "SIGPROF", "SIGWINCH", "SIGPOLL", "SIGPWR", "SIGSYS"]
 
+## SHELLCODES
+# test: nop; jmp test / nop; b 0x0
+shellcode_sleep = {"amd64": b"\x90\xeb\xfe", "i386": b"\x90\xeb\xfe", "aarch64": b'\x1f \x03\xd5\x00\x00\x00\x14'}
+# syscall / int 0x80 / svc #0
+shellcode_syscall = {"amd64": b"\x0f\x05", "i386": b"\xcd\x80", "aarch64": b'\x01\x00\x00\xd4'}
+# First register is where to save the syscall num
+syscall_calling_convention = {"amd64": ["rax", "rdi", "rsi", "rdx", "rcx", "r8", "r9"], "i386": ["rax", "ebx", "ecx", "edx", "esi", "edi", "ebp"], "aarch64": ["x8", "x0", "x1", "x2", "x3", "x4", "x5"]}
+function_calling_convention = {"amd64": ["rdi", "rsi", "rdx", "rcx", "r8", "r9"], "i386": [], "aarch64": [f"x{i}" for i in range(0, 8)]}

@@ -3,7 +3,7 @@ import pwn
 import os
 from time import sleep
 from functools import partial
-from capstone import Cs, CS_ARCH_X86
+from capstone import Cs, CS_ARCH_X86, CS_ARCH_ARM64, CS_MODE_32, CS_MODE_64, CS_MODE_ARM
 from threading import Event
 from queue import Queue
 from gdb_plus.utils import *
@@ -132,6 +132,8 @@ class Debugger:
             # WARNING don't use 'continue' in your gdbscript when using debug_from ! [17/04/23]
             # I don't like that this is blocking, so you can't interact while waiting... Can we do it differently ? [17/04/23]
             if debug_from is not None:
+                # I can't attach again to the process
+                assert context.arch != "aarch64", "debug_from isn't supported in qemu"
                 address_debug_from = self.parse_address(debug_from)
                 backup = self.inject_sleep(address_debug_from)
                 while True:  
@@ -320,6 +322,7 @@ class Debugger:
         """
         self.gdb.events.stop.connect(lambda event: context.Thread(target=self.__stop_handler_gdb, name=f"[{self.pid}] stop_handler_gdb").start())
         self.gdb.events.exited.connect(self.__exit_handler)
+        #self.execute("set write on")
 
         # Manually set by split_child
         self.split = Queue()
@@ -337,6 +340,8 @@ class Debugger:
         if not self.debugging:
             log.warn_once(DEBUG_OFF)
             return
+
+        assert context.arch != "aarch64", "migrate isn't supported in qemu"
 
         # Maybe put a try except to restore the backup in case of accident [06/06/23]
         if gdb:
@@ -1190,7 +1195,7 @@ class Debugger:
             self.step()
             if callback is not None:
                 callback(self)
-            if self.next_inst.mnemonic == "call":
+            if self.next_inst.is_call:
                 return i
         else:
             log.warn_once(f"I made {limit} steps and haven't reached the end of the function...")
@@ -1199,16 +1204,7 @@ class Debugger:
     def __next(self, repeat, done):
         for _ in range(repeat):
             next_inst = self.next_inst
-            if next_inst.mnemonic == "call":
-                self.continue_until(self.instruction_pointer+next_inst.size)
-            else:
-                self.step()
-        done.set()
-
-    def __next(self, repeat, done):
-        for _ in range(repeat):
-            next_inst = self.next_inst
-            if next_inst.mnemonic == "call":
+            if next_inst.is_call:
                 self.continue_until(self.instruction_pointer+next_inst.size)
             else:
                 self.step()
@@ -1248,7 +1244,7 @@ class Debugger:
             self.next()
             if callback is not None:
                 callback(self)
-            if self.next_inst.mnemonic == "call":
+            if self.next_inst.is_call:
                 return i
         else:
             log.warn_once(f"I made {limit} steps and haven't reached the end of the function...")
@@ -1393,11 +1389,12 @@ class Debugger:
 
     def __continue_call(self, backup, to_free, heap, end_pointer, return_value, alignement):
         #if end_pointer == self.instruction_pointer: # We called the function while on the first instruction, let's just step and continue normaly [21/05/23] Wait, why bother ?
-        self.continue_until(end_pointer)
-        while unpack(self.read(self.stack_pointer - context.bytes, context.bytes)) != end_pointer:
-            assert self.instruction_pointer == end_pointer, "Something strange happened in a call"
-            log.warn_once("Are you sure you called the function from outside ?")
-            self.continue_until(end_pointer)
+        # But this only works for intel processors. Use loop=True instead and you won't care if you started on the first instruction
+        self.continue_until(end_pointer, loop=True)
+        #while unpack(self.read(self.stack_pointer - context.bytes, context.bytes)) != end_pointer:
+        #    assert self.instruction_pointer == end_pointer, "Something strange happened in a call"
+        #    log.warn_once("Are you sure you called the function from outside ?")
+        #    self.continue_until(end_pointer)
 
         if DEBUG:
             log.debug("call finished")
@@ -1447,13 +1444,11 @@ class Debugger:
         #save registers 
         backup = self.backup()    
         
-        if context.bits == 64:
-            calling_convention = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
-            for register in calling_convention:
-                if len(args) == 0:
-                    break
-                log.debug("%s setted to %s", register, args[0])
-                setattr(self, register, args.pop(0))
+        for register in function_calling_convention[context.arch]:
+            if len(args) == 0:
+                break
+            log.debug("%s setted to %s", register, args[0])
+            setattr(self, register, args.pop(0))
             
         #Should I offset the stack pointer to preserve the stack frame ? No, right ?
         for arg in args:
@@ -1465,9 +1460,12 @@ class Debugger:
         alignement = 0
         while self.stack_pointer % 0x10 != 0x0:
             self.push(0)
-        self.push(return_address)
+        if context.arch in ["i386", "amd64"]:
+            self.push(return_address)
+        else:
+            self.x30 = return_address
         self.jump(address)
-
+        
         return_value = Queue()
         context.Thread(target=self.__continue_call, args=(backup, to_free, heap, return_address, return_value, alignement), name=f"[{self.pid}] call").start()
         if wait:
@@ -1528,20 +1526,23 @@ class Debugger:
     def syscall(self, code: int, args: list, *, heap = True):
         log.debug(f"syscall {code}: {args}")
         
-        if context.bits == 64:
-            calling_convention = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
-            shellcode = b"\x0f\x05"
-        else:
-            calling_convention = ["ebx", "ecx", "edx", "esi", "edi", "ebp"]
-            shellcode = b"\xcd\x80"
-        
+        args = [code] + args
+
+        shellcode = shellcode_syscall[context.arch]
+        calling_convention = syscall_calling_convention[context.arch]
+
         assert len(args) <= len(calling_convention), "too many arguments for syscall"
 
         backup_registers = self.backup()
         return_address = self.instruction_pointer
-        backup_memory = self.read(return_address, len(shellcode))
-        self.write(return_address, shellcode)
-        self.return_value = code
+        # GDB has a bug with QEMU where I can't patch the code
+        if context.arch == "aarch64":
+            # Doesn't work because I can't get the base of the binary from qemu
+            address = self.elf.data.find(shellcode) 
+            self.jump(address)
+        else:
+            backup_memory = self.read(return_address, len(shellcode))
+            self.write(return_address, shellcode)
 
         args, to_free = self.__convert_args(args, heap)
 
@@ -1549,10 +1550,12 @@ class Debugger:
             log.debug("%s setted to %s", register, arg)
             setattr(self, register, arg)
     
-        self.step(force=True)
+        self.step()
         res = self.return_value
-        self.write(return_address, backup_memory)
         self.restore_backup(backup_registers)
+        if context.arch != "aarch64":
+            self.write(return_address, backup_memory)
+        self.jump(return_address)
         for pointer, n in to_free[::-1]: #I do it backward to have a coherent behaviour with heap=False, but I still don't really know if I should implement a free in that case
             self.dealloc(pointer, len=n, heap=heap)
         
@@ -1833,6 +1836,10 @@ class Debugger:
         if pid is None:
             pid = self.pid
 
+        if self.gdb is not None and context.arch:
+            return self.__read_gdb(address, size, inferior=inferior)
+
+        # Can not read inside qemu
         with open(f"/proc/{pid}/mem", "r+b") as fd:
             fd.seek(address)
             return fd.read(size)
@@ -1841,14 +1848,12 @@ class Debugger:
 
         if inferior == None:
             inferior = self.current_inferior
-        #
-        #inferior = self.inferiors[inferior.num]
-        #log.debug(f"writing {byte_array} in {inferior} at address {hex(address)}")
-        inferior.write_memory(address, byte_array)
-        #fd = os.open(f"/proc/{inferior.pid}/mem", os.O_RDWR)
-        #os.lseek(fd, address, os.SEEK_SET)
-        #os.write(fd, byte_array)
-        #os.close(fd)
+        
+        try:
+            inferior.write_memory(address, byte_array)
+        except Exception as e: #gdb.MemoryError
+            log.warn(e)
+
 
     # How to handle multiple processes ?
     def __write_libdebug(self, address: int, byte_array: bytes, *, pid = None):
@@ -2078,6 +2083,7 @@ class Debugger:
         return self._base_libc
 
     # get base address of binary
+    # Wrong for qemu
     def get_base_elf(self):
         maps = self.libs()
         if len(maps) != 0:
@@ -2146,22 +2152,32 @@ class Debugger:
      
     @property
     def special_registers(self):
-        return ["eflags", "cs", "ss", "ds", "es", "fs", "gs"]
+        if context.arch in ["i386", "amd64"]:
+            return ["eflags", "cs", "ss", "ds", "es", "fs", "gs"]
+        elif context.arch == "aarch64":
+            return ["cpsr", "fpsr", "fpcr", "vg"]
+        else:
+            raise Exception(f"what arch is {context.arch}")
 
     # WARNING reset expects the last two registers to be sp and ip. backup expects the last register to be ip
     @property
     def registers(self):
-        if context.bits == 32:
+        if context.arch == "aarch64":
+            return [f"x{i}" for i in range(31)] + ["sp", "pc"]
+        elif context.arch == "i386":
             return ["eax", "ebx", "ecx", "edx", "edi", "esi", "ebp", "esp", "eip"]
-        elif context.bits == 64:
+        elif context.arch == "amd64":
             return ["rax", "rbx", "rcx", "rdx", "rdi", "rsi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "rbp", "rsp", "rip"]
         else:
-            log.critical("Bits not known")
+            raise Exception(f"what arch is {context.arch}")
 
     # Making ax accessible will probably be faster that having to write 
     @property
     def minor_registers(self):
-        _minor_registers = ["ax", "al", "ah",
+        if context.arch == "aarch64":
+            return [f"w{x}" for x in range(31)]
+        elif context.arch == "i386":    
+            return ["ax", "al", "ah",
         "bx", " bh", "bl",
         "cx", " ch", "cl",
         "dx", " dh", "dl",
@@ -2169,8 +2185,15 @@ class Debugger:
         "di", "dil",
         "sp", "spl",
         "bp", "bpl"]
-        if context.bits == 64:
-            _minor_registers += ["eax", "ebx", "ecx", "edx", "esi", "edi",
+        elif context.arch == "amd64":
+            return ["ax", "al", "ah",
+        "bx", " bh", "bl",
+        "cx", " ch", "cl",
+        "dx", " dh", "dl",
+        "si", "sil",
+        "di", "dil",
+        "sp", "spl",
+        "bp", "bpl"] + ["eax", "ebx", "ecx", "edx", "esi", "edi",
             "r8d", "r8w", "r8l",
             "r9d", "r9w", "r9l",
             "r10d", "r10w", "r10l",
@@ -2179,76 +2202,114 @@ class Debugger:
             "r13d", "r13w", "r13l",
             "r14d", "r14w", "r14l",
             "r15d", "r15w", "r15l"]
-        return _minor_registers
+        else:
+            raise Exception(f"what arch is {context.arch}")
 
     @property
     def next_inst(self):
         inst = next(self.disassemble(self.instruction_pointer, 16)) #15 bytes is the maximum size for an instruction in x64
         inst.toString = partial(lambda self: f"{self.mnemonic} {self.op_str}".strip(), inst)
+        inst.is_call = inst.mnemonic in ["call", "bl"]
         return inst
 
     # May be usefull for Inner_Debugger
     def disassemble(self, address, size):
         if self._capstone is None:
-            self._capstone = Cs(CS_ARCH_X86, context.bytes)
+            if context.arch == "amd64":
+                self._capstone = Cs(CS_ARCH_X86, CS_MODE_64)
+            elif context.arch == "i386":
+                self._capstone = Cs(CS_ARCH_X86, CS_MODE_32)
+            elif context.arch == "aarch64":
+                self._capstone = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+            else:
+                raise Exception(f"what arch is {context.arch}")
+
         return self._capstone.disasm(self.read(address, size), address)
 
     ########################## Generic references ##########################
 
     @property
     def return_value(self):
-        if context.bits == 32:
-            return self.eax
-        else:
+        if context.arch == "amd64":
             return self.rax
+        elif context.arch == "i386":
+            return self.eax
+        elif context.arch == "aarch64":
+            return self.x0 # Not always true
+        else:
+            ...
 
     @return_value.setter
-    def return_value(self, value):
-        if context.bits == 32:
-            self.eax = value
+    def stack_pointer(self):
+        if context.arch == "amd64":
+            return self.rsp
+        elif context.arch == "i386":
+            return self.esp
+        elif context.arch == "aarch64":
+            return self.sp
         else:
-            self.rax = value
+            ...
 
     @property
     def stack_pointer(self):
-        if context.bits == 32:
-            return self.esp
-        else:
+        if context.arch == "amd64":
             return self.rsp
+        elif context.arch == "i386":
+            return self.esp
+        elif context.arch == "aarch64":
+            return self.sp
+        else:
+            ...
 
     # issue: setting $sp is not allowed when other stack frames are selected... https://sourceware.org/gdb/onlinedocs/gdb/Registers.html [04/03/23]
     @stack_pointer.setter
     def stack_pointer(self, value):
         # May move this line to push and pop if someone can argue a good reason to.
-        if context.bits == 32:
-            self.esp = value
-        else:
+        if context.arch == "amd64":
             self.rsp = value
-
+        elif context.arch == "i386":
+            self.esp = value
+        elif context.arch == "aarch64":
+            self.sp = value
+        else:
+            ...
         while self.stack_pointer != value:
             if self.gdb is None:
                 raise Exception("Error setting stack pointer!")
+
             log.debug("forcing last frame")
             self.execute("select-frame 0") # I don't know what frames are for, but if you need to push or pop you just want to work on the current frame i guess ? [04/03/23]
-            
-            if context.bits == 32:
-                self.esp = value
-            else:
+
+            if context.arch == "amd64":
                 self.rsp = value
+            elif context.arch == "i386":
+                self.esp = value
+            elif context.arch == "aarch64":
+                self.sp = value
+            else:
+                ...
 
     @property
     def base_pointer(self):
-        if context.bits == 32:
-            return self.ebp
-        else:
+        if context.arch == "amd64":
             return self.rbp
+        elif context.arch == "i386":
+            return self.ebp
+        elif context.arch == "aarch64":
+            ...
+        else:
+            ...
     
     @base_pointer.setter
     def base_pointer(self, value):
-        if context.bits == 32:
-            self.ebp = value
-        else:
+        if context.arch == "amd64":
             self.rbp = value
+        elif context.arch == "i386":
+            self.ebp = value
+        elif context.arch == "aarch64":
+            ...
+        else:
+            ...
 
     # Prevent null pointers
     @property
@@ -2256,41 +2317,48 @@ class Debugger:
         ans = 0
         while ans == 0:
             # what about self.gdb.newest_frame().pc() ? [28/04/23]
-            if context.bits == 32:
-                ans = self.eip
-            else:
+            if context.arch == "amd64":
                 ans = self.rip
-            # log
+            elif context.arch == "i386":
+                ans = self.eip
+            elif context.arch == "aarch64":
+                ans = self.pc
+            else:
+                ...
             if ans == 0:
-                log.debug("null pointer in ip ! retrying...")
+                log.warn("null pointer in ip ! retrying...")
         return ans
 
     @instruction_pointer.setter
     def instruction_pointer(self, value):
-        if context.bits == 32:
-            self.eip = value
-        else:
+        if context.arch == "amd64":
             self.rip = value
+        elif context.arch == "i386":
+            self.eip = value
+        elif context.arch == "aarch64":
+            self.pc = value
+        else:
+            ...
 
     def _find_rip(self):
         self.restore_arch()
-        if self.base_pointer:
-            if self.next_inst.toString() in ["endbr64", "push rbp", "push ebp", "ret"]:
-                return_pointer = self.read(self.stack_pointer, context.bytes)
-            elif self.next_inst.toString() in ["mov rbp, rsp", "mov ebp, esp"]:
-                return_pointer = self.read(self.stack_pointer + context.bytes, context.bytes) # Remove the base pointer # No need to place it back in rbp
-            else:
-                return_pointer = self.read(self.base_pointer + context.bytes, context.bytes)
-
-        else:
-            # At least, this is the case with fork and works better than gdb.
+        # experimental, but should be better that the native one for libdebug        
+        if self.next_inst.toString() in ["endbr64", "push rbp", "push ebp", "ret"]:
             return_pointer = self.read(self.stack_pointer, context.bytes)
+        elif self.next_inst.toString() in ["mov rbp, rsp", "mov ebp, esp"]:
+            return_pointer = self.read(self.stack_pointer + context.bytes, context.bytes) # Remove the base pointer # No need to place it back in rbp
+        else:
+            return_pointer = self.read(self.base_pointer + context.bytes, context.bytes)
 
-        return unpack(return_pointer)
+        return unpack(return_pointer)       
 
     @property
     def __saved_ip(self):
-        if self.gdb is not None:
+        if context.arch == "aarch64":
+            return self.x30
+
+        # Doesn't work with qemu [05/07/23]
+        elif self.gdb is not None:
             return self.gdb.newest_frame().older().pc()
 
         elif self.libdebug is not None:
@@ -2809,7 +2877,7 @@ class Debugger:
         #test:
         #jmp test
         # I put a nop to let step(force=True) work in case [29/04/23]
-        shellcode = b"\x90\xeb\xfe"
+        shellcode = shellcode_sleep[context.arch]
         backup = self.read(address, len(shellcode), inferior=inferior)
         self.write(address, shellcode, inferior=inferior)
         return backup

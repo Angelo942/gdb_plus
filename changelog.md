@@ -1,3 +1,10 @@
+GDB+ 6.4.0: **ARM**
+* Can "partially" debug aarch64 programs running under qemu. With all the limitations that come from the emulator
+	- For now qemu has problems identifying the pid of the process and when it forks, so you can only debug single-thread, single-process applications for now.
+	- you can not reattach to a process, so no `debug_from`
+	- You can not find the base of your binary or overwrite the code so no patches nor syscalls
+
+
 GDB+ 6.3.4: Bruteforce util
 * single thread bruteforce
 * multithread bruteforce
