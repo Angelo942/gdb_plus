@@ -2242,15 +2242,16 @@ class Debugger:
             ...
 
     @return_value.setter
-    def stack_pointer(self):
+    def return_value(self, value):
         if context.arch == "amd64":
-            return self.rsp
+            self.rax = value
         elif context.arch == "i386":
-            return self.esp
+            self.eax = value
         elif context.arch == "aarch64":
-            return self.sp
+            self.x0 = value # Not always true
         else:
             ...
+
 
     @property
     def stack_pointer(self):
