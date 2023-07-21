@@ -782,7 +782,7 @@ class Debugger:
             
     # I'm worried about how to handle the lock in this case [12/06/23] I want to block until I send the continue
     # I would like to keep the same priority for step and continue [18/06/23]
-    def continue_until(self, location, /, *, wait=True, force=False, loop = False):
+    def continue_until(self, location, /, *, wait=True, force=False, loop = False, hw=False):
         """
         Continue until a specific address
         can be blocking or non blocking thanks to wait
@@ -805,7 +805,7 @@ class Debugger:
                 log.warn_once("Be careful that the default behaviour changed. Use loop=True if you want to continue anyway")
                 return
                 
-            self.b(address, temporary=True, user_defined=False)
+            self.b(address, temporary=True, user_defined=False, hw=hw)
             if DEBUG:
                 log.debug(f"[{self.pid}] continuing until {self.reverse_lookup(address)}")
 
@@ -1601,14 +1601,17 @@ class Debugger:
         else:
             ...
 
-    def __breakpoint_gdb(self, address, legacy_callback=None):
+    def __breakpoint_gdb(self, address, legacy_callback=None, hw=False):
         # Still needed for hidden breakpoint with return False when you want to also use gdb manually [17/04/23]
         if legacy_callback is not None:
             log.warn_once("if your callbacks crash you may not notice it and you have to scroll a bit to find the error messages hidden in the gdb terminal")
             # I don't know yet how to handle the conn if I don't go through self.gdb.Breakpoint so I create the class here :(
             class MyBreakpoint(self.gdb.Breakpoint):
-                def __init__(_self, address):
-                    super().__init__(address)
+                def __init__(_self, address, hw):
+                    if hw:
+                        super().__init__(address, type=gdb.BP_HARDWARE_BREAKPOINT)
+                    else:
+                        super().__init__(address)
                     _self.callback = legacy_callback
                 # WARNING IF A TEMPORARY BREAKPOINT DOESN'T STOP IT WON'T COUNT AS HIT AND STAY ACTIVE. May cause problems with the callback if you pass multiple times [26/02/23]
                 def stop(_self, *args):
@@ -1616,7 +1619,7 @@ class Debugger:
                     if _break is None:
                         return True
                     return _break
-            res = MyBreakpoint(f"*{hex(address)}")
+            res = MyBreakpoint(f"*{hex(address)}", hw)
 
         else:
             res = self.gdb.Breakpoint(f"*{hex(address)}")
@@ -1665,7 +1668,7 @@ class Debugger:
         log.debug(f"[{self.pid}] putting breakpoint in {self.reverse_lookup(address)}")
         
         if self.gdb is not None:
-            breakpoint = Breakpoint(self.__breakpoint_gdb(address, legacy_callback).server_breakpoint, address, callback, temporary, user_defined)
+            breakpoint = Breakpoint(self.__breakpoint_gdb(address, legacy_callback, hw=hw).server_breakpoint, address, callback, temporary, user_defined)
         elif self.libdebug is not None:
             if legacy_callback is not None:
                 callback = legacy_callback
