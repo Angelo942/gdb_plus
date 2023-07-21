@@ -1025,6 +1025,7 @@ class Debugger:
         self.interrupted = True
         log.debug(f"interrupting [pid:{self.pid}]")
         if self.gdb is not None:
+            # Should be the same as self.pid, no ? I update it every time we do change_inferior [21/07/23]
             pid = self.current_inferior.pid
             # SIGSTOP is too common in gdb
         elif self.libdebug is not None:
@@ -1033,11 +1034,9 @@ class Debugger:
             ...
         os.kill(pid, signal.SIGINT)
         self.priority_wait(comment="interrupt", priority = priority)
-        address = self.instruction_pointer
-        with context.silent:
-            self.step()
-        if address != self.instruction_pointer:
-            log.warn("I made a mistake stepping trying to catch SIGINT. Hope it won't bother you...")
+        # For now it will be someone else problem the fact that we sent the SIGINT when we arived on a breakpoint or something similar. [21/07/23] Think about how to catch it without breaking the other threads that are waiting
+        if self._stop_reason != "SIGINT":
+            return False
         return True
 
     manual = interrupt
@@ -2564,8 +2563,12 @@ class Debugger:
                     log.debug(f"waiting for -1...")
                 
                 log.info(f'waitpid for process [{pid}]')
-                #tracee = self.ptrace_group[pid]
-                # can only be a slave, write ?
+                if pid not in self.ptrace_group:
+                    raise Exception(f"We reached waitpid but we didn't have time to split the new process! Please stop the process earlier")
+                if pid not in self.slaves:
+                    log.warn("The process hasn't called TRACEME yet. I will wait... (just make sure you didn't setup ptrace_emulation too late)")
+                while pid not in self.slaves:
+                    sleep(0.2)
                 tracee = dbg.slaves[pid]
                 stopped = tracee.wait_slave(options)
 

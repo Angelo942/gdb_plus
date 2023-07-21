@@ -4,6 +4,8 @@ GDB+ 6.4.0: **ARM**
 	- you can not reattach to a process, so no `debug_from`
 	- You can not find the base of your binary or overwrite the code so no patches nor syscalls
 
+* hotfix split_on_fork when hitting breakpoint
+
 
 GDB+ 6.3.4: Bruteforce util
 * single thread bruteforce
