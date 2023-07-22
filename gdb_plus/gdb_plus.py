@@ -214,6 +214,7 @@ class Debugger:
 
         log.debug(f"[{self.current_inferior.pid}] stopped at address: {self.reverse_lookup(ip)} for {self._stop_reason}")
         
+        # Warn that if a parent has to listen for a signal you must tell your handler to stop the execution [22/07/23]
         if self._stop_reason in SIGNALS and SIGNALS[self._stop_reason] in self.handled_signals:
             should_stop = self.handled_signals[SIGNALS[self._stop_reason]](self)
             if should_stop == False:
@@ -669,17 +670,17 @@ class Debugger:
     # Simplify continue after callback so that it can still work after migrating inside the callback
     @lock_decorator
     def __hidden_continue(self, force=False):
-        address = self.instruction_pointer
-        if force:
-            self.step(force=True)
-            if address == self.instruction_pointer:
-                log.debug(f"[{self.pid}] I think I stopped my step for a good reason so I won't continue")
-                return
-
+        # The step is not needed if we set handle SIGSTOP nopass
+        #address = self.instruction_pointer
+        #if force:
+        #    self.step(force=True)
+        #    if address == self.instruction_pointer:
+        #        log.debug(f"[{self.pid}] I think I stopped my step for a good reason so I won't continue")
+        #        return
         log.debug(f"[{self.pid}] hidden continue")
         sleep(0.02)
         if self.gdb is not None:
-            self.gdb.execute("c")
+            self.gdb.execute("continue")
         elif self.libdebug is not None:
             self.libdebug.cont(blocking=False)
         else:
@@ -765,7 +766,7 @@ class Debugger:
         self.cont(wait=True, force=force)
         # Should we take into consideration the inferior too ? [29/04/23]
         while self.instruction_pointer != address:
-            log.info(f"[{self.pid}] stopped at {hex(self.instruction_pointer)} for '{self._stop_reason}' instead of {hex(address)}")
+            log.info(f"[{self.pid}] stopped at {self.reverse_lookup (self.instruction_pointer)} for '{self._stop_reason}' instead of {self.reverse_lookup(address)}")
             log.warn_once("I assume this happened because you are using gdb manually. Finish what you are doing and let the process run. I will handle the rest")
             wont_use_this_priority = self.execute_action("", sender="continue just to reset the wait")
             # I don't trust the previous priority, while the first one should be safe
@@ -775,9 +776,11 @@ class Debugger:
 
     def __continue_until_libdebug(self, address, done, force):
         self.cont(wait=True, force=force)
-        if self.instruction_pointer != address:
+        while self.instruction_pointer != address:
             log.critical("error in continue until")
-            raise Exception(f"[{self.pid}] stopped at {hex(self.instruction_pointer)} with status {hex(self.libdebug.stop_status)} instead of {hex(address)}")
+            log.warn(f"[{self.pid}] stopped at {self.reverse_lookup(self.instruction_pointer)} with status {hex(self.libdebug.stop_status)} instead of {self.reverse_lookup(address)}")
+            # Not tested yet [22/07/23]. I just want to avoid having the debugger crash while emulating ptrace because the process is sent a SIGSTOP
+            sleep(1)
         done.set()
             
     # I'm worried about how to handle the lock in this case [12/06/23] I want to block until I send the continue
@@ -957,6 +960,7 @@ class Debugger:
         self.ptace_can_continue.wait()
         self.ptace_can_continue.clear()
 
+    # TODO make sure the slave didn't stop for a user breakpoint !
     def wait_slave(self, options=0x40000000):
         if options == 0x1: # WHNOHANG
             log.info("waitpid WNOHANG! Won't stop")
@@ -966,6 +970,7 @@ class Debugger:
             self.ptrace_has_stopped.wait()
             stopped = True
 
+        # I can't clear it only here ! A wrong SIGSTOP in the step before a continue would set it again [22/07/23] 
         if stopped:
             self.ptrace_has_stopped.clear()
 
@@ -2537,7 +2542,7 @@ class Debugger:
 
     # I want a single function so that each process can be both master and slave [08/06/23]
     # I use real callback as long as we are breaking on the function it should work. The problem is if we start catch the syscall instead [08/06/23]
-    def emulate_ptrace(self, *, off=False, wait_fun="waitpid", manual=False, silent=False):
+    def emulate_ptrace(self, *, off=False, wait_fun="waitpid", manual=False, silent=False, signals = ["SIGSTOP"]):
         self.restore_arch()
 
         if off:
@@ -2549,9 +2554,16 @@ class Debugger:
             return
 
         if len(self.ptrace_breakpoints):
-            raise Exception(f"[{self.pid}] is already emulating ptrace")
+            log.warn(f"[{self.pid}] is already emulating ptrace")
+            return
 
         log.debug(f"emulating ptrace for proc [{self.pid}]")
+
+        if self.gdb is not None:
+            # When emulating ptrace SIGSTOP is suposed to be used between the processes and catched by waitpid, so I don't pass it to the process to avoid problems [22/07/23]
+            # https://stackoverflow.com/questions/10415739/gdb-gives-me-infinite-program-received-signal-sigtstp-when-i-try-to-resume
+            for signal in signals:
+                self.execute(f"handle {signal} stop nopass")
 
         shellcode = RET
         address = self.parse_address(wait_fun)
