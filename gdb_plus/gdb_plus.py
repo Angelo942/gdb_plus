@@ -1611,7 +1611,7 @@ class Debugger:
             class MyBreakpoint(self.gdb.Breakpoint):
                 def __init__(_self, address, hw):
                     if hw:
-                        super().__init__(address, type=gdb.BP_HARDWARE_BREAKPOINT)
+                        super().__init__(address, type=self.gdb.BP_HARDWARE_BREAKPOINT)
                     else:
                         super().__init__(address)
                     _self.callback = legacy_callback
@@ -1624,8 +1624,10 @@ class Debugger:
             res = MyBreakpoint(f"*{hex(address)}", hw)
 
         else:
-            res = self.gdb.Breakpoint(f"*{hex(address)}")
-        
+            if hw:
+                res = self.gdb.Breakpoint(f"*{hex(address)}", type=self.gdb.BP_HARDWARE_BREAKPOINT)
+            else:
+                res = self.gdb.Breakpoint(f"*{hex(address)}")
         return res
 
     def __breakpoint_libdebug(self, address, hw=False):
@@ -1667,7 +1669,7 @@ class Debugger:
 
         address = self.parse_address(location)
 
-        log.debug(f"[{self.pid}] putting breakpoint in {self.reverse_lookup(address)}")
+        log.debug(f"[{self.pid}] putting{' hardware' if hw else ''} breakpoint in {self.reverse_lookup(address)}")
         
         if self.gdb is not None:
             breakpoint = Breakpoint(self.__breakpoint_gdb(address, legacy_callback, hw=hw).server_breakpoint, address, callback, temporary, user_defined)
