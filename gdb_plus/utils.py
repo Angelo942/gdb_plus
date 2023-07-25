@@ -32,46 +32,59 @@ class user_regs_struct:
 
 
 # Only works to read and set the arguments of the CURRENT function
-# Handle aarch64 [05/06/23]
 class Arguments:
     def __init__(self, dbg):
+        # Do we want to cache the registers and part of the stack ?
+        # It would require to delete it when we execute an action
         self.dbg = dbg
 
     def __getitem__(self, index: int):
         assert type(index) is int, "I can't handle slices to access multiple arguments"
         self.dbg.restore_arch()
-        if context.bits == 64:
-            if index < 6:
-                register = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"][index]
-                log.debug(f"argument {index} is in register {register}")
-                return getattr(self.dbg, register)
-            else:
-                index -= 6
-        if self.dbg.next_inst.toString() in ["endbr64", "push rbp", "push ebp"]:
-            pointer = self.dbg.stack_pointer + (index + 1) * context.bytes
-        elif self.dbg.next_inst.toString() in ["mov rbp, rsp", "mov ebp, esp"]:
-            pointer = self.dbg.stack_pointer + (index + 2) * context.bytes
+        calling_convention = function_calling_convention[context.arch]
+        if index < len(calling_convention):
+            register = calling_convention[index]
+            log.debug(f"argument {index} is in register {register}")
+            return getattr(self.dbg, register)
         else:
-            pointer = self.dbg.base_pointer + (index + 2) * context.bytes
-        return self.dbg.read(pointer, context.bytes)
+            index -= calling_convention
+        # It would be better to force the user to save the arguments at the entry point and read them later instead... [25/07/23]
+        if context.arch in ["amd64", "i386"]:
+            if self.dbg.next_inst.toString() in ["endbr64", "push rbp", "push ebp"]:
+                pointer = self.dbg.stack_pointer + (index + 1) * context.bytes
+            elif self.dbg.next_inst.toString() in ["mov rbp, rsp", "mov ebp, esp"]:
+                pointer = self.dbg.stack_pointer + (index + 2) * context.bytes
+            else:
+                pointer = self.dbg.base_pointer + (index + 2) * context.bytes
+            return self.dbg.read(pointer, context.bytes)
+        elif context.arch == "aarch64":
+            pointer = self.dbg.stack_pointer + index * context.bytes
+            return self.dbg.read(pointer, context.bytes)
+
 
     # How do we handle pushes ? Do I only write arguments when at the begining of the function and give up on using this property to load arguments before a call ?
     # Only valid for arguments already set
     def __setitem__(self, index, value):
         self.dbg.restore_arch()
-        if context.bits == 64:
-            if index < 6:
-                register = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"][index]
-                return setattr(self.dbg, register, value)
-            else:
-                index -= 6
-        if self.dbg.next_inst.toString() in ["endbr64", "push rbp", "push ebp"]:
-            pointer = self.dbg.stack_pointer + (index + 1) * context.bytes
-        elif self.dbg.next_inst.toString() in ["mov rbp, rsp", "mov ebp, esp"]:
-            pointer = self.dbg.stack_pointer + (index + 2) * context.bytes
+        calling_convention = function_calling_convention[context.arch]
+        if index < len(calling_convention):
+            register = calling_convention[index]
+            log.debug(f"argument {index} is in register {register}")
+            return setattr(self.dbg, register, value)
         else:
-            pointer = self.dbg.base_pointer + (index + 2) * context.bytes
-        return self.dbg.write(pointer, pack(value))
+            index -= calling_convention
+        if context.arch in ["amd64", "i386"]:
+            if self.dbg.next_inst.toString() in ["endbr64", "push rbp", "push ebp"]:
+                pointer = self.dbg.stack_pointer + (index + 1) * context.bytes
+            elif self.dbg.next_inst.toString() in ["mov rbp, rsp", "mov ebp, esp"]:
+                pointer = self.dbg.stack_pointer + (index + 2) * context.bytes
+            else:
+                pointer = self.dbg.base_pointer + (index + 2) * context.bytes
+            return self.dbg.write(pointer, pack(value))
+        elif context.arch == "aarch64":
+            pointer = self.dbg.stack_pointer + index * context.bytes
+            return self.dbg.write(pointer, context.bytes)
+        else:
 
 # Warning. Calling wait() before clear() returns immediatly!
 # TODO add a counter on when to stop treating return False as continues
