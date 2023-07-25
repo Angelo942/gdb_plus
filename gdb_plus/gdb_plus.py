@@ -51,6 +51,7 @@ class Debugger:
 
         # Ptrace_cont
         self.out_of_breakpoint = Event()
+        self.ptrace_emulated = False
         self.ptrace_lock = MyLock(self.out_of_breakpoint, owner=self)
         self.ptrace_can_continue = Event()
         self.ptrace_has_stopped = Event()  
@@ -200,6 +201,7 @@ class Debugger:
 
     # We stopped using gdb's implementation of temporary breakpoints so that we can differentiate an interruption caused by my debugger and cause by the manual use of gdb 
     # Event could tell me which breakpoint has been hit or which signal cause the interruption
+    # For ptrace emulation if the interuption is caused by a breakpoint, a step or an interrupt we stop the process. Otherwise we let the master decide in waitpid depending on the settings if we should return the control to the user [23/07/23]. This may cause problems though if waitpid is never called
     @lock_decorator
     def __stop_handler_gdb(self):
         """
@@ -220,8 +222,11 @@ class Debugger:
             if should_stop == False:
                 self.__hidden_continue()
             else:
-                self.__set_stop(f"signal {self._stop_reason} handled")
-                self.ptrace_has_stopped.set()
+                if self.ptrace_emulated:
+                    log.debug("stop will be handle by waitpid")
+                    self.ptrace_has_stopped.set()
+                else:
+                    self.__set_stop(f"signal {self._stop_reason} handled")
             return  
         # TODO handle stop in 
         if len(breakpoints) == 0:
@@ -229,16 +234,21 @@ class Debugger:
             #if self._stop_reason == "SIGSEGV":
             #    self.__exit_handler(...)
             # I put the signal first because I may have PTRACE_CONT be called on a SIGILL and I must tell the master that we stopped. I hope it won't cause problems with the different SIGSTOP that gdb puts in the way. [23/06/23]
-            if self._stop_reason in SIGNALS:
+            if self.interrupted and self._stop_reason == "SIGINT":
+                self.interrupted = False
+                self.__set_stop(f"interrupted")
+            
+            elif self._stop_reason in SIGNALS:
                 # I hope that the case where we step and still end up on a breakpoint won't cause problems because we would not reset stepped... [29/04/23]
+                if self.ptrace_emulated:
+                    log.debug("stop will be handle by waitpid")
+                    self.ptrace_has_stopped.set()
+                else:
+                    self.__set_stop(f"signal: {self._stop_reason}")
+            # self.stepped must only set by step() and can't be set by PTRACE_SINGLESTEP [23/07/23]
+            elif self.stepped:
                 self.stepped = False
-                self.interrupted = False
-                self.__set_stop(f"signal: {self._stop_reason}")
-                self.ptrace_has_stopped.set()
-            elif self.stepped or self.interrupted:
-                self.stepped = False
-                self.interrupted = False
-                self.__set_stop("stepped or interrupted")
+                self.__set_stop("stepped")
             else:
                 log.debug(f"[{self.pid}] stopped for a manual interaction")
                 self.__enforce_stop("manual interaction")
@@ -273,8 +283,11 @@ class Debugger:
             if should_stop == False:
                 self.__hidden_continue()
             else:
-                self.__set_stop(f"signal {self._stop_reason} handled")
-                self.ptrace_has_stopped.set()
+                if self.ptrace_emulated:
+                    log.debug("stop will be handle by waitpid")
+                    self.ptrace_has_stopped.set()
+                else:
+                    self.__set_stop(f"signal {self._stop_reason} handled")
             return  
         # I hope I won't touch a breakpoint at the same time
         # Usually if I hit a breakpoint it should stop again. At least with step we have the step and then the sigchld 
@@ -292,7 +305,10 @@ class Debugger:
                 self.interrupted = False
                 if self.stop_signal not in [0x5, 0x2, 0x13]:
                     log.warn(f"I wanted to step or interrupt, but stopped due to signal: {self._stop_reason}")
-                    self.ptrace_has_stopped.set()
+                    if self.ptrace_emulated:
+                        log.debug("stop will be handle by waitpid")
+                        self.ptrace_has_stopped.set()
+                        return
             # This should now be handled by libdebug [08/06/23]
             #elif self.libdebug.stop_status == 0x57f:
             #    # Look into how to handle steps in libdebug [21/05/23]
@@ -303,7 +319,10 @@ class Debugger:
             else:
                 # Once to let know there may be a problem, but not spamming when it is part of the challenge.
                 log.warn_once(f"why did I stop ??? [{hex(self.libdebug.stop_status)}]")
-                self.ptrace_has_stopped.set()
+                if self.ptrace_emulated:
+                    log.debug("stop will be handle by waitpid")
+                    self.ptrace_has_stopped.set()
+                    return
             self.__set_stop("no breakpoint")
             return            
         
@@ -1048,6 +1067,23 @@ class Debugger:
 
     manual = interrupt
 
+
+    def _step(self):
+            address = self.instruction_pointer
+
+            log.debug(f"[{self.pid}] stepping from {hex(self.instruction_pointer)}")
+            if self.gdb is not None:
+                priority = self.execute_action("si", sender="step")
+            elif self.libdebug is not None:
+                priority = self.execute_action(self.libdebug.step, sender="step")
+            else:
+                ...
+            
+            self.priority_wait(comment="step", priority = priority)
+            
+            return address != self.instruction_pointer
+
+
     # Next may break again on the same address, but not step
     # Why isn't force = True the default behaviour ? [29/04/23]
     # I don't use force=True by default because there are instructions that keep the instruction pointer at the same address even if executed [05/05/23]
@@ -1072,20 +1108,10 @@ class Debugger:
             repeat -= 1
 
         for _ in range(repeat):
-            address = self.instruction_pointer
         
             self.stepped = True
 
-            log.debug(f"[{self.pid}] stepping from {hex(self.instruction_pointer)}")
-            if self.gdb is not None:
-                priority = self.execute_action("si", sender="step")
-            elif self.libdebug is not None:
-                priority = self.execute_action(self.libdebug.step, sender="step")
-            else:
-                ...
-            self.priority_wait(comment="step", priority = priority)
-
-            if address == self.instruction_pointer:
+            if not self._step():
                 log.warn("You stepped, but the address didn't change. This may be due to a bug in gdb. If this wasn't the intended behaviour use force=True in the function step or continue you just called")
 
     si = step
@@ -2400,6 +2426,7 @@ class Debugger:
     # Call shellcode has problems: https://sourceware.org/gdb/onlinedocs/gdb/Registers.html. Can't push rip
     # Warn that the child will still be in the middle of the fork [26/04/23]
     # TODO support split for libdebug [02/06/23] (Will require a new patch to libdebug)
+    # I thought about setting emulate_ptrace for the child if it is set in the parent, but I want to let the user free of chosing the parameters they wants [23/07/23]
     def split_child(self, *, pid = None, inferior=None, n=None, script=""):
         self.restore_arch()
         if inferior is None:
@@ -2551,8 +2578,11 @@ class Debugger:
 
             for address, backup in self.ptrace_backups.items():
                 self.write(address, backup)
+            self.ptrace_emulated = False
             return
 
+        self.ptrace_emulated = True
+        
         if len(self.ptrace_breakpoints):
             log.warn(f"[{self.pid}] is already emulating ptrace")
             return
@@ -2607,6 +2637,7 @@ class Debugger:
                 #dbg.ret()
                 # Don't stop for a NOHANG [09/06/23]
                 if manual and stopped:
+                    slave.__set_stop()
                     return True
                 else:
                     return False
@@ -2825,24 +2856,28 @@ class Debugger:
 
     def PTRACE_SINGLESTEP(self, _, __, *, slave, **kwargs):
         log.info("ptrace single step")
-        slave.step(force=True)
+        slave._step()
         slave.ptrace_has_stopped.set()
         self.return_value = 0
         return False
-
-    # I still don't know if I should just go back to interrupt(strict=True)
+        
+    # NOT TESTED YET
     def PTRACE_INTERRUPT(self, _, __, *, slave, **kwargs):
+        # Should I just send a SIGSTOP ? Using interrupt won't make it accessible to waitpid! [23/07/23]
         log.debug("waiting out of breakpoint")
         slave.out_of_breakpoint.wait()
         log.debug("out of breakpoint waited")
-        # 1) does it make sense ? If someone will try running while I interrupt it will try again just after. But this would break any action the master is trying to perform [21/06/23 14:00]
-        # 2) We can't have both this and the lock_wrapper for interrupt
-        #slave.ptrace_lock.can_run.clear()  
-        if slave.running:    
-            log.info(f"ptrace will interrupt the slave [{slave.pid}]")
-            slave.interrupt()
+        ## 1) does it make sense ? If someone will try running while I interrupt it will try again just after. But this would break any action the master is trying to perform [21/06/23 14:00]
+        ## 2) We can't have both this and the lock_wrapper for interrupt
+        ##slave.ptrace_lock.can_run.clear()  
+        #if slave.running:    
+        #    log.info(f"ptrace will interrupt the slave [{slave.pid}]")
+        #    slave.interrupt()
         # It won't be hable to continue, right ? [21/06/23 13:30]
-        #slave.ptrace_lock.can_run.set()
+        ##slave.ptrace_lock.can_run.set()
+        # Is the if needed ? Shouldn't we send the signal everytime even in manual ? [23/07/23]
+        if slave.running:
+            os.kill(slave.pid, signal.SIGSTOP)
 
     ########################## REV UTILS ##########################
 
