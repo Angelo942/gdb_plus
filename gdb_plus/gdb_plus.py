@@ -20,6 +20,9 @@ RET = b"\xc3"
 DEBUG_OFF = "Debug is off, commands won't be executed"
 # Yah, there should be a way to handle the logs and hide those from the library, but will look into it another day.
 DEBUG = True #True # Flag for when I'm debugging the library
+INTERRUPT_SENT = 0b1 # We sent the signal
+INTERRUPT_HIT_BREAKPOINT = 0b10 # The process stopped for a breakpoint instead of our signal.
+
 
 def lock_decorator(func):
     def parse(self, *args, **kwargs):
@@ -1001,69 +1004,54 @@ class Debugger:
     def __interrupt_libdebug(self):
         pass
 
-    # temporarily interrupt the execution of our process to get back control of gdb (equivalent of a manual ctrl+C)
-    # don't worry about the "kill"
-    # May cause problem with the priority [26/04/23]
-    # Why does it allways interrupt the first inferior even when I switch to another one ?? [29/04/23]
-    #def interrupt(self):
-    #    """
-    #    Stop the process as you would with ctrl+C in gdb
-    #
-    #    Warning: can not YET be put inside a callback
-    #    """
-    #    if not self.debugging:
-    #        log.warn_once(DEBUG_OFF)
-    #        return
-    #    
-    #    # TODO check that self.running is valid and then use execute_action and priority_wait
-    #    # Can not work correctly with multiple inferiors. End up always interrupting the first one... [29/04/23]
-    #    if self.running:
-    #        self.interrupted = True
-    #        #self.myStopped.clear()
-    #        #os.kill(self.inferiors[self.current_inferior.num].pid, signal.SIGINT)
-    #        #self.wait(legacy=True, timeout=0.1)
-    #        # Need priority if calling interrupt in callback for split while waiting for finish in another thread
-    #        log.debug(f"interrupting inferior: {self.current_inferior} [pid:{self.current_inferior.pid}]")
-    #        self.execute_action("interrupt", sender="interrupt")
-    #        #os.kill(self.inferiors[self.current_inferior.num].pid, signal.SIGSTOP)
-    #        self.priority_wait()
-
     # Maybe should be the one returning if the process did stop due to the interrupt or not [13/06/23]
+    # Breakpoint callbacks should be handled before the interruption to simplify the logic and I guess that if we reach a breakpoint and still send a SIGINT the signal will arive later 
     @lock_decorator
     def interrupt(self, strict=True):
         # claim priority asap
         priority = self.raise_priority("interrupt")
-        #priority = self.execute_action("", sender="interrupt")
-
+        
         if not self.debugging:
+            # Who cares, right ?
+            #self.lower_priority("no process to interrupt")
             log.warn_once(DEBUG_OFF)
             return
 
         if not self.running:
-            #self.priority_wait(comment="release interrupt", priority = priority)
             self.lower_priority("release interrupt")
             # Must go after the lower_priority() to let other threads see it [19/06/23]
+            # Do I really need a set stop ?? [26/07/23]
             self.__set_stop("Release interrupt. I didn't have to stop")
             return False
 
         self.interrupted = True
         log.debug(f"interrupting [pid:{self.pid}]")
-        if self.gdb is not None:
-            # Should be the same as self.pid, no ? I update it every time we do change_inferior [21/07/23]
-            pid = self.current_inferior.pid
-            # SIGSTOP is too common in gdb
-        elif self.libdebug is not None:
-            pid = self.pid
-        else:
-            ...
-        os.kill(pid, signal.SIGINT)
+        # SIGSTOP is too common in gdb
+        log.debug("sending SIGINT")
+        os.kill(self.pid, signal.SIGINT)
         self.priority_wait(comment="interrupt", priority = priority)
         # For now it will be someone else problem the fact that we sent the SIGINT when we arived on a breakpoint or something similar. [21/07/23] Think about how to catch it without breaking the other threads that are waiting
         if self._stop_reason != "SIGINT":
             # Catch del SIGINT
+            log.debug("We hit a breakpoint before the SIGINT... I will continue stepping to catch them.")
+            
+            # I must make sure the callbacks aren't called each time!
+            address = self.instruction_pointer
+            saved_callbacks = []
+            for bp in self.breakpoints[address]:
+                saved_callbacks.append(bp.callback)
+                bp.callback = None
+            
+            # After this we finaly reached the signal, so we are good to continue
             self.step_until_condition(lambda dbg: dbg._stop_reason == "SIGINT")
-            return False
-        return True
+            if address != self.instruction_pointer:
+                log.warn("Oups, I made a mistake trying to catch the SIGINT...")
+
+            for bp, callback in zip(self.breakpoints[address], saved_callbacks):
+                bp.callback = callback
+
+            return INTERRUPT_SENT | INTERRUPT_HIT_BREAKPOINT
+        return INTERRUPT_SENT
 
     manual = interrupt
 
@@ -2498,51 +2486,24 @@ class Debugger:
                 #self.to_split.put(pid)
                 def split(inferior):
                     # claim priority asap
-                    priority = self.execute_action("", sender="split")
-                    #self.raise_priority("split")
+                    self.raise_priority("split")
 
                     self.restore_arch()
                     
                     log.info(f"splitting child: {inferior.pid}")
                     # Am I the reason why the process stopped ?
-                    stopped = False
-                    signal_sent = self.interrupt(strict=False)
-                    # How to handle the case where we interrupt at the address of a temporary breakpoint ? [05/05/23]
-                    #if self.instruction_pointer not in self.breakpoints and self.instruction_pointer != self.last_breakpoint_deleted:
-                    # I have to consider a single step to handle self.syscall(fork)
-                    # Maybe handle part of it in interrupt [19/06/23]
-                    if signal_sent:
-                        if "SIGINT" == self._stop_reason:
-                            stopped = True
-                        elif "BREAKPOINT" not in self._stop_reason and "SINGLE STEP" != self._stop_reason:
-                            log.debug(f"parrent stopped with {self._stop_reason}")
-                        else:
-                            log.debug("I tried interrupting, but we where already on a breakpoint, so I won't continue later")
-                            address = self.instruction_pointer
-                            log.debug("trying to catch SIGINT from interrupt")
-                            with context.silent:
-                                self.step_until_condition(lambda dbg: dbg._stop_reason == "SIGINT")
-                            if address != self.instruction_pointer:
-                                log.warn("I made a mistake and stepped thinking we would catch an interrupt. I hope this won't be a problem")
+                    stopped = self.interrupt()
                     self.children[pid] = self.split_child(inferior=inferior, script=script)
                     # Should not continue if I reached the breakpoint before the split
-                    if signal_sent:
-                        if not interrupt and stopped:
-                            self.__hidden_continue()
-                            # What is the difference ? [05/O5/23 20:30]
-                            #self.priority -= 1 # Can i do it this way to keep the priority correct ? [05/05/23 20:00]
-                            #self.cont(wait=False)
-                        # Put it at the end to avoid any race condition [05/05/23 2O:30]
-                        # I didn't stop due to the signal, but I must be running to split, so we are in the case where we hit a breakpoint (right ??) [29/05/23]
-                        elif not stopped:
-                            self.__set_stop("I did hit a breakpoint while interrupting the process")
-                        elif interrupt:
-                            self.__set_stop("I have been asked to stop after a fork")
-                    #self.lower_priority("release split")
-                    self.priority_wait("Release split", priority = priority)
-                    # Is it a good idea to set a stop ? I do need a way to let lower priority catch previous stops hidden by the fact that I was in here, but maybe it is better to check for those and set myStopped.cleared instead
-                    self.__set_stop("Released split")
+                    self.lower_priority("release split")
                     self.split.put(pid)
+                    if not interrupt and stopped & INTERRUPT_SENT and not stopped & INTERRUPT_HIT_BREAKPOINT:
+                        self.__hidden_continue()
+                    elif interrupt:
+                        self.__set_stop("forked")
+                    else:
+                        self.__set_stop("We hit a breakpoint while interrupting the process. Handle it!")
+                            
                 ## Non puoi eseguire azioni dentro ad un handler degli eventi quindi lancio in un thread a parte
                 context.Thread(target=split, args = (inferior,), name=f"[{self.pid}] split_fork").start()
 
@@ -2550,6 +2511,8 @@ class Debugger:
             self.gdb.events.new_inferior.connect(self.fork_handler)
             
             return self
+
+    split_on_fork = set_split_on_fork
 
     # Take all processes related
     @property
