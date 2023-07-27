@@ -3048,8 +3048,8 @@ class Debugger:
         return False
 
     def PTRACE_SINGLESTEP(self, _, __, *, slave, **kwargs):
-        log.info("ptrace single step")
-        slave._step()
+        log.info(f"ptrace single step from {slave.reverse_lookup(slave.instruction_pointer)}")
+        slave.step()
         slave.ptrace_has_stopped.set()
         self.return_value = 0x0
         return False
