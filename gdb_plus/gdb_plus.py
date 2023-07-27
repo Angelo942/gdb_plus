@@ -42,6 +42,7 @@ class Debugger:
         self._base_elf = None
         self._canary = None
         self._args = None
+        self._sys_args = None
         self.closed = Event()
         self.parent = None
         self.children = {} # Maybe put {self.pid: self} as first one
@@ -603,6 +604,24 @@ class Debugger:
         if self._args is None:
             self._args = Arguments(self)
         return self._args 
+
+    @property
+    def syscall_args(self):
+        """
+        Access arguments of the current function
+        Can be use to read and write
+        Can only access a single argument at a time
+        dbg.args[5] = 1 # Valid
+        a, b = dbg.args[:2] # Not valid!
+        """
+        if not self.debugging:
+            return
+
+        if self._sys_args is None:
+            self._sys_args = Arguments_syscall(self)
+        return self._sys_args 
+
+    sys_args = syscall_args
 
     # Taken from GEF to handle slave interruption
     @property
@@ -1703,6 +1722,9 @@ class Debugger:
         return breakpoint
         
     breakpoint = b
+
+    def tb(self, *args, **argw):
+        return self.b(*args, **argw, temporary=True)
 
     def delete_breakpoint(self, breakpoint: [int, str, Breakpoint]) -> bool:
         """

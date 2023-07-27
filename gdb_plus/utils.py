@@ -84,7 +84,33 @@ class Arguments:
         elif context.arch == "aarch64":
             pointer = self.dbg.stack_pointer + index * context.bytes
             return self.dbg.write(pointer, context.bytes)
+
+class Arguments_syscall:
+    def __init__(self, dbg):
+        self.dbg = dbg
+
+    def __getitem__(self, index: int):
+        assert type(index) is int, "I can't handle slices to access multiple arguments"
+        self.dbg.restore_arch()
+        calling_convention = syscall_calling_convention[context.arch][1:] # The first one would have been the sys_num
+        if index < len(calling_convention):
+            register = calling_convention[index]
+            log.debug(f"argument {index} is in register {register}")
+            return getattr(self.dbg, register)
         else:
+            raise Exception(f"We don't have {index + 1} arguments in a syscall!")
+
+    # How do we handle pushes ? Do I only write arguments when at the begining of the function and give up on using this property to load arguments before a call ?
+    # Only valid for arguments already set
+    def __setitem__(self, index, value):
+        self.dbg.restore_arch()
+        calling_convention = function_calling_convention[context.arch]
+        if index < len(calling_convention):
+            register = calling_convention[index]
+            log.debug(f"argument {index} is in register {register}")
+            return setattr(self.dbg, register, value)
+        else:
+            raise Exception(f"We don't have {index + 1} arguments in a syscall!")
 
 # Warning. Calling wait() before clear() returns immediatly!
 # TODO add a counter on when to stop treating return False as continues
@@ -255,5 +281,6 @@ shellcode_sleep = {"amd64": b"\x90\xeb\xfe", "i386": b"\x90\xeb\xfe", "aarch64":
 # syscall / int 0x80 / svc #0
 shellcode_syscall = {"amd64": b"\x0f\x05", "i386": b"\xcd\x80", "aarch64": b'\x01\x00\x00\xd4'}
 # First register is where to save the syscall num
-syscall_calling_convention = {"amd64": ["rax", "rdi", "rsi", "rdx", "rcx", "r8", "r9"], "i386": ["rax", "ebx", "ecx", "edx", "esi", "edi", "ebp"], "aarch64": ["x8", "x0", "x1", "x2", "x3", "x4", "x5"]}
+syscall_calling_convention = {"amd64": ["rax", "rdi", "rsi", "rdx", "r10", "r8", "r9"], "i386": ["rax", "ebx", "ecx", "edx", "esi", "edi", "ebp"], "aarch64": ["x8", "x0", "x1", "x2", "x3", "x4", "x5"]}
 function_calling_convention = {"amd64": ["rdi", "rsi", "rdx", "rcx", "r8", "r9"], "i386": [], "aarch64": [f"x{i}" for i in range(0, 8)]}
+return_instruction = {"amd64": b"\xc3", "i386": b"\xc3", "aarch64": b'\xc0\x03_\xd6'}
