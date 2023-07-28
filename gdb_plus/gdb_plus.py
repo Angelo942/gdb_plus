@@ -1092,6 +1092,7 @@ class Debugger:
     def interrupt(self, strict=True):
         # claim priority asap
         priority = self.raise_priority("interrupt")
+        self.restore_arch()
         
         if not self.debugging:
             # Who cares, right ?
@@ -2463,7 +2464,11 @@ class Debugger:
             if context.arch == "amd64":
                 ans = self.rip
             elif context.arch == "i386":
-                ans = self.eip
+                try:
+                    ans = self.eip
+                except Exception as e:
+                    print(e)
+                    pwn.log.error("I failed retriving eip! make sure you are using the right context.arch")
             elif context.arch == "aarch64":
                 ans = self.pc
             else:
