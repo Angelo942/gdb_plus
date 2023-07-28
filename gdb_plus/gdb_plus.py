@@ -245,6 +245,9 @@ class Debugger:
         # We have a problem with multiple catchpoints for the same syscall... [26/07/23]
         if self._stop_reason == "BREAKPOINT" and (callback := self.syscall_breakpoints.get(self._details_breakpoint_stopped, None)) is not None:
             if self.syscall_return == False: 
+                # Make sure we don't miss the return
+                # Put above to avoid race condition after the jump
+                self.raise_priority("handling syscall")
                 should_skip = callback(self, entry=True)
                 if should_skip is not None and should_skip & SKIP_SYSCALL:
                     self.jump(self.instruction_pointer)
@@ -258,9 +261,8 @@ class Debugger:
                         #else:
                         #    # TODO TEST IT [26/07/23]
                         self.__set_stop("stopped after skipping syscall")
+                    self.lower_priority("syscall skipped")    
                     return
-                # Make sure we don't miss the return
-                self.raise_priority("handling syscall")
                 # hit the return
                 self.syscall_return = True
                 self.c()
@@ -3050,6 +3052,7 @@ class Debugger:
     def PTRACE_SINGLESTEP(self, _, __, *, slave, **kwargs):
         log.info(f"ptrace single step from {slave.reverse_lookup(slave.instruction_pointer)}")
         slave.step()
+        log.debug("Telling the slave that it has stopped")
         slave.ptrace_has_stopped.set()
         self.return_value = 0x0
         return False
