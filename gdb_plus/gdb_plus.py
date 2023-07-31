@@ -385,6 +385,7 @@ class Debugger:
         self.__clear_stop("exited")
         self.myStopped.set()
         self.closed.set()
+        self.ptrace_has_stopped.set()
         
     def __setup_gdb(self):
         """
@@ -2752,7 +2753,10 @@ class Debugger:
 
                     # TODO what about handling events in status ? [04/06/23]
                     if stopped:
-                        status = (tracee.stop_signal * 0x100 + 0x7f)
+                        if tracee._stop_reason == "NOT RUNNING":
+                            status = 0x0
+                        else:
+                            status = (tracee.stop_signal * 0x100 + 0x7f)
                         dbg.return_value = pid
                     else:
                         status = 0x0
@@ -2859,7 +2863,10 @@ class Debugger:
 
                     # TODO what about handling events in status ? [04/06/23]
                     if stopped:
-                        status = (tracee.stop_signal * 0x100 + 0x7f)
+                        if tracee._stop_reason == "NOT RUNNING":
+                            status = 0x0
+                        else:
+                            status = (tracee.stop_signal * 0x100 + 0x7f)
                         dbg.return_value = pid
                     else:
                         status = 0x0
