@@ -56,6 +56,9 @@ class Debugger:
         self.gdb = None
         self.libdebug = None
 
+        self.gef = False
+        self.pwndbg = False
+
         # Ptrace_cont
         self.out_of_breakpoint = Event()
         self.ptrace_emulated = False
@@ -243,6 +246,7 @@ class Debugger:
 
         # We could also pass the stop event and read the breakpoint from there... But it would only be usefull to know that it is a catchpoint and which one, so who cares [25/07/23]
         # We have a problem with multiple catchpoints for the same syscall... [26/07/23]
+        # Can we get the reason from the StopEvent ?
         if self._stop_reason == "BREAKPOINT" and (callback := self.syscall_breakpoints.get(self._details_breakpoint_stopped, None)) is not None:
             if self.syscall_return == False: 
                 # Make sure we don't miss the return
@@ -386,6 +390,23 @@ class Debugger:
         self.myStopped.set()
         self.closed.set()
         self.ptrace_has_stopped.set()
+
+    def __test_debugger(self):
+        try:
+            self.execute("stub")
+            self.gef = True
+            log.debug("user is using gef")
+            return
+        except:
+            log.debug("user isn't using gef")
+        try:
+            self.execute("telescope")
+            self.pwndbg = True
+            log.debug("user is using pwndbg")
+            return
+        except:
+            log.debug("user isn't using pwndbg")
+
         
     def __setup_gdb(self):
         """
@@ -397,19 +418,24 @@ class Debugger:
 
         # I still don't know how to disable it to let ptrace_emulate work in peace [26/07/23]
         def callback_ptrace(self, entry):
-            if entry:
-                log.warn_once(f"THE PROCESS [{self.pid}] USES PTRACE!")
+            log.warn_once(f"THE PROCESS [{self.pid}] USES PTRACE!")
+            return SKIP_SYSCALL
         self.catch_syscall("ptrace", callback_ptrace)
 
         # Manually set by split_child
         self.split = Queue()
+        self.closed.clear()
 
         self.myStopped.pid = self.pid
+        self.__test_debugger()
 
     def __setup_libdebug(self):
         self.libdebug.handle_stop = self.__stop_handler_libdebug
 
-        #self.libdebug.handle_exit = self.__exit_handler
+        self.libdebug.handle_exit = self.__exit_handler
+        
+        self.closed.clear()
+
 
     # È già successo che wait ritorni -1 e crashi libdebug [08/05/23]
     # Legacy callbacks won't be transfered over... It's really time to get rid of them [21/05/23]
@@ -472,6 +498,7 @@ class Debugger:
                     breakpoint.native_breakpoint = bp
         else:
             ...
+        return self
 
     # Because pwntools isn't perfect
     def restore_arch(self):
@@ -541,7 +568,10 @@ class Debugger:
             return
 
         # Must be stopped
-        self.interrupt()
+        try:
+            self.interrupt()
+        except:
+            log.debug(f"process [{self.pid}] has already stopped")
         self.detached = True
 
         if self.gdb is not None:
@@ -570,6 +600,9 @@ class Debugger:
 
     def close(self):
         self.detach()
+        # Yah, I should do it here, but I close the terminal in detach, so let's handle it there.
+        #except:
+        #    log.debug(f"[{self.pid}] can't detach because process has already exited")
         # Can't close the process if I just attached to the pid
         if self.p:
             self.p.close()
@@ -649,6 +682,8 @@ class Debugger:
         #elif self.libdebug is not None:
         #   return ... 
 
+    inferior = current_inferior
+        
     @property
     def args(self):
         """
@@ -805,10 +840,11 @@ class Debugger:
                 return
             self.execute_action("continue", sender="continue")
         # Damn, I may not want to wait at all... [22/05/23]
-        #if wait:
         # Keep priority intact, so I have to wait
+        #if wait:
         self.priority_wait(comment="continue", priority = priority + 1)
         done.set()
+        # The problem is that this has to be set after wait() [29/07/23 21:45]
         self.lower_priority("avoid race condition in continue")
 
     def __continue_libdebug(self, force, wait, done, signal):
@@ -856,9 +892,13 @@ class Debugger:
 
         if wait:
             done.wait()
+            return self
         else:
-            pass
-            # I would like to return done too, but I'm sure the average user will try dbg.wait instead of done.wait
+            #pass
+            # I would like to return done too, but I'm sure the average user will try dbg.wait instead of done.wait 
+            # dbg.wait() would bring priority to -1, but it is still more intuitive than done.wait() so I will try to change _continue_* to allow the user to use wait() [29/07/23 21:30]
+            # Nope, too many problems with priority so I get back to the event. Later we will think about separating wait and priority_wait [29/07/23 21:40]
+            return done
 
     cont = c
 
@@ -1050,12 +1090,6 @@ class Debugger:
             raise Exception("What the fuck happened with split ???")
         return pid
 
-    def advanced_continue_and_wait_split(self):
-        log.warn("advanced_continue_and_wait_split is deprecated. Use cont(until=\"fork\"); finish(); wait_split() instead")
-        self.c(until="fork")
-        self.finish()
-        return self.wait_split()
-
     # For now is handled by simple wait [06/03/23]
     def wait_exit(self):
         self.closed.wait()
@@ -1126,14 +1160,15 @@ class Debugger:
                 bp.callback = None
             
             # After this we finaly reached the signal, so we are good to continue
-            self.step_until_condition(lambda dbg: dbg._stop_reason == "SIGINT")
+            res = self.step_until_condition(lambda dbg: dbg._stop_reason == "SIGINT", limit=5)
             if address != self.instruction_pointer:
                 log.warn("Oups, I made a mistake trying to catch the SIGINT...")
-
+            elif res == -1:
+                log.warn("What the fuck happened with the SIGINT ? I never found it...")
             for bp, callback in zip(self.breakpoints[address], saved_callbacks):
                 bp.callback = callback
-
             return INTERRUPT_SENT | INTERRUPT_HIT_BREAKPOINT
+
         return INTERRUPT_SENT
 
     manual = interrupt
@@ -1187,6 +1222,8 @@ class Debugger:
 
             if not self._step(signal):
                 log.warn("You stepped, but the address didn't change. This may be due to a bug in gdb. If this wasn't the intended behaviour use force=True in the function step or continue you just called")
+
+        return self
 
     si = step
 
@@ -1328,6 +1365,7 @@ class Debugger:
         context.Thread(target=self.__next, args=(repeat, done), name=f"[{self.pid}] next").start()
         if wait:
             done.wait()
+            return self
         else:
             return done
 
@@ -1336,7 +1374,7 @@ class Debugger:
     def next_until_call(self, callback=None, limit=10_000):
         """
         step until the end of the function
-        will continue over the first finction if called when already before a call
+        will continue over the first function if called when already before a call
 
         Arguments:
             callback: optional function to call at each step
@@ -1383,6 +1421,7 @@ class Debugger:
         context.Thread(target=self.__finish, args=(repeat, force, done), name=f"[{self.pid}] finish").start()
         if wait:
             done.wait()
+            return self
         else:
             return done
 
@@ -1424,6 +1463,7 @@ class Debugger:
             self.__jump_libdebug(address)
         else:
             ...
+        return self
         
     # Now can return from anywhere in the function
     # Works only for standard functions (push rbp; mov rbp, rsp; ...; leave; ret;). May crash if used in the libc
@@ -1434,6 +1474,7 @@ class Debugger:
 
         Warning: Experimental and depends on the stack frame
         """
+        raise Exception("Not implemented yet")
         if self.next_inst.toString() in ["endbr64", "push rbp", "push ebp"]:
             pass
         elif self.next_inst.toString() in ["mov rbp, rsp", "mov ebp, esp"]:
@@ -1445,6 +1486,7 @@ class Debugger:
         self.jump(ret_address)
         if value is not None:
             self.return_value = value
+        return self
 
     # For some reasons we get int3 some times
     # Now it's even worse. SIGABORT after that...
@@ -1643,6 +1685,8 @@ class Debugger:
                 self.c(signal=n)
         else:
             ...
+
+        return self
 
     def syscall(self, code: int, args: list, *, heap = True):
         log.debug(f"syscall {code}: {args}")
@@ -2580,15 +2624,11 @@ class Debugger:
         old_inferior = self.switch_inferior(n)
         ip = self.instruction_pointer
         backup = self.inject_sleep(ip)
-
-        # Now it should be handled by the interrupt in set_split_on_fork [22/05/23]
-        ## For some reason it may happend that we receive a SIGINT on the first step. This would kill the process if I detached now [29/04/23] (Always that same bug)
-        #self.step() 
-        
         self.switch_inferior(old_inferior.num)
         log.debug(f"detaching from child [{pid}]")
         self.execute(f"detach inferiors {n}")
         child = Debugger(pid, binary=self.elf.path, script=script)
+        # TODO copy all sycall handlers in the parent ? [31/07/23]
         # Copy libc since child can't take it from process [04/06/23]
         child.libc = self.libc
         # Set parent for ptrace [08/06/23]
@@ -2622,6 +2662,9 @@ class Debugger:
                 
         else:
             self.execute("set detach-on-fork off")
+            if self.pwndbg:
+                # because for some reason they set the child...
+                self.execute("set follow-fork-mode parent")
 
             # The interrupt may give me problems with continue_until
             def fork_handler(event):
@@ -2675,13 +2718,16 @@ class Debugger:
         return group
 
     # I want a single function so that each process can be both master and slave [08/06/23]
-    # I use real callback as long as we are breaking on the function it should work. The problem is if we start catch the syscall instead [08/06/23]
+    # I use real callback as long as we are breaking on the function it should work. The problem is if we start catch the syscall instead [08/06/23] Why ? [28/07/23]
+    # Should we split the "manual" between ptrace and waitpid ? So that I can only wait for the later ? For now I will put the breakpoint a bit later so that you can do continue_until("waitpid") [28/07/23]
+    # TODO teach how to add symbols in a binary for the functions if the code is statically linked and stripped
     def emulate_ptrace(self, *, off=False, wait_fun="waitpid", wait_syscall="wait4", manual=False, silent=False, signals = ["SIGSTOP"], syscall=False):
         self.restore_arch()
 
         if off:
             if self.ptrace_syscall:
-                raise Exception("I still don't know how to disable the emulation with syscall")
+                log.warn("I still don't know how to disable the emulation with syscall")
+                return
 
             for bp in self.ptrace_breakpoints:
                 self.delete_breakpoint(bp)
@@ -3233,8 +3279,10 @@ class Debugger:
             super().__setattr__(name, value)
 
     def __repr__(self) -> str:
-        if self.running:
+        if self.closed.is_set():
+            msg = "<exited>"
+        elif self.running:
             msg = "<running>"
         else:
-            msg = f"<not running> {hex(self.instruction_pointer)} [{self._stop_reason}]"
+            msg = f"<not running> {hex(self.instruction_pointer)}:{self.next_inst.toString()} [{self._stop_reason}]"
         return "Debugger [{:d}] {:s}".format(self.pid, msg)

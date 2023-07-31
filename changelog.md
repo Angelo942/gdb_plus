@@ -3,6 +3,7 @@ DBG+ 6.4.1: syscalls
 * Emulate ptrace through syscalls instead of function calls
 * Support signals with libdebug
 * Return self when possible to simplify debugging from Ipython
+* Remove advanced_continue_and_wait_split
 
 GDB+ 6.4.0: **ARM**
 * Can "partially" debug aarch64 programs running under qemu. With all the limitations that come from the emulator
