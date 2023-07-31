@@ -810,7 +810,7 @@ class Debugger:
         done.set()
         self.lower_priority("avoid race condition in continue")
 
-    def __continue_libdebug(self, force, wait, done):
+    def __continue_libdebug(self, force, wait, done, signal):
         # Continue in libdebug is already stepping [21/05/23]
         # Maybe keep the step if force = True [22/O5/23]
         #self.step(force=force)
@@ -819,14 +819,13 @@ class Debugger:
         #    return
         # I don't need the thread, right ? And this way I can lock the step [12/06/23]
         with self.ptrace_lock.log("__continue_libdebug"):
-            self.execute_action(lambda: self.libdebug.cont(blocking=False), sender="continue")
-        #self.execute_action(lambda: context.Thread(target=self.libdebug.cont, kwargs={"blocking": False}).start(), sender="continue")
+            self.execute_action(lambda: self.libdebug.cont(blocking=False, signal=signal), sender="continue")
         #if wait:
         self.priority_wait(comment="continue")
         done.set()
         
     # TODO make the option to have "until" be non blocking with an event when we reach the address [28/04/23] In other words migrate wait=False to wait=Event()
-    def c(self, *, wait=True, force = False):
+    def c(self, *, wait=True, force = False, signal=0x0):
         """
         Continue execution of the process
 
@@ -849,7 +848,7 @@ class Debugger:
             context.Thread(target=self.__continue_gdb, args=(force, wait, done), name=f"[{self.pid}] continue").start() 
 
         elif self.libdebug is not None:
-            context.Thread(target=self.__continue_libdebug, args=(force, wait, done), name=f"[{self.pid}] continue").start() 
+            context.Thread(target=self.__continue_libdebug, args=(force, wait, done, signal), name=f"[{self.pid}] continue").start() 
 
         else:
             ...
@@ -1139,14 +1138,17 @@ class Debugger:
     manual = interrupt
 
 
-    def _step(self):
+    def _step(self, signal=0x0):
             address = self.instruction_pointer
 
             log.debug(f"[{self.pid}] stepping from {hex(self.instruction_pointer)}")
             if self.gdb is not None:
-                priority = self.execute_action("si", sender="step")
+                if signal:
+                    self.signal(signal, step=True)
+                else:
+                    priority = self.execute_action("si", sender="step")
             elif self.libdebug is not None:
-                priority = self.execute_action(self.libdebug.step, sender="step")
+                priority = self.execute_action(lambda: self.libdebug.step(signal=signal), sender="step")
             else:
                 ...
             
@@ -1160,7 +1162,7 @@ class Debugger:
     # I don't use force=True by default because there are instructions that keep the instruction pointer at the same address even if executed [05/05/23]
     # You need force=True on continue to avoid double call to callbacks [30/05/23]
     @lock_decorator
-    def step(self, repeat:int=1, *, force=False):
+    def step(self, repeat:int=1, *, force=False, signal=0x0):
         """
         execute a single instruction
 
@@ -1182,7 +1184,7 @@ class Debugger:
         
             self.stepped = True
 
-            if not self._step():
+            if not self._step(signal):
                 log.warn("You stepped, but the address didn't change. This may be due to a bug in gdb. If this wasn't the intended behaviour use force=True in the function step or continue you just called")
 
     si = step
@@ -1587,9 +1589,7 @@ class Debugger:
             self.execute(f"handle {signal} stop nopass")
         self.handled_signals[SIGNALS[signal]] = callback
 
-    # Can be used with signal code or name. Case insensitive.
-    # TODO handle priority_wait
-    def signal(self, n: [int, str], /, *, handler : [int, str] = None):
+    def signal(self, n: [int, str], /, *, handler : [int, str] = None, step=False):
         """
         Send a signal to the process and put and break returning from the handler
         Once sent the program will jump to the handler and continue running therefore We set a breakpoint on the next instruction before sending the signal.
@@ -1599,18 +1599,19 @@ class Debugger:
         Parameters
         ----------
         n : INT or STRING
-            Name or id of the signal. Name isn't case sensitive
+            Name or id of the signal.
         handler : POINTER, optional
-            USE IF SIGNAL WILL MODIFY THE NEXT INSTRUCTION
+            USE ONLY IF SIGNAL WILL MODIFY THE NEXT INSTRUCTION AND YOU CAN'T USE A HARDWARE BREAKPOINT
             Pointer to the last instruction of the signal handler. Will be used to set a breakpoint after the code has been modified
         """
 
-        log.warn_once("the method signal() is still evolving. Use it if you don't want the program to continue after receiving the signal. If the signal will modify your code you HAVE to add the argument 'handler' with an address after the code has changed")
-        # Sending signal will cause the process to resume his execution so we put a breakpoint and wait for the handler to finish executing
-        # I may put a flag to precise if the code is self modifying or not and if it is handle breakpoints
+        # To send a signal ptrace has to resume the execution of the process so we put a breakpoint and wait for the handler to finish executing
         # If the code is self modifying you must use handler otherwise the breakpoint will be overwritten with bad code [26/02/23]
+        # Now a hardware breakpoint should be enough, but I keep the handler if you don't have enough breakpoints. [30/07/23]
         if handler is None:
-            self.b(self.instruction_pointer, temporary=True, user_defined=False)
+            #self.b(self.instruction_pointer, temporary=True, user_defined=False)
+            # TODO warn if hw fails
+            self.b(self.instruction_pointer, temporary=True, user_defined=False, hw=True)
         else:
             from queue import Queue
             my_address = Queue()
@@ -1621,11 +1622,26 @@ class Debugger:
                 dbg.b(address, temporary=True, user_defined=False)
                 return False  
             self.b(handler, callback=callback, temporary=True, user_defined=False)
-        
-        if type(n) is str:
-            n = n.upper()
-        priority = self.execute_action(f"signal {n}", sender="signal")
-        self.priority_wait(comment="signal", priority = priority)
+        if self.gdb is not None:
+            if type(n) is int:
+                log.warn_once("Remember that gdb uses a different order for the signals. It is advised to use directly the name of the signal")
+            if step:
+                self.execute(f"queue-signal {n}")
+                self.step()
+            else:
+                priority = self.execute_action(f"signal {n}", sender="signal")
+                self.priority_wait(comment=f"signal {n}", priority = priority)
+        elif self.libdebug is not None:
+            if type(n) is str:
+                n = n.upper()
+                n = SIGNALS[n]
+            log.debug(f"[{self.pid}] sending signal {hex(n)} -> {SIGNALS_from_num[n]}")
+            if step:
+                self.step(signal=n)
+            else:
+                self.c(signal=n)
+        else:
+            ...
 
     def syscall(self, code: int, args: list, *, heap = True):
         log.debug(f"syscall {code}: {args}")
