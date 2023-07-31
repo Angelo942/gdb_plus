@@ -2839,7 +2839,7 @@ class Debugger:
             self.catch_syscall("ptrace", ptrace_callback)
 
         else:
-            shellcode = return_instruction[context.arch]
+            shellcode = nop[context.arch] + return_instruction[context.arch]
             address = self.parse_address(wait_fun)
             backup = self.read(address, len(shellcode))
             self.write(address, shellcode)
@@ -2895,10 +2895,8 @@ class Debugger:
                 else:
                     return callback(dbg)
 
-            self.ptrace_breakpoints.append(self.b(wait_fun, callback=callback_wait, user_defined=False))
+            self.ptrace_breakpoints.append(self.b(wait_fun + "+1", callback=callback_wait, user_defined=False))
 
-
-            shellcode = return_instruction[context.arch]
             address = self.parse_address("ptrace")
             backup = self.read(address, len(shellcode))
             self.write(address, shellcode)
@@ -2956,7 +2954,7 @@ class Debugger:
             # Legacy_callback so that the program does run off if we step over the breakpoint manualy
             # Is this still needed ? [05/05/23] # Yes, you have to patch gdb's implementation of nexti and finish first
             # I will use a normal callback. Just use IPython dbg.next() if you have to step manually [08/06/23]
-            self.ptrace_breakpoints.append(self.b("ptrace", callback=ptrace_callback, user_defined=False))
+            self.ptrace_breakpoints.append(self.b("ptrace+1", callback=ptrace_callback, user_defined=False))
 
         return self
 
