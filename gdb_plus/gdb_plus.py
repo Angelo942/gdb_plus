@@ -2508,13 +2508,18 @@ class Debugger:
     def _find_rip(self):
         self.restore_arch()
         # experimental, but should be better that the native one for libdebug        
-        if self.next_inst.toString() in ["endbr64", "push rbp", "push ebp", "ret"]:
-            return_pointer = self.read(self.stack_pointer, context.bytes)
-        elif self.next_inst.toString() in ["mov rbp, rsp", "mov ebp, esp"]:
-            return_pointer = self.read(self.stack_pointer + context.bytes, context.bytes) # Remove the base pointer # No need to place it back in rbp
-        else:
-            return_pointer = self.read(self.base_pointer + context.bytes, context.bytes)
+        if self.base_pointer:
+            if self.next_inst.toString() in ["endbr64", "push rbp", "push ebp", "ret"]:
+                return_pointer = self.read(self.stack_pointer, context.bytes)
+            elif self.next_inst.toString() in ["mov rbp, rsp", "mov ebp, esp"]:
+                return_pointer = self.read(self.stack_pointer + context.bytes, context.bytes) # Remove the base pointer # No need to place it back in rbp
+            else:
+                return_pointer = self.read(self.base_pointer + context.bytes, context.bytes)
 
+        else:
+            # At least, this is the case with fork and works better than gdb.
+            return_pointer = self.read(self.stack_pointer, context.bytes)
+        
         return unpack(return_pointer)       
 
     @property
