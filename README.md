@@ -308,18 +308,17 @@ Arm binaries ar now partially supported. The problem running them in qemu is tha
 * pwndbg may be better than GEF when using qemu. In particular if you find gdb always debugging qemu instead of your process and you are sure you set the correct context you may want to try switching to pwndbg for this part.
 
 # TODO
-
+* Distinguish between process running and dead
 * Identify actions performed manually in gdb (overwrite finish and ni)
-* Handle fork and ptrace from syscall instead of libc
-    - catch syscall and use orig_rax to separate ptrace from fork. But be carefull that fork() may use clone()
 * Improve ptrace emulation
     * handle waitpid(-1) with multiple slaves
-* Stack multiple callbacks on the same breakpoint
-* handle Hardware breakpoint
-* support ARM binaries
+    * emulate waitid too
+* improve support ARM binaries
     * how to specify libraries ? (-L /usr/aarch64-linux-gnu)
+    * features for native arch
+    * arm 32 bit
 * support multithread applications
-* setup gdbinit for forked processes
 * catch sigsegv as an exit instead of user interaction
 * enable signal() with libdebug
 * force parent or child to stop tracing
+* wrap follow-child
