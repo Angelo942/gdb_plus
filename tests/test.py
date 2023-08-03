@@ -277,7 +277,7 @@ class Debugger_memory(unittest.TestCase):
 		self.assertEqual(strings[0], self.dbg.read_string(pointer))		
 		self.assertFalse(self.dbg.priority)
 
-#@unittest.skip
+@unittest.skip
 class Debbuger_fork(unittest.TestCase):
 	from base64 import b64encode
 	def setUp(self):
@@ -300,7 +300,7 @@ class Debbuger_fork(unittest.TestCase):
 			request.append(b"Connection: close")
 		return LINE_TERMINATOR.join(request + [b""])
 
-	@unittest.skip
+	#@unittest.skip
 	def test_continuous_follow(self):
 		print("\ntest_continuous_follow: ", end="")
 		gdbscript = """
@@ -356,7 +356,7 @@ class Debbuger_fork(unittest.TestCase):
 			dbg.close()
 			child.close()
 
-	@unittest.skip
+	#@unittest.skip
 	def test_my_split_interrupt(self):
 		print("\ntest_my_split_interrupt: ", end="")
 		with context.local(arch = 'amd64'):
@@ -371,7 +371,7 @@ class Debbuger_fork(unittest.TestCase):
 			dbg.close()
 			child.close()
 
-	@unittest.skip
+	#@unittest.skip
 	def test_my_split_breakpoint(self):
 		print("\ntest_my_split_breakpoint: ", end="")
 		with context.local(arch = 'amd64'):
@@ -387,7 +387,7 @@ class Debbuger_fork(unittest.TestCase):
 			dbg.close()
 			child.close()
 
-	@unittest.skip
+	#@unittest.skip
 	def test_ptrace_emulation(self):
 		print("\ntest_ptrace_emulation: ", end="")
 		with context.local(arch = 'amd64'):
@@ -428,7 +428,7 @@ class Debbuger_fork(unittest.TestCase):
 			child.close()
 			dbg.close()
 
-	@unittest.skip
+	#@unittest.skip
 	def test_ptrace_emulation_syscall(self):
 		print("\ntest_ptrace_emulation_syscall: ", end="")
 		with context.local(arch = "amd64"):
@@ -488,7 +488,7 @@ class Debbuger_fork(unittest.TestCase):
 			dbg.close()
 			child.close()
 
-	@unittest.skip
+	#@unittest.skip
 	def test_ptrace_emulation_libdebug(self):
 		print("\ntest_ptrace_emulation_libdebug: ", end="")
 		with context.local(arch="amd64"):
@@ -866,7 +866,7 @@ class Debugger_ARM(unittest.TestCase):
 
 	#@unittest.skip
 	def test_call(self):
-		print("\ntest_call: ", end="")
+		print("\ntest_call [ARM]: ", end="")
 		out = []
 		with context.local(arch="aarch64"):
 			self.dbg = Debugger("./test_arm_call") # You must wait for the libc to be loaded to call malloc
@@ -876,6 +876,50 @@ class Debugger_ARM(unittest.TestCase):
 				self.assertEqual(self.dbg.p.recvline(), f"{i}\n".encode())
 			self.dbg.c()
 			self.assertEqual(self.dbg.p.recvline(), b"all done!\n")
+			self.assertFalse(self.dbg.priority)
+
+#@unittest.skip
+class Debugger_RISCV(unittest.TestCase):
+	def setUp(self):
+		warnings.simplefilter("ignore", ResourceWarning)
+		warnings.simplefilter("ignore", ImportWarning)
+
+	def tearDown(self):
+		self.dbg.close()
+
+	#@unittest.skip
+	def test_continue_until(self):
+		with context.local(arch="riscv"):
+			self.dbg = Debugger("./smash-baby", env={"FLAG":"flag{test}"})
+			print("\ntest_continue_until [RISCV]: ", end="")
+			self.dbg.continue_until("open")
+			self.assertEqual(self.dbg.instruction_pointer, 0x1ce38)
+			self.assertFalse(self.dbg.priority)
+		
+	#@unittest.skip
+	def test_syscall(self):
+		print("\ntest_syscall [RISCV]: ", end="")
+		with context.local(arch="riscv", bits=32):
+			self.dbg = Debugger("./smash-baby", env={"FLAG":"flag{test}"})
+			path = "./data.txt"
+			with open(path, "wb") as file:
+				file.write(b"") 
+			self.dbg.continue_until("main") # You must wait for the libc to be loaded to call malloc
+			data = b"ciao, come stai ?\n"
+			length = self.dbg.syscall(0x40, [0x1, data, len(data)])
+			self.assertEqual(len(data), length)
+			self.assertEqual(self.dbg.p.recv(), data)
+			self.assertFalse(self.dbg.priority)
+
+	#@unittest.skip
+	def test_call(self):
+		print("\ntest_call [RISCV]: ", end="")
+		out = []
+		with context.local(arch="riscv"):
+			self.dbg = Debugger("./smash-baby")
+			self.dbg.until("main")
+			self.dbg.call("puts", [b"ciao\n"])
+			self.assertTrue(b"ciao" in self.dbg.p.recv())
 			self.assertFalse(self.dbg.priority)
 
 if __name__ == "__main__":

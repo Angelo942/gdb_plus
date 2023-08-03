@@ -3,7 +3,7 @@ import pwn
 import os
 from time import sleep
 from functools import partial
-from capstone import Cs, CS_ARCH_X86, CS_ARCH_ARM64, CS_MODE_32, CS_MODE_64, CS_MODE_ARM
+from capstone import Cs, CS_ARCH_X86, CS_ARCH_ARM64, CS_ARCH_RISCV, CS_MODE_32, CS_MODE_64, CS_MODE_ARM, CS_MODE_RISCV32, CS_MODE_RISCV64, CS_MODE_RISCVC
 from threading import Event
 from queue import Queue
 from gdb_plus.utils import *
@@ -139,6 +139,8 @@ class Debugger:
                     del self.elf.symbols[name]
 
         # Because pwntools context isn't perfect
+        if self.elf.arch == "em_riscv":
+            self.elf.arch = "riscv"
         self.restore_arch()
 
         if self.debugging:
@@ -1616,8 +1618,11 @@ class Debugger:
             self.push(0)
         if context.arch in ["i386", "amd64"]:
             self.push(return_address)
-        else:
+        elif context.arch == "aarch64":
             self.x30 = return_address
+        elif context.arch == "riscv":
+            self.ra = return_address
+
         self.jump(address)
         
         return_value = Queue()
@@ -1706,7 +1711,7 @@ class Debugger:
         backup_registers = self.backup()
         return_address = self.instruction_pointer
         # GDB has a bug with QEMU where I can't patch the code
-        if context.arch == "aarch64":
+        if context.arch in ["aarch64", "riscv"]:
             # Doesn't work because I can't get the base of the binary from qemu
             address = self.elf.data.find(shellcode) 
             self.jump(address)
@@ -1723,7 +1728,7 @@ class Debugger:
         self.step()
         res = self.return_value
         self.restore_backup(backup_registers)
-        if context.arch != "aarch64":
+        if context.arch not in ["aarch64", "riscv"]:
             self.write(return_address, backup_memory)
         self.jump(return_address)
         for pointer, n in to_free[::-1]: #I do it backward to have a coherent behaviour with heap=False, but I still don't really know if I should implement a free in that case
@@ -1750,6 +1755,10 @@ class Debugger:
         if self.gdb is None:
             raise Exception("not implemented yet in libdebug")
 
+        if context.arch == "riscv":
+            log.warn_once("catch syscall not supported for RISCV")
+            return None
+
         # To avoid multiple breakpoints for the same syscall which may break my way of handling them [27/07/23]
         if name in self.syscall_table:
             log.debug(f"[{self.pid}] there is already a catchpoint for {name}... Overwriting...")
@@ -1769,10 +1778,8 @@ class Debugger:
         """
         if type(location) is int:
             address = location
-            if location < 0x0100000:
+            if location < 0x010000:
                 address += self.base_elf
-            elif location < 0x0200000:
-                log.warn("are you sure you haven't copied the address from ghidra without correctly rebasing the binary ?")
 
         elif type(location) is str:
             function = location
@@ -2275,6 +2282,10 @@ class Debugger:
             log.warn_once("I don't see a libc ! Set dbg.libc = ELF(<path_to_libc>)")
             return 0
         maps = self.libs()
+        if "/usr/bin/qemu" in "".join(maps.keys()):
+            log.warn("I don't know how to access the libraries in qemu :(")
+            self.libc = None
+            return 0
         if len(maps) != 0:
             return maps[self.libc.path]
         else:
@@ -2299,6 +2310,8 @@ class Debugger:
         # Not perfect, but is a first filter
         if "/usr/bin/qemu" in "".join(maps.keys()):
             log.warn("process is running under qemu! I hope you are using pwndbg...")
+            log.warn("I don't know how to access the libraries in qemu :(")
+            self.libc = None
             ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
             data = ansi_escape.sub('', self.execute("vmmap"))
             for line in data.splitlines():
@@ -2377,6 +2390,8 @@ class Debugger:
             return ["eflags", "cs", "ss", "ds", "es", "fs", "gs"]
         elif context.arch == "aarch64":
             return ["cpsr", "fpsr", "fpcr", "vg"]
+        elif context.arch == "riscv":
+            return []
         else:
             raise Exception(f"what arch is {context.arch}")
 
@@ -2389,6 +2404,8 @@ class Debugger:
             return ["eax", "ebx", "ecx", "edx", "edi", "esi", "ebp", "esp", "eip"]
         elif context.arch == "amd64":
             return ["rax", "rbx", "rcx", "rdx", "rdi", "rsi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "rbp", "rsp", "rip"]
+        elif context.arch == "riscv":
+            return [f"t{i}" for i in range(7)] + [f"s{i}" for i in range(12)] + [f"a{i}" for i in range(8)] + ["ra", "gp", "tp", "sp"] + ["pc"]
         else:
             raise Exception(f"what arch is {context.arch}")
 
@@ -2423,6 +2440,8 @@ class Debugger:
             "r13d", "r13w", "r13l",
             "r14d", "r14w", "r14l",
             "r15d", "r15w", "r15l"]
+        elif context.arch == "riscv":
+            return []
         else:
             raise Exception(f"what arch is {context.arch}")
 
@@ -2430,7 +2449,14 @@ class Debugger:
     def next_inst(self):
         inst = next(self.disassemble(self.instruction_pointer, 16)) #15 bytes is the maximum size for an instruction in x64
         inst.toString = partial(lambda self: f"{self.mnemonic} {self.op_str}".strip(), inst)
-        inst.is_call = inst.mnemonic in ["call", "bl"]
+        if context.arch in ["amd64", "i386"]:
+            inst.is_call = inst.mnemonic == "call"
+        elif context.arch == "aarch64":
+            inst.is_call = inst.mnemonic == "bl"
+        elif context.arch == "riscv":
+            inst.is_call = inst.mnemonic == "jal"
+        else:
+            ...
         return inst
 
     # May be usefull for Inner_Debugger
@@ -2442,6 +2468,8 @@ class Debugger:
                 self._capstone = Cs(CS_ARCH_X86, CS_MODE_32)
             elif context.arch == "aarch64":
                 self._capstone = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+            elif context.arch == "riscv":
+                self._capstone = Cs(CS_ARCH_RISCV, CS_MODE_RISCVC) #CS_MODE_RISCV32 if context.bits == 32 else CS_MODE_RISCV64)
             else:
                 raise Exception(f"what arch is {context.arch}")
 
@@ -2457,6 +2485,8 @@ class Debugger:
             return self.eax
         elif context.arch == "aarch64":
             return self.x0 # Not always true
+        elif context.arch == "riscv":
+            return self.a0
         else:
             ...
 
@@ -2468,6 +2498,8 @@ class Debugger:
             self.eax = value
         elif context.arch == "aarch64":
             self.x0 = value # Not always true
+        elif context.arch == "riscv":
+            self.a0 = value # Sometimes a1 is also used
         else:
             ...
 
@@ -2479,6 +2511,8 @@ class Debugger:
         elif context.arch == "i386":
             return self.esp
         elif context.arch == "aarch64":
+            return self.sp
+        elif context.arch == "riscv":
             return self.sp
         else:
             ...
@@ -2492,6 +2526,8 @@ class Debugger:
         elif context.arch == "i386":
             self.esp = value
         elif context.arch == "aarch64":
+            self.sp = value
+        elif context.arch == "riscv":
             self.sp = value
         else:
             ...
@@ -2508,6 +2544,8 @@ class Debugger:
                 self.esp = value
             elif context.arch == "aarch64":
                 self.sp = value
+            elif context.arch == "riscv":
+                self.sp = value
             else:
                 ...
 
@@ -2519,6 +2557,8 @@ class Debugger:
             return self.ebp
         elif context.arch == "aarch64":
             ...
+        elif context.arch == "riscv":
+            ...
         else:
             ...
     
@@ -2529,6 +2569,8 @@ class Debugger:
         elif context.arch == "i386":
             self.ebp = value
         elif context.arch == "aarch64":
+            ...
+        elif context.arch == "riscv":
             ...
         else:
             ...
@@ -2549,6 +2591,8 @@ class Debugger:
                     pwn.log.error("I failed retriving eip! make sure you are using the right context.arch")
             elif context.arch == "aarch64":
                 ans = self.pc
+            elif context.arch == "riscv":
+                ans = self.pc
             else:
                 ...
             if ans == 0:
@@ -2562,6 +2606,8 @@ class Debugger:
         elif context.arch == "i386":
             self.eip = value
         elif context.arch == "aarch64":
+            self.pc = value
+        elif context.arch == "riscv":
             self.pc = value
         else:
             ...
@@ -2587,6 +2633,8 @@ class Debugger:
     def __saved_ip(self):
         if context.arch == "aarch64":
             return self.x30
+        elif context.arch == "riscv":
+            return self.ra
 
         # Doesn't work with qemu [05/07/23]
         elif self.gdb is not None:
