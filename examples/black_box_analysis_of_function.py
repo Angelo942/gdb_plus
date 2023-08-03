@@ -15,14 +15,12 @@ pointer = dbg.alloc(54 * 8)
 # From ghidra we recover the array of possible actions
 for move in [0x00003175, 0x00003e74, 0x000038d9, 0x00001885, 0x00001cdb, 0x000029e5, 0x00002da9, 0x00002131, 0x0000258b, 0x000027b8, 0x0000235e, 0x00002f8f, 0x00002bc7, 0x00001f06, 0x00001ab0, 0x00003b9d, 0x0000437c, 0x00003527]:
 	# We mark each element of our cube in order
-	for i in range(54):
-		dbg.write(pointer+i*8, p64(i))
+	dbg.write_longs(pointer, list(range(54)))
 	# The binary is PIE so we calculate the real address of the function
-	function_address = dbg.base_elf + move
 	# Call the function with pointer as argument
-	dbg.call(function_address, [pointer])
+	dbg.call(move, [pointer])
 	print(f"results for function {hex(move)}")
 	for i in range(54):
 		# Read how the cube has been modified
 		print(f"{i} -> {u64(dbg.read(pointer+i*8, 8))}")
-dbg.close()
+dbg.close()	

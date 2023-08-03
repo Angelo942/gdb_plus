@@ -24,23 +24,23 @@ CHECK_CALL = 0x0401341
 dbg.breakpoint(CHECK_CALL, temporary=True)
 
 # Continue the execution
-dbg.cont()
+done = dbg.until(CHECK_CALL, wait=False)
 dbg.p.sendline(b"serial_a_caso")
 # Wait for the process to reach our breakpoint on CHECK_CALL
-dbg.wait() 
+done.wait()
 
 # We step inside the funciton
 dbg.step()
 
 # We set a flag to know if the previous instruction was a int3
 dbg.call_signal = False
-code = Queue()
-code.put(b"")
+code = b""
 
 def callback(dbg):
+	global code
 	if dbg.call_signal:
 		## Save the address we are at
-		#my_instruction_pointer.put(dbg.ip)
+		#my_instruction_pointer.put(dbg.rip)
 		# Send the signal to the process
 		dbg.signal("SIGUSR1", handler=HANDLER_RET)
 		## Wait for the handler to decrypt the code and return to our function
@@ -50,10 +50,10 @@ def callback(dbg):
 	if ni.mnemonic == "int3":
 		dbg.call_signal = True
 		# We nop the signal even if it isn't needed
-		dbg.write(dbg.ip, b"\x90")
+		dbg.write(dbg.rip, b"\x90")
 	print(ni.toString())
 	# Save the code executed
-	code.put(code.get() + ni.bytes)
+	code += ni.bytes
 
 # Advance step by step and call callback each time
 dbg.step_until_ret(callback)

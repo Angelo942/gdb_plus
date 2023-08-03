@@ -34,43 +34,83 @@ class user_regs_struct:
 # Only works to read and set the arguments of the CURRENT function
 class Arguments:
     def __init__(self, dbg):
+        # Do we want to cache the registers and part of the stack ?
+        # It would require to delete it when we execute an action
         self.dbg = dbg
 
     def __getitem__(self, index: int):
         assert type(index) is int, "I can't handle slices to access multiple arguments"
         self.dbg.restore_arch()
-        if context.bits == 64:
-            if index < 6:
-                register = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"][index]
-                log.debug(f"argument {index} is in register {register}")
-                return getattr(self.dbg, register)
-            else:
-                index -= 6
-        if self.dbg.next_inst.toString() in ["endbr64", "push rbp", "push ebp"]:
-            pointer = self.dbg.stack_pointer + (index + 1) * context.bytes
-        elif self.dbg.next_inst.toString() in ["mov rbp, rsp", "mov ebp, esp"]:
-            pointer = self.dbg.stack_pointer + (index + 2) * context.bytes
+        calling_convention = function_calling_convention[context.arch]
+        if index < len(calling_convention):
+            register = calling_convention[index]
+            log.debug(f"argument {index} is in register {register}")
+            return getattr(self.dbg, register)
         else:
-            pointer = self.dbg.base_pointer + (index + 2) * context.bytes
-        return self.dbg.read(pointer, context.bytes)
+            index -= calling_convention
+        # It would be better to force the user to save the arguments at the entry point and read them later instead... [25/07/23]
+        if context.arch in ["amd64", "i386"]:
+            if self.dbg.next_inst.toString() in ["endbr64", "push rbp", "push ebp"]:
+                pointer = self.dbg.stack_pointer + (index + 1) * context.bytes
+            elif self.dbg.next_inst.toString() in ["mov rbp, rsp", "mov ebp, esp"]:
+                pointer = self.dbg.stack_pointer + (index + 2) * context.bytes
+            else:
+                pointer = self.dbg.base_pointer + (index + 2) * context.bytes
+            return self.dbg.read(pointer, context.bytes)
+        elif context.arch == "aarch64":
+            pointer = self.dbg.stack_pointer + index * context.bytes
+            return self.dbg.read(pointer, context.bytes)
+
 
     # How do we handle pushes ? Do I only write arguments when at the begining of the function and give up on using this property to load arguments before a call ?
     # Only valid for arguments already set
     def __setitem__(self, index, value):
         self.dbg.restore_arch()
-        if context.bits == 64:
-            if index < 6:
-                register = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"][index]
-                return setattr(self.dbg, register, value)
-            else:
-                index -= 6
-        if self.dbg.next_inst.toString() in ["endbr64", "push rbp", "push ebp"]:
-            pointer = self.dbg.stack_pointer + (index + 1) * context.bytes
-        elif self.dbg.next_inst.toString() in ["mov rbp, rsp", "mov ebp, esp"]:
-            pointer = self.dbg.stack_pointer + (index + 2) * context.bytes
+        calling_convention = function_calling_convention[context.arch]
+        if index < len(calling_convention):
+            register = calling_convention[index]
+            log.debug(f"argument {index} is in register {register}")
+            return setattr(self.dbg, register, value)
         else:
-            pointer = self.dbg.base_pointer + (index + 2) * context.bytes
-        return self.dbg.write(pointer, pack(value))
+            index -= calling_convention
+        if context.arch in ["amd64", "i386"]:
+            if self.dbg.next_inst.toString() in ["endbr64", "push rbp", "push ebp"]:
+                pointer = self.dbg.stack_pointer + (index + 1) * context.bytes
+            elif self.dbg.next_inst.toString() in ["mov rbp, rsp", "mov ebp, esp"]:
+                pointer = self.dbg.stack_pointer + (index + 2) * context.bytes
+            else:
+                pointer = self.dbg.base_pointer + (index + 2) * context.bytes
+            return self.dbg.write(pointer, pack(value))
+        elif context.arch == "aarch64":
+            pointer = self.dbg.stack_pointer + index * context.bytes
+            return self.dbg.write(pointer, context.bytes)
+
+class Arguments_syscall:
+    def __init__(self, dbg):
+        self.dbg = dbg
+
+    def __getitem__(self, index: int):
+        assert type(index) is int, "I can't handle slices to access multiple arguments"
+        self.dbg.restore_arch()
+        calling_convention = syscall_calling_convention[context.arch][1:] # The first one would have been the sys_num
+        if index < len(calling_convention):
+            register = calling_convention[index]
+            log.debug(f"argument {index} is in register {register}")
+            return getattr(self.dbg, register)
+        else:
+            raise Exception(f"We don't have {index + 1} arguments in a syscall!")
+
+    # How do we handle pushes ? Do I only write arguments when at the begining of the function and give up on using this property to load arguments before a call ?
+    # Only valid for arguments already set
+    def __setitem__(self, index, value):
+        self.dbg.restore_arch()
+        calling_convention = function_calling_convention[context.arch]
+        if index < len(calling_convention):
+            register = calling_convention[index]
+            log.debug(f"argument {index} is in register {register}")
+            return setattr(self.dbg, register, value)
+        else:
+            raise Exception(f"We don't have {index + 1} arguments in a syscall!")
 
 # Warning. Calling wait() before clear() returns immediatly!
 # TODO add a counter on when to stop treating return False as continues
@@ -167,12 +207,18 @@ class MyLock:
         self.counter = 0
         # prevent bugs with the counter ? [12/06/23]
         self.__lock = Lock()
+        # Block from ptrace (strict interrupt)
+        # I'm not sure if it makes sense. Maybe in the interrupt strict after having removed the lock there.
+        #self.can_run = Event()
+        #self.can_run.set()
+
 
     def log(self, function_name):
-        log.debug(f"[{self.owner.pid}] wrapping {function_name}")
+        #log.debug(f"[{self.owner.pid}] wrapping {function_name}")
         return self
 
     def __enter__(self):
+        #self.can_run.wait()
         with self.__lock:
             self.event.clear()
             self.counter += 1
@@ -182,6 +228,7 @@ class MyLock:
         with self.__lock:
             log.debug(f"[{self.owner.pid}] exiting lock with level {self.counter}")
             self.counter -= 1
+            # What about if we want to interrupt a continue until ? [21/06/23]
             if self.counter == 0:
                 self.event.set()
         
@@ -228,3 +275,13 @@ SIGNALS = {
 
 SIGNALS_from_num = ["I DON'T KNOW", "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SIGTRAP", "SIGABRT", "SIGBUS", "SIGFPE", "SIGKILL", "SIGUSR1", "SIGSEGV", "SIGUSR2", "SIGPIPE", "SIGALRM", "SIGTERM", "SIGSTKFLT", "SIGCHLD",   "SIGCONT", "SIGSTOP", "SIGTSTP", "SIGTTIN", "SIGTTOU", "SIGURG", "SIGXCPU", "SIGXFSZ", "SIGVTALRM", "SIGPROF", "SIGWINCH", "SIGPOLL", "SIGPWR", "SIGSYS"]
 
+## SHELLCODES
+# test: nop; jmp test / nop; b 0x0
+shellcode_sleep = {"amd64": b"\x90\xeb\xfe", "i386": b"\x90\xeb\xfe", "aarch64": b'\x1f \x03\xd5\x00\x00\x00\x14'}
+# syscall / int 0x80 / svc #0
+shellcode_syscall = {"amd64": b"\x0f\x05", "i386": b"\xcd\x80", "aarch64": b'\x01\x00\x00\xd4'}
+# First register is where to save the syscall num
+syscall_calling_convention = {"amd64": ["rax", "rdi", "rsi", "rdx", "r10", "r8", "r9"], "i386": ["rax", "ebx", "ecx", "edx", "esi", "edi", "ebp"], "aarch64": ["x8", "x0", "x1", "x2", "x3", "x4", "x5"]}
+function_calling_convention = {"amd64": ["rdi", "rsi", "rdx", "rcx", "r8", "r9"], "i386": [], "aarch64": [f"x{i}" for i in range(0, 8)]}
+return_instruction = {"amd64": b"\xc3", "i386": b"\xc3", "aarch64": b'\xc0\x03_\xd6'}
+nop = {"amd64": b"\x90", "i386": b"\x90", "aarch64": b""}

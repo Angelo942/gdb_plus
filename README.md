@@ -70,7 +70,7 @@ Calling your script with pwntools arguments `NOPTRACE` or `REMOTE` will allow yo
 Debugger can also take as parameter a dictionary for the environment variables. You CAN use it to preload libraries, but if you want to do it for the libc I would advise to **patch the rpath** of the binary instead (if you don't know how take a look at [spwn](https://github.com/MarcoMarce) or [pwninit](https://github.com/io12/pwninit). This will prevent problems when running `system("/bin/sh")` that will fail due to LD_PRELOAD and may hide other problems in your exploit.
 
 **Warning**  
-Old versions of gdbserver (< 11.0.50) have problems launching 32bit binaries. If you see a crash trying to find the canary use `from_start=False` as parameter for the debugger. This will launch the process and then attach to it once the memory has been correctly mapped
+Old versions of gdbserver (< 11.0.50) have problems launching 32bit binaries. If you see a crash trying to find the canary use `from_start=False` as parameter for the debugger. This will launch the process and then attach to it once the memory has been correctly mapped. Letting `from_start=True` may also cause problems if the environment variables are important to your exploit since they will be mixed with some set up by gdbserver.
 
 ## Control Flow
 
@@ -173,9 +173,6 @@ print(pointer_to_secret.get())
 dbg.delete_breakpoint("main+0x124")
 ```
 
-## Memory access
-
-All registers are accessible as properties
 **Warning**
 You can script anything inside your callbacks, but be careful not to break the execution flow of your script. A putting a callback with `finish()` inside a function you are stepping over with `ni()` may cause problems. The alternative would be to set a second callback on the return_pointer of your function.  
 
@@ -303,16 +300,25 @@ Since libdebug isn't on PyPI yet we could't include it in the dependencies.
 You can install it manually:
 `pip3 install git+https://github.com/Angelo942/libdebug.git@parallel`
 
-# TODO
+## AARCH64
+Arm binaries ar now partially supported. The problem running them in qemu is that we can't access the pid of the process from gdb and we can't catch when the process forks. This limits the feature we can use, but the rest is working fine.
 
+**Note**
+* set context.arch == "aarch64" at the beggining of your script
+* pwndbg may be better than GEF when using qemu. In particular if you find gdb always debugging qemu instead of your process and you are sure you set the correct context you may want to try switching to pwndbg for this part.
+
+# TODO
+* Distinguish between process running and dead
 * Identify actions performed manually in gdb (overwrite finish and ni)
-* Handle fork and ptrace from syscall instead of libc
 * Improve ptrace emulation
-    * register waitpid return value
-* Stack multiple callbacks on the same breakpoint
-* handle Hardware breakpoint
-* support ARM binaries
+    * handle waitpid(-1) with multiple slaves
+    * emulate waitid too
+* improve support ARM binaries
+    * how to specify libraries ? (-L /usr/aarch64-linux-gnu)
+    * features for native arch
+    * arm 32 bit
 * support multithread applications
-* setup gdbinit for forked processes
 * catch sigsegv as an exit instead of user interaction
 * enable signal() with libdebug
+* force parent or child to stop tracing
+* wrap follow-child
