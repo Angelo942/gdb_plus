@@ -11,6 +11,7 @@ from collections import defaultdict
 from queue import Queue
 from math import ceil
 from multiprocessing import Process, Event as p_Event, Queue as p_Queue, cpu_count
+import re
 
 #import logging
 
@@ -36,13 +37,13 @@ def lock_decorator(func):
 
 class Debugger:
     # If possible patch the rpath (spwn and pwninit do it automatically) instead of using env to load the correct libc. This will let you get a shell not having problems trying to preload bash too
-    def __init__(self, target: [int, process, str, list], env={}, aslr:bool=True, script:str="", from_start:bool=True, binary:str=None, debug_from: int=None, timeout: int=0.5):
+    def __init__(self, target: [int, process, str, list], env={}, aslr:bool=True, script:str="", from_start:bool=True, binary:str=None, debug_from: int=None, timeout: int=0.5, base_elf=None):
         log.debug(f"debugging {target if binary is None else binary} using arch: {context.arch} [{context.bits}bits]")
 
         self._capstone = None #To decompile assembly for next_inst
         self._auxiliary_vector = None #only used to locate the canary
         self._base_libc = None
-        self._base_elf = None
+        self._base_elf = base_elf
         self._canary = None
         self._args = None
         self._sys_args = None
@@ -722,7 +723,10 @@ class Debugger:
     @property
     def _stop_reason(self) -> str:
         if self.gdb is not None:
-            res = self.gdb.execute("info program", to_string=True).splitlines()
+            try:
+                res = self.gdb.execute("info program", to_string=True).splitlines()
+            except:
+                return "NOT RUNNING"
             if not res:
                 return "NOT RUNNING"
 
@@ -967,6 +971,7 @@ class Debugger:
 
         if wait:
             done.wait()
+            return self
         else:
             return done
 
@@ -1764,9 +1769,9 @@ class Debugger:
         """
         if type(location) is int:
             address = location
-            if location < 0x010000:
+            if location < 0x0100000:
                 address += self.base_elf
-            elif location < 0x020000:
+            elif location < 0x0200000:
                 log.warn("are you sure you haven't copied the address from ghidra without correctly rebasing the binary ?")
 
         elif type(location) is str:
@@ -2233,6 +2238,7 @@ class Debugger:
         return maps
 
     # I copied it from pwntools to have access to it even if I attach directly to a pid
+    # The problem is that with qemu we get the addresses in qemu and not in the virtual memory... [01/08/23]
     def libs(self):
         """libs() -> dict
         Return a dictionary mapping the path of each shared library loaded
@@ -2290,8 +2296,19 @@ class Debugger:
     # Wrong for qemu
     def get_base_elf(self):
         maps = self.libs()
+        # Not perfect, but is a first filter
+        if "/usr/bin/qemu" in "".join(maps.keys()):
+            log.warn("process is running under qemu! I hope you are using pwndbg...")
+            ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+            data = ansi_escape.sub('', self.execute("vmmap"))
+            for line in data.splitlines():
+                if self.elf.path.split("/")[-1] in line:
+                    return int(line.strip().split()[0], 16)
+            raise Exception("can't find binary address")
+
         if len(maps) != 0:
             return maps[self.elf.path]
+        
         else:
             log.warn("I can't access /proc/%d/maps", self.pid)
             # The following part doesn't work properly [28/02/23]
