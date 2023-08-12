@@ -432,6 +432,9 @@ class Debugger:
 
         self.myStopped.pid = self.pid
         self.__test_debugger()
+        if self.pwndbg:
+            # because for some reason they set the child...
+            self.execute("set follow-fork-mode parent")        
 
     def __setup_libdebug(self):
         self.libdebug.handle_stop = self.__stop_handler_libdebug
@@ -2762,9 +2765,6 @@ class Debugger:
                 
         else:
             self.execute("set detach-on-fork off")
-            if self.pwndbg:
-                # because for some reason they set the child...
-                self.execute("set follow-fork-mode parent")
 
             # The interrupt may give me problems with continue_until
             def fork_handler(event):
