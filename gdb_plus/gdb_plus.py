@@ -95,6 +95,7 @@ class Debugger:
 
         if args.REMOTE or context.noptrace:
             self.debugging = False
+            self.children = defaultdict(lambda: self)
         else:
             self.debugging = True
 
@@ -442,7 +443,7 @@ class Debugger:
 
     # È già successo che wait ritorni -1 e crashi libdebug [08/05/23]
     # Legacy callbacks won't be transfered over... It's really time to get rid of them [21/05/23]
-    def migrate(self, *, gdb=False, libdebug=False):
+    def migrate(self, *, gdb=False, libdebug=False, script=""):
         if not self.debugging:
             log.warn_once(DEBUG_OFF)
             return
@@ -456,7 +457,7 @@ class Debugger:
             log.debug("migrating to gdb")
             self.libdebug = None
             self.detached  = False
-            _, self.gdb = pwn.gdb.attach(self.pid, api=True)
+            _, self.gdb = pwn.gdb.attach(self.pid, gdbscript=script, api=True)
             self.__setup_gdb()
             # Catch SIGSTOP
             address = self.instruction_pointer
@@ -2725,6 +2726,10 @@ class Debugger:
             interrupt: stop parent when forking
 
         """
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+            return self
+
         if off:
             self.execute("set detach-on-fork on")
             #if self.symbols["fork"] in self.breakpoints:
@@ -2798,6 +2803,10 @@ class Debugger:
     def emulate_ptrace(self, *, off=False, wait_fun="waitpid", wait_syscall="wait4", manual=False, silent=False, signals = ["SIGSTOP"], syscall=False):
         self.restore_arch()
 
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+            return self
+        
         if off:
             if self.ptrace_syscall:
                 log.warn("I still don't know how to disable the emulation with syscall")
