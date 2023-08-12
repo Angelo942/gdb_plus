@@ -1,5 +1,7 @@
 DBG+ 6.4.2:
 * handle NOPTRACE for emulate_ptrace and split_on_fork
+* NOP instructions
+
 
 DBG+ 6.4.1: syscalls
 * Set handlers for syscalls

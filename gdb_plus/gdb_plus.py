@@ -2243,6 +2243,18 @@ class Debugger:
             #I know it's not perfect, but damn I don't want to implement a heap logic for the bss ahahah
             #Just use the heap if you can
 
+    def nop(self, address, instructions = 1):
+        self.restore_arch()
+        address = self.parse_address(address)
+        code = self.disassemble(address, instructions*10)
+        size = 0
+        for i in range(instructions):
+            size += next(code).size
+        backup = self.read(address, size)
+        self.write(address, nop[context.arch] * (size // len(nop[context.arch])))
+        return backup
+
+
     # Quick attempt to find maps
     @property
     def maps(self):
