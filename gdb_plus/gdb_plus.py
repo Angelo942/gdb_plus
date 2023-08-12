@@ -2096,6 +2096,7 @@ class Debugger:
     # Names should be singular or plurals ? I wanted singular for read and plural for write but it should be consistent [02/06/23]
     # I assume little endianess [02/06/23]
     def read_ints(self, address: int, n: int) -> list:
+        address = self.parse_address(address)
         data = self.read(address, n*4)
         return [u32(data[i*4:(i+1)*4]) for i in range(n)]
     
@@ -2103,6 +2104,7 @@ class Debugger:
         return self.read_ints(address, 1)[0]
 
     def read_longs(self, address: int, n: int) -> list:
+        address = self.parse_address(address)
         data = self.read(address, n*8)
         return [u64(data[i*8:(i+1)*8]) for i in range(n)]
 
@@ -2111,6 +2113,7 @@ class Debugger:
 
     # Should we return the null bytes ? No, consistent with write_strings [02/06/23]
     def read_strings(self, address: int, n: int) -> list:
+        address = self.parse_address(address)
         chunk = 0x100
         data = b""
         i = 0
@@ -2126,6 +2129,8 @@ class Debugger:
         data = b"".join([p32(x) for x in values])
         if address is None:
             address = self.alloc(len(data), heap=heap)
+        else:
+            address = self.parse_address(address)
         self.write(address, data)
         return address
 
@@ -2136,6 +2141,8 @@ class Debugger:
         data = b"".join([p64(x) for x in values])
         if address is None:
             address = self.alloc(len(data), heap=heap)
+        else:
+            address = self.parse_address(address)
         self.write(address, data)
         return address
 
@@ -2146,6 +2153,8 @@ class Debugger:
         data = b"\x00".join(values) + b"\x00"
         if address is None:
             address = self.alloc(len(data), heap=heap)
+        else:
+            address = self.parse_address(address)
         self.write(address, data)
         return address
 
