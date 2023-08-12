@@ -2724,6 +2724,15 @@ class Debugger:
         child.write(ip, backup)
         log.debug("shellcode patched")
         child.jump(ip)
+
+        # GEF puts a breakpoint after the fork...
+        if self.gdb is not None and self.gef:
+            bps = child.gdb.breakpoints()
+            if len(bps) > 0:
+                bp = bps[-1]
+                if bp.location == "*" + hex(child.instruction_pointer + 1):
+                    bp.delete()
+        
         return child  
     
     # entrambi dovrebbero essere interrotti, il parent alla fine di fork, il child a metà
