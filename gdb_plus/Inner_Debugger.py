@@ -24,6 +24,7 @@ class Inner_Debugger:
         # We could change the ptrace emulation too, but for know we are going fast enough [31/05/23]
         #self.__registers = None
         self.__pointer_registers = None
+        self._status_pointer = None #self.dbg.alloc(4)
 
         self.dbg.restore_arch()
 
@@ -201,11 +202,12 @@ class Inner_Debugger:
             self.step()
 
     def wait(self):
-        status_pointer = self.dbg.alloc(4)
+        if self._status_pointer is None:
+            self._status_pointer = self.dbg.alloc(4)
+        status_pointer = self._status_pointer
         self.dbg.call("waitpid", [self.pid, status_pointer, 0x40000000, 0])
         
         log.debug(f"wait finished with status: {hex(u32(self.dbg.read(status_pointer, 4)))}")
-        self.dbg.dealloc(status_pointer)
         
         # be carefull that INT3 is executed as an instruction! You have to back down if you did hit a breakpoint
         ip = self.instruction_pointer - 1
