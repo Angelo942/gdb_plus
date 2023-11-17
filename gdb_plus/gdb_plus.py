@@ -60,6 +60,11 @@ class Debugger:
         self.gef = False
         self.pwndbg = False
 
+        self._backup_p = None
+        self.r = None
+        self._host = None
+        self._port = 0
+
         # Ptrace_cont
         self.out_of_breakpoint = Event()
         self.ptrace_emulated = False
@@ -565,9 +570,26 @@ class Debugger:
         """
         Define the connection to use when the script is called with argument REMOTE
         """
+        self._host = host
+        self._port = port
         if args.REMOTE:
             self.p = remote(host, port)
         return self
+
+    def connect(*, overwrite=True):
+        """
+        Connect to remote server while keeping debugger active.
+        if overwrite is False self.p will be preserved and the connection will be saved on self.r instead 
+        """
+        if self._host is None:
+            raise Exception("host not set!")
+
+        if overwrite:
+            self._backup_p = self.p # Just make sure the connection doesn't die
+            self.p = remote(self._host, self._port)
+        else:
+            self.r = remote(self._host, self._port)
+
 
     def detach(self, quit = True, block = False):
         if not self.debugging:
@@ -613,6 +635,10 @@ class Debugger:
         # Can't close the process if I just attached to the pid
         if self.p:
             self.p.close()
+        if self.r is not None:
+            self.r.close()
+        if self._backup_p is not None:
+            self._backup_p.close()
 
     # Now we may have problems if the user try calling it...
     # should warn to use execute_action and wait if they are doing something that will let the process run
