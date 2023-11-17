@@ -2226,6 +2226,9 @@ class Debugger:
         -------
         pointer
         """
+        if heap and "malloc" not in self.symbols:
+            log.warn("Can not find malloc. Data will be allocated on the BSS!")
+            heap = False
 
         if heap:
             if self.gdb is not None:

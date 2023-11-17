@@ -3,6 +3,7 @@ DBG+ 6.4.2:
 * NOP instructions
 * hotfix disable lock.log with NOPTRACE
 * hotfix Removed buffer overflow in `__convert_args`
+* Assert that malloc is present before trying to allocate on heap
 
 DBG+ 6.4.1: syscalls
 * Set handlers for syscalls
