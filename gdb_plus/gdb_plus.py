@@ -116,6 +116,7 @@ class Debugger:
             self.pid = target
             assert binary is not None, "I need a file to work from a pid" # Not really... Let's keep it like this for now, but continue assuming we don't have a real file
             self.elf = ELF(binary, checksec=False)
+            # We may want to run the script only at the end in case the user really insists on putting a continue in it. [17/11/23]
             _, self.gdb = gdb.attach(target, gdbscript=script, api=True)
 
         elif type(target) is process:
@@ -3465,6 +3466,9 @@ class Debugger:
             super().__setattr__(name, value)
 
     def __repr__(self) -> str:
+        # I'm afraid it may crash if used with remote [17/11/23]
+        if self.pid is None:
+            return super().__repr__()
 
         if self.closed.is_set():
             msg = "<exited>"
