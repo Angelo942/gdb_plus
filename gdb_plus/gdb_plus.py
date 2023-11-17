@@ -437,8 +437,11 @@ class Debugger:
 
         # I still don't know how to disable it to let ptrace_emulate work in peace [26/07/23]
         def callback_ptrace(self, entry):
-            log.warn_once(f"THE PROCESS [{self.pid}] USES PTRACE!")
+            if entry:
+                log.warn_once(f"THE PROCESS [{self.pid}] USES PTRACE!")
             # Do we also want to delete the breakpoint once we know we are using ptrace ? [13/08/23]
+            else:
+                self.delete_catch("ptrace")        
             return False
         self.catch_syscall("ptrace", callback_ptrace)
 
@@ -1811,7 +1814,20 @@ class Debugger:
             self.syscall_table[name] = num
             self.syscall_breakpoints[num] = callback
 
+        return self
+
     handle_syscall = catch_syscall
+
+    def delete_catch(self, name: str):
+        self._logger.debug("deleting syscall %s", name)
+        try:
+            bp = self.syscall_table.pop(name)
+        except KeyError:
+            log.warn("syscall %s is not being catched", name)
+            return
+        self.syscall_breakpoints.pop(bp)
+        self.execute(f"delete {bp}")
+        return self
 
     # TODO take a library for relative addresses like libdebug
     def parse_address(self, location: [int, str]) -> str:
