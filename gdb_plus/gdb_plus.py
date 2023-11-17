@@ -428,7 +428,8 @@ class Debugger:
         # I still don't know how to disable it to let ptrace_emulate work in peace [26/07/23]
         def callback_ptrace(self, entry):
             log.warn_once(f"THE PROCESS [{self.pid}] USES PTRACE!")
-            return SKIP_SYSCALL
+            # Do we also want to delete the breakpoint once we know we are using ptrace ? [13/08/23]
+            return False
         self.catch_syscall("ptrace", callback_ptrace)
 
         # Manually set by split_child
@@ -951,6 +952,7 @@ class Debugger:
             wont_use_this_priority = self.execute_action("", sender="continue just to reset the wait")
             # I don't trust the previous priority, while the first one should be safe
             self.priority_wait(comment="continue_until", priority = priority + 1)
+            # TODO check that the process didn't exit. [21/10/23]
         self.lower_priority("avoid race condition in continue until")
         done.set()
 
@@ -1136,6 +1138,7 @@ class Debugger:
         self.ptace_can_continue.clear()
 
     # TODO make sure the slave didn't stop for a user breakpoint !
+    # Handle all options: https://stackoverflow.com/questions/21248840/example-of-waitpid-in-use
     def wait_slave(self, options=0x40000000):
         if options == 0x1: # WHNOHANG
             log.info("waitpid WNOHANG! Won't stop")
@@ -1185,6 +1188,7 @@ class Debugger:
         os.kill(self.pid, signal.SIGINT)
         self.priority_wait(comment="interrupt", priority = priority)
         # For now it will be someone else problem the fact that we sent the SIGINT when we arived on a breakpoint or something similar. [21/07/23] Think about how to catch it without breaking the other threads that are waiting
+        # TODO check that we did indeed took over the control [17/10/23] (BUG interrupt while reading doesn't work)
         if self._stop_reason != "SIGINT":
             # Catch del SIGINT
             log.debug("We hit a breakpoint before the SIGINT... I will continue stepping to catch them.")
@@ -1317,6 +1321,7 @@ class Debugger:
             log.warn_once(f"I made {limit} steps and haven't reached the address you are looking for...")
             return -1
 
+    # May be wrong for RISC-V
     def step_until_ret(self, callback=None, limit:int=10_000) -> int:
         """
         step until the end of the function
@@ -2106,6 +2111,7 @@ class Debugger:
         if pid is not None:
             ...
 
+    # Do we want to handle here that if address is none we allocate ourself a pointer ? [17/11/23]
     def write(self, address: int, byte_array: bytes, *, inferior = None, pid = None):
         if inferior is not None:
             pid = inferior.pid
