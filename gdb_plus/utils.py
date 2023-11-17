@@ -218,6 +218,8 @@ class MyLock:
         return self
 
     def __enter__(self):
+        if not self.owner.debugging:
+            return
         #self.can_run.wait()
         with self.__lock:
             self.event.clear()
@@ -225,6 +227,8 @@ class MyLock:
             log.debug(f"[{self.owner.pid}] entering lock with level {self.counter}")
 
     def __exit__(self, exc_type, exc_value, exc_traceback):
+        if not self.owner.debugging:
+            return
         with self.__lock:
             log.debug(f"[{self.owner.pid}] exiting lock with level {self.counter}")
             self.counter -= 1
