@@ -2157,6 +2157,12 @@ class Debugger:
     def read_long(self, address: int) -> int:
         return self.read_longs(address, 1)[0]
 
+    def read_pointers(self, address: int, n: int) -> list:
+        return self.read_longs(address, n) if context.bits == 64 else self.read_int(address, n)
+    
+    def read_pointer(self, address: int) -> int:
+        return self.read_pointers(address, 1)[0]
+
     # Should we return the null bytes ? No, consistent with write_strings [02/06/23]
     def read_strings(self, address: int, n: int) -> list:
         address = self.parse_address(address)
@@ -2204,6 +2210,12 @@ class Debugger:
         """
         values = [value.encode() if type(value) is str else value for value in values]
         data = b"\x00".join(values) + b"\x00" # Better be safe than sorry. We are working with strings anyway, so who cares if we have one more byte [21/10/23]
+    def write_pointers(self, address: int, values: list, *, heap = True) -> list:
+        return self.write_longs(address, values, heap = heap) if context.bits == 64 else self.write_int(address, values, heap = heap)
+    
+    def write_pointer(self, address: int, value: int, *, heap = True) -> int:
+        return self.write_pointers(address, [value], heap = heap)
+
         if address is None:
             address = self.alloc(len(data), heap=heap)
         else:

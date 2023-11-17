@@ -6,6 +6,7 @@ DBG+ 6.4.2:
 * Assert that malloc is present before trying to allocate on heap
 * Option to connect to remote server while debugging localy
 * Migrate to logging library 
+* read pointers based on context
 
 DBG+ 6.4.1: syscalls
 * Set handlers for syscalls
