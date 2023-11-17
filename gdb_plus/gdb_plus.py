@@ -3458,3 +3458,8 @@ class Debugger:
             msg = f"<not running> {hex(self.instruction_pointer)}:{self.next_inst.toString()} [{self._stop_reason}]"
         return "Debugger [{:d}] {:s}".format(self.pid, msg)
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
