@@ -1540,7 +1540,7 @@ class Debugger:
                     log.warn_once("I'm calling malloc to save your data. Use heap=False if you want me to save it in the BSS (experimental)")
                 pointer = self.alloc(len(arg), heap=heap) # I should probably put the null byte only for string in case I have to pass a structure...
                 to_free.append((pointer, len(arg))) #I include the length to virtually clear the bss too if needed (I won't set it to \x00 though)
-                self.write(pointer, arg + b"\x00")
+                self.write(pointer, arg)
                 arg = pointer
 
             parsed_args.append(arg)
