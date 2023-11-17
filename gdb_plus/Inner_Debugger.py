@@ -4,9 +4,13 @@ from time import sleep
 from functools import partial
 from capstone import Cs, CS_ARCH_X86
 from gdb_plus.utils import Inner_Breakpoint
+import logging
 
-#import logging
-#log = logging.getLogger("gdb_plus-inner_debugger")
+logger = logging.getLogger("gdb_plus-inner_debugger")
+ch = logging.StreamHandler()
+formatter = logging.Formatter("%(name)s:%(funcName)s:%(message)s")
+ch.setFormatter(formatter)
+logger.addHandler(ch)
 
 INT3 = b"\xcc"
 constants.PTRACE_GETREGS = 0xc
@@ -29,6 +33,9 @@ class Inner_Debugger:
         self.dbg.restore_arch()
 
         assert context.arch == "amd64", f"{context.arch} is not supported for Inner_Debugger"
+
+        self.logger = logging.getLogger(f"inner-debugger [{self.pid}]")
+        self.logger.addHandler(ch)
 
     def get_regs(self):
         registers = user_regs_struct()
@@ -104,6 +111,7 @@ class Inner_Debugger:
 
     # Per evitare chiamate ciclice provando a gestire i breakpoints
     def _cont(self, wait = False):
+        self.logger.debug("continue")
         self.dbg.call("ptrace", [constants.PTRACE_CONT, self.pid, 0, 0])
         if wait:
             self.wait()
@@ -114,6 +122,7 @@ class Inner_Debugger:
         if until is not None:
             log.warn_once("dbg.cont(until=ADDRESS) is deprecated, use dbg.continue_until(ADDRESS) instead!")  
             self.continue_until(until)  
+        self.logger.debug("stepping before continue")
         self.step()
         # Wait, handle the case where breakpoints are temporary!! [26/05/23]
         # This can't work with libdebug...
@@ -134,15 +143,14 @@ class Inner_Debugger:
         address = self.dbg.parse_address(location)
         if address == ip:
             if not loop:
-                if DEBUG:
-                    log.debug(f"I'm already at {self.dbg.reverse_lookup(address)}")
-                    log.warn_once("Be careful that the default behaviour changed. Use loop=True if you want to continue anyway")
+                self.logger.debug(f"I'm already at {self.dbg.reverse_lookup(address)}")
+                log.warn_once("Be careful that the default behaviour changed. Use loop=True if you want to continue anyway")
             else:
                 self.step()
         self.b(address, temporary=True)
         self.cont(wait=True)
         if address != self.instruction_pointer:
-            log.critical(f"couldn't reach address {hex(address)}. Stopped at address {hex(self.instruction_pointer)} instead")
+            self.logger.critical("couldn't reach address 0x%x. Stopped at address 0x%x instead", address, self.instruction_pointer)
 
     until = continue_until
 
@@ -162,17 +170,23 @@ class Inner_Debugger:
 
     def _restore_breakpoint(self, address):
         if address in self.breakpoints:
+            self.logger.debug("activating breakpoint 0x%x", address)
             byte = self.read_memory(address, 1)
             if byte == 0xcc:
                 print("breakpoint already present")
             self.breakpoints[address].byte = byte
             self.write_memory(address, INT3)
+        else:
+            self.logger.debug("no breakpoint at 0x%x", address)
 
 
     def _disable_breakpoint(self, address):
         if address in self.breakpoints:
+            self.logger.debug("disableling breakpoint 0x%x", address)
             self.write_memory(address, self.breakpoints[address].byte)
-    
+        else:
+            self.logger.debug("no breakpoint at 0x%x", address)
+
     def _disable_breakpoints(self):
         for address, breakpoint in self.breakpoints.items():
             self.write_memory(address, breakpoint.byte)
@@ -187,7 +201,9 @@ class Inner_Debugger:
         constants.PTRACE_SINGLESTEP = 0x9
         ip = self.instruction_pointer
         self._disable_breakpoint(ip)
+        self.logger.debug("stepping")
         self.dbg.call("ptrace", [constants.PTRACE_SINGLESTEP, self.pid, 0, 0])
+        # For some reason any call with dbg will just step and wait indefinitely [31/07/23]
         self.wait()
         self._restore_breakpoint(ip)
 
@@ -195,6 +211,7 @@ class Inner_Debugger:
         ip = self.instruction_pointer
         inst = self.next_inst
         if inst.mnemonic == "call":
+            self.logger.debug("next inst is call, will continue instead of stepping")
             self._disable_breakpoint(ip)
             self.until(ip + inst.size)
             self._restore_breakpoint(ip)
@@ -206,8 +223,8 @@ class Inner_Debugger:
             self._status_pointer = self.dbg.alloc(4)
         status_pointer = self._status_pointer
         self.dbg.call("waitpid", [self.pid, status_pointer, 0x40000000, 0])
-        
-        log.debug(f"wait finished with status: {hex(u32(self.dbg.read(status_pointer, 4)))}")
+        self.stop_status = u32(self.dbg.read(status_pointer, 4))
+        self.logger.debug("wait finished with status: 0x%x", self.stop_status)
         
         # be carefull that INT3 is executed as an instruction! You have to back down if you did hit a breakpoint
         ip = self.instruction_pointer - 1

@@ -5,6 +5,7 @@ DBG+ 6.4.2:
 * hotfix Removed buffer overflow in `__convert_args`
 * Assert that malloc is present before trying to allocate on heap
 * Option to connect to remote server while debugging localy
+* Migrate to logging library 
 
 DBG+ 6.4.1: syscalls
 * Set handlers for syscalls
