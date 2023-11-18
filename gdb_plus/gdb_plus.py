@@ -1669,7 +1669,7 @@ class Debugger:
             self.push(return_address)
         elif context.arch == "aarch64":
             self.x30 = return_address
-        elif context.arch == "riscv":
+        elif context.arch in ["riscv", "riscv32", "riscv64"]:
             self.ra = return_address
 
         self.jump(address)
@@ -1804,7 +1804,7 @@ class Debugger:
         if self.gdb is None:
             raise Exception("not implemented yet in libdebug")
 
-        if context.arch == "riscv":
+        if context.arch in ["riscv", "riscv32", "riscv64"]:
             log.warn_once("catch syscall not supported for RISCV")
             return None
 
@@ -2505,7 +2505,7 @@ class Debugger:
             return ["eflags", "cs", "ss", "ds", "es", "fs", "gs"]
         elif context.arch == "aarch64":
             return ["cpsr", "fpsr", "fpcr", "vg"]
-        elif context.arch == "riscv":
+        elif context.arch in ["riscv", "riscv32", "riscv64"]:
             return []
         else:
             raise Exception(f"what arch is {context.arch}")
@@ -2519,7 +2519,7 @@ class Debugger:
             return ["eax", "ebx", "ecx", "edx", "edi", "esi", "ebp", "esp", "eip"]
         elif context.arch == "amd64":
             return ["rax", "rbx", "rcx", "rdx", "rdi", "rsi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "rbp", "rsp", "rip"]
-        elif context.arch == "riscv":
+        elif context.arch in ["riscv", "riscv32", "riscv64"]:
             return [f"t{i}" for i in range(7)] + [f"s{i}" for i in range(12)] + [f"a{i}" for i in range(8)] + ["ra", "gp", "tp", "sp"] + ["pc"]
         else:
             raise Exception(f"what arch is {context.arch}")
@@ -2555,7 +2555,7 @@ class Debugger:
             "r13d", "r13w", "r13l",
             "r14d", "r14w", "r14l",
             "r15d", "r15w", "r15l"]
-        elif context.arch == "riscv":
+        elif context.arch in ["riscv", "riscv32", "riscv64"]:
             return []
         else:
             raise Exception(f"what arch is {context.arch}")
@@ -2568,7 +2568,7 @@ class Debugger:
             inst.is_call = inst.mnemonic == "call"
         elif context.arch == "aarch64":
             inst.is_call = inst.mnemonic == "bl"
-        elif context.arch == "riscv":
+        elif context.arch in ["riscv", "riscv32", "riscv64"]:
             inst.is_call = inst.mnemonic == "jal"
         else:
             ...
@@ -2583,7 +2583,7 @@ class Debugger:
                 self._capstone = Cs(CS_ARCH_X86, CS_MODE_32)
             elif context.arch == "aarch64":
                 self._capstone = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
-            elif context.arch == "riscv":
+            elif context.arch in ["riscv", "riscv32", "riscv64"]:
                 self._capstone = Cs(CS_ARCH_RISCV, CS_MODE_RISCVC) #CS_MODE_RISCV32 if context.bits == 32 else CS_MODE_RISCV64)
             else:
                 raise Exception(f"what arch is {context.arch}")
@@ -2600,7 +2600,7 @@ class Debugger:
             return self.eax
         elif context.arch == "aarch64":
             return self.x0 # Not always true
-        elif context.arch == "riscv":
+        elif context.arch in ["riscv", "riscv32", "riscv64"]:
             return self.a0
         else:
             ...
@@ -2613,7 +2613,7 @@ class Debugger:
             self.eax = value
         elif context.arch == "aarch64":
             self.x0 = value # Not always true
-        elif context.arch == "riscv":
+        elif context.arch in ["riscv", "riscv32", "riscv64"]:
             self.a0 = value # Sometimes a1 is also used
         else:
             ...
@@ -2627,7 +2627,7 @@ class Debugger:
             return self.esp
         elif context.arch == "aarch64":
             return self.sp
-        elif context.arch == "riscv":
+        elif context.arch in ["riscv", "riscv32", "riscv64"]:
             return self.sp
         else:
             ...
@@ -2642,7 +2642,7 @@ class Debugger:
             self.esp = value
         elif context.arch == "aarch64":
             self.sp = value
-        elif context.arch == "riscv":
+        elif context.arch in ["riscv", "riscv32", "riscv64"]:
             self.sp = value
         else:
             ...
@@ -2659,7 +2659,7 @@ class Debugger:
                 self.esp = value
             elif context.arch == "aarch64":
                 self.sp = value
-            elif context.arch == "riscv":
+            elif context.arch in ["riscv", "riscv32", "riscv64"]:
                 self.sp = value
             else:
                 ...
@@ -2672,7 +2672,7 @@ class Debugger:
             return self.ebp
         elif context.arch == "aarch64":
             ...
-        elif context.arch == "riscv":
+        elif context.arch in ["riscv", "riscv32", "riscv64"]:
             ...
         else:
             ...
@@ -2685,7 +2685,7 @@ class Debugger:
             self.ebp = value
         elif context.arch == "aarch64":
             ...
-        elif context.arch == "riscv":
+        elif context.arch in ["riscv", "riscv32", "riscv64"]:
             ...
         else:
             ...
@@ -2706,7 +2706,7 @@ class Debugger:
                     pwn.log.error("I failed retriving eip! make sure you are using the right context.arch")
             elif context.arch == "aarch64":
                 ans = self.pc
-            elif context.arch == "riscv":
+            elif context.arch in ["riscv", "riscv32", "riscv64"]:
                 ans = self.pc
             else:
                 ...
@@ -2722,7 +2722,7 @@ class Debugger:
             self.eip = value
         elif context.arch == "aarch64":
             self.pc = value
-        elif context.arch == "riscv":
+        elif context.arch in ["riscv", "riscv32", "riscv64"]:
             self.pc = value
         else:
             ...
@@ -2748,7 +2748,7 @@ class Debugger:
     def __saved_ip(self):
         if context.arch == "aarch64":
             return self.x30
-        elif context.arch == "riscv":
+        elif context.arch in ["riscv", "riscv32", "riscv64"]:
             return self.ra
 
         # Doesn't work with qemu [05/07/23]
