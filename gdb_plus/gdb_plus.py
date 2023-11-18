@@ -454,7 +454,9 @@ class Debugger:
         self.__test_debugger()
         if self.pwndbg:
             # because for some reason they set the child...
-            self.execute("set follow-fork-mode parent")        
+            # But this breaks any gdbscript with set follow-fork-mode to child... [17/11/23]
+            if "set follow-fork-mode" not in self.gdbscript:
+                self.execute("set follow-fork-mode parent")      
 
     def __setup_libdebug(self):
         self.libdebug.handle_stop = self.__stop_handler_libdebug
