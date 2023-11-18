@@ -3486,3 +3486,6 @@ class Debugger:
 
     def __exit__(self, *args):
         self.close()
+        # We should also close all children I think [17/11/23]
+        for child in self.children.values():
+            child.close()
