@@ -607,6 +607,7 @@ class Debugger:
         else:
             self.r = remote(self._host, self._port)
 
+        return self
 
     def detach(self, quit = True, block = False):
         if not self.debugging:
@@ -1852,7 +1853,7 @@ class Debugger:
             address = self.symbols[function] + offset
 
         else:
-            raise f"parse_breakpoint is asking what is the type of {location}"
+            raise Exception(f"parse_breakpoint is asking what is the type of {location}")
         
         return address
 
