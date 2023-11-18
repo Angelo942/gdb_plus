@@ -218,6 +218,8 @@ class MyLock:
         return self
 
     def __enter__(self):
+        if not self.owner.debugging:
+            return
         #self.can_run.wait()
         with self.__lock:
             self.event.clear()
@@ -225,6 +227,8 @@ class MyLock:
             log.debug(f"[{self.owner.pid}] entering lock with level {self.counter}")
 
     def __exit__(self, exc_type, exc_value, exc_traceback):
+        if not self.owner.debugging:
+            return
         with self.__lock:
             log.debug(f"[{self.owner.pid}] exiting lock with level {self.counter}")
             self.counter -= 1
@@ -279,9 +283,9 @@ SIGNALS_from_num = ["I DON'T KNOW", "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SI
 # test: nop; jmp test / nop; b 0x0
 shellcode_sleep = {"amd64": b"\x90\xeb\xfe", "i386": b"\x90\xeb\xfe", "aarch64": b'\x1f \x03\xd5\x00\x00\x00\x14'}
 # syscall / int 0x80 / svc #0
-shellcode_syscall = {"amd64": b"\x0f\x05", "i386": b"\xcd\x80", "aarch64": b'\x01\x00\x00\xd4'}
+shellcode_syscall = {"amd64": b"\x0f\x05", "i386": b"\xcd\x80", "aarch64": b'\x01\x00\x00\xd4', "riscv": b's\x00\x00\x00'}
 # First register is where to save the syscall num
-syscall_calling_convention = {"amd64": ["rax", "rdi", "rsi", "rdx", "r10", "r8", "r9"], "i386": ["rax", "ebx", "ecx", "edx", "esi", "edi", "ebp"], "aarch64": ["x8", "x0", "x1", "x2", "x3", "x4", "x5"]}
-function_calling_convention = {"amd64": ["rdi", "rsi", "rdx", "rcx", "r8", "r9"], "i386": [], "aarch64": [f"x{i}" for i in range(0, 8)]}
-return_instruction = {"amd64": b"\xc3", "i386": b"\xc3", "aarch64": b'\xc0\x03_\xd6'}
-nop = {"amd64": b"\x90", "i386": b"\x90", "aarch64": b""}
+syscall_calling_convention = {"amd64": ["rax", "rdi", "rsi", "rdx", "r10", "r8", "r9"], "i386": ["rax", "ebx", "ecx", "edx", "esi", "edi", "ebp"], "aarch64": ["x8"] + [f"x{i}" for i in range(6)], "riscv": ["a7"] + [f"a{i}" for i in range(6)]}
+function_calling_convention = {"amd64": ["rdi", "rsi", "rdx", "rcx", "r8", "r9"], "i386": [], "aarch64": [f"x{i}" for i in range(8)], "riscv": [f"a{i}" for i in range(8)]}
+return_instruction = {"amd64": b"\xc3", "i386": b"\xc3", "aarch64": b'\xc0\x03_\xd6', "riscv": b'g\x80\x00\x00'}
+nop = {"amd64": b"\x90", "i386": b"\x90", "aarch64": b'\x1f \x03\xd5', "riscv": b'\x13\x00\x00\x00'}

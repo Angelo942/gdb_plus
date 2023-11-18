@@ -1,3 +1,14 @@
+DBG+ 6.4.2:
+* handle NOPTRACE for emulate_ptrace and split_on_fork
+* NOP instructions
+* hotfix disable lock.log with NOPTRACE
+* hotfix Removed buffer overflow in `__convert_args`
+* Assert that malloc is present before trying to allocate on heap
+* Option to connect to remote server while debugging localy
+* Migrate to logging library 
+* read pointers based on context
+* context manager
+
 DBG+ 6.4.1: syscalls
 * Set handlers for syscalls
 * Emulate ptrace through syscalls instead of function calls

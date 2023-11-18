@@ -322,3 +322,4 @@ Arm binaries ar now partially supported. The problem running them in qemu is tha
 * enable signal() with libdebug
 * force parent or child to stop tracing
 * wrap follow-child
+* specify relative addresses
