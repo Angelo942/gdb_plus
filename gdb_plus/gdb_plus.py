@@ -2218,6 +2218,12 @@ class Debugger:
     def write_long(self, address: int, value: int, *, heap = True) -> int:
         return self.write_longs(address, [value], heap = heap)
 
+    def write_pointers(self, address: int, values: list, *, heap = True) -> list:
+        return self.write_longs(address, values, heap = heap) if context.bits == 64 else self.write_int(address, values, heap = heap)
+    
+    def write_pointer(self, address: int, value: int, *, heap = True) -> int:
+        return self.write_pointers(address, [value], heap = heap)
+
     # If the user has a byte array and doesn't want the null byte he would just write it himself, right ? [17/11/23] 
     def write_strings(self, address, values: list, *, heap = True) -> int:
         """
@@ -2227,12 +2233,7 @@ class Debugger:
         """
         values = [value.encode() if type(value) is str else value for value in values]
         data = b"\x00".join(values) + b"\x00" # Better be safe than sorry. We are working with strings anyway, so who cares if we have one more byte [21/10/23]
-    def write_pointers(self, address: int, values: list, *, heap = True) -> list:
-        return self.write_longs(address, values, heap = heap) if context.bits == 64 else self.write_int(address, values, heap = heap)
-    
-    def write_pointer(self, address: int, value: int, *, heap = True) -> int:
-        return self.write_pointers(address, [value], heap = heap)
-
+        
         if address is None:
             address = self.alloc(len(data), heap=heap)
         else:
