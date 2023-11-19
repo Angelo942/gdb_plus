@@ -1,5 +1,6 @@
 GDB+ 6.4.3:
 * hotfix migrate to gdb while emulate ptrace is on
+* Args support slices
 GDB+ 6.4.2:
 * handle NOPTRACE for emulate_ptrace and split_on_fork
 * NOP instructions
