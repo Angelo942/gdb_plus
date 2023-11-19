@@ -1,4 +1,6 @@
-DBG+ 6.4.2:
+GDB+ 6.4.3:
+* hotfix migrate to gdb while emulate ptrace is on
+GDB+ 6.4.2:
 * handle NOPTRACE for emulate_ptrace and split_on_fork
 * NOP instructions
 * hotfix disable lock.log with NOPTRACE
@@ -9,7 +11,7 @@ DBG+ 6.4.2:
 * read pointers based on context
 * context manager
 
-DBG+ 6.4.1: syscalls
+GDB+ 6.4.1: syscalls
 * Set handlers for syscalls
 * Emulate ptrace through syscalls instead of function calls
 * Support signals with libdebug

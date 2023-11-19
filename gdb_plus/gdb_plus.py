@@ -486,8 +486,14 @@ class Debugger:
             self.__setup_gdb()
             # Catch SIGSTOP
             address = self.instruction_pointer
+            
+            # The stop handle will never tell gdb we stopped if ptrace_emulated is set. The simplest way to bypass the problem is to set it to False for a second
+            backup = self.ptrace_emulated
+            self.ptrace_emulated = False
             with context.silent:
                 self.step(repeat=4)
+            self.ptrace_emulated = backup
+
             if address != self.instruction_pointer:
                 log.warn("I made a mistake trying to catch the SIGSTOP after attaching with gdb")
             # I must get back before setting the breakpoints otherwise I may overwrite them
@@ -516,8 +522,13 @@ class Debugger:
             self.__setup_libdebug()
             # Catch SIGSTOP
             address = self.instruction_pointer
+
+            backup = self.ptrace_emulated
+            self.ptrace_emulated = False
             with context.silent:
                 self.step()
+            self.ptrace_emulated = backup
+
             if address != self.instruction_pointer:
                 log.warn("I made a mistake trying to catch the SIGSTOP after attaching with libdebug")
             # TODO Handle hb too 
