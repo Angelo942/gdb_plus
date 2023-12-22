@@ -6,6 +6,12 @@ from threading import Event, Lock
 from queue import Queue
 from dataclasses import dataclass
 
+DEBUG = False
+# I can't always access dbg.logger, but I want to make sure not to polute the logger for the user. I only need this info when I debug my library
+def log_debug(msg, *argv):
+    if DEBUG:
+        log_debug(msg, *argv)
+
 class user_regs_struct:
     def __init__(self):
         # I should use context maybe... At least you don't have suprises like me when pack breaks [02/03/23]
@@ -46,7 +52,7 @@ class Arguments:
         calling_convention = function_calling_convention[context.arch]
         if index < len(calling_convention):
             register = calling_convention[index]
-            log.debug(f"argument {index} is in register {register}")
+            self.dbg.logger.debug(f"argument {index} is in register {register}")
             return getattr(self.dbg, register)
         else:
             index -= calling_convention
@@ -75,7 +81,7 @@ class Arguments:
         calling_convention = function_calling_convention[context.arch]
         if index < len(calling_convention):
             register = calling_convention[index]
-            log.debug(f"argument {index} is in register {register}")
+            self.dbg.logger.debug(f"argument {index} is in register {register}")
             return setattr(self.dbg, register, value)
         else:
             index -= calling_convention
@@ -102,7 +108,7 @@ class Arguments_syscall:
         calling_convention = syscall_calling_convention[context.arch][1:] # The first one would have been the sys_num
         if index < len(calling_convention):
             register = calling_convention[index]
-            log.debug(f"argument {index} is in register {register}")
+            self.dbg.logger.debug(f"argument {index} is in register {register}")
             return getattr(self.dbg, register)
         else:
             raise Exception(f"We don't have {index + 1} arguments in a syscall!")
@@ -118,7 +124,7 @@ class Arguments_syscall:
         calling_convention = function_calling_convention[context.arch]
         if index < len(calling_convention):
             register = calling_convention[index]
-            log.debug(f"argument {index} is in register {register}")
+            self.dbg.logger.debug(f"argument {index} is in register {register}")
             setattr(self.dbg, register, value)
         else:
             raise Exception(f"We don't have {index + 1} arguments in a syscall!")
@@ -139,16 +145,16 @@ class MyEvent(Event):
     def priority_wait(self, comment = "", priority=None):
         if priority is None:
             priority = self.priority
-        log.debug(f"[{self.pid}] waiting with priority {priority} for {comment}")
+        log_debug(f"[{self.pid}] waiting with priority {priority} for {comment}")
         while True:
             # Unfortunately you can not use the number of threads waiting to find the max priority [18/06/23]
             super().wait()
-            log.debug(f"wait [{priority}] finished")
+            log_debug(f"wait [{priority}] finished")
             # Make sure all threads know the current priority
             backup_priority = self.priority
             sleep(0.05)
             if priority == backup_priority:
-                log.debug(f"[{self.pid}] met priority {priority} for {comment}")
+                log_debug(f"[{self.pid}] met priority {priority} for {comment}")
                 self.lower_priority(comment)
                 # perchè non funzia ?
                 #super().clear()
@@ -173,17 +179,17 @@ class MyEvent(Event):
     #        self.cleared.set()
 
     def raise_priority(self, comment):
-        log.debug(f"[{self.pid}] raising priority [{self.priority}] -> [{self.priority + 1}] for {comment}")
+        log_debug(f"[{self.pid}] raising priority [{self.priority}] -> [{self.priority + 1}] for {comment}")
         self.priority += 1
 
     def lower_priority(self, comment):
-        log.debug(f"[{self.pid}] lowering priority [{self.priority - 1}] <- [{self.priority}] for {comment}")
+        log_debug(f"[{self.pid}] lowering priority [{self.priority - 1}] <- [{self.priority}] for {comment}")
         self.priority -= 1
         if self.priority < 0:
             log.warn(f"I think there is something wrong with the wait! We reached priority {self.priority}")
         if self.priority == 0:
             # Should reset when reaching 0, but also when debugging manually ? [18/06/23]
-            log.debug("reset enforce stop")
+            log_debug("reset enforce stop")
             self.flag_enforce_stop = None    
 
     # If we enforce a stop on level 5 through a breakpoint, a return False on level 7 should still continue, but not on level 3
@@ -194,7 +200,7 @@ class MyEvent(Event):
         if self.flag_enforce_stop is None:
             return False
         else:
-            log.debug(f"priority is {self.priority}. Enforce is {self.flag_enforce_stop}")
+            log_debug(f"priority is {self.priority}. Enforce is {self.flag_enforce_stop}")
             return self.priority >= self.flag_enforce_stop
 
 @dataclass
@@ -225,7 +231,7 @@ class MyLock:
 
 
     def log(self, function_name):
-        #log.debug(f"[{self.owner.pid}] wrapping {function_name}")
+        #self.owner.logger.debug(f"[{self.owner.pid}] wrapping {function_name}")
         return self
 
     def __enter__(self):
@@ -235,13 +241,13 @@ class MyLock:
         with self.__lock:
             self.event.clear()
             self.counter += 1
-            log.debug(f"[{self.owner.pid}] entering lock with level {self.counter}")
+            self.owner.logger.debug(f"[{self.owner.pid}] entering lock with level {self.counter}")
 
     def __exit__(self, exc_type, exc_value, exc_traceback):
         if not self.owner.debugging:
             return
         with self.__lock:
-            log.debug(f"[{self.owner.pid}] exiting lock with level {self.counter}")
+            self.owner.logger.debug(f"[{self.owner.pid}] exiting lock with level {self.counter}")
             self.counter -= 1
             # What about if we want to interrupt a continue until ? [21/06/23]
             if self.counter == 0:
