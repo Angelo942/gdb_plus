@@ -48,7 +48,6 @@ class Arguments:
         #assert type(index) is int, "I can't handle slices to access multiple arguments"
         if type(index) is slice:
             return [self[i] for i in range(0 if index.start is None else index.start, -1 if index.stop is None else index.stop, 1 if index.step is None else index.step)]
-        self.dbg.restore_arch()
         calling_convention = function_calling_convention[context.arch]
         if index < len(calling_convention):
             register = calling_convention[index]
@@ -77,7 +76,6 @@ class Arguments:
             for i, el in zip(range(0 if index.start is None else index.start, -1 if index.stop is None else index.stop, 1 if index.step is None else index.step), value):
                 self[i] = el
             return
-        self.dbg.restore_arch()
         calling_convention = function_calling_convention[context.arch]
         if index < len(calling_convention):
             register = calling_convention[index]
@@ -104,7 +102,6 @@ class Arguments_syscall:
     def __getitem__(self, index: [int, slice]):
         if type(index) is slice:
             return [self[i] for i, el in zip(range(0 if index.start is None else index.start, -1 if index.stop is None else index.stop, 1 if index.step is None else index.step), value)]
-        self.dbg.restore_arch()
         calling_convention = syscall_calling_convention[context.arch][1:] # The first one would have been the sys_num
         if index < len(calling_convention):
             register = calling_convention[index]
@@ -120,7 +117,6 @@ class Arguments_syscall:
             for i, el in zip(range(0 if index.start is None else index.start, -1 if index.stop is None else index.stop, 1 if index.step is None else index.step), value):
                 self[i] = el
             return
-        self.dbg.restore_arch()
         calling_convention = function_calling_convention[context.arch]
         if index < len(calling_convention):
             register = calling_convention[index]
@@ -231,7 +227,7 @@ class MyLock:
 
 
     def log(self, function_name):
-        #self.owner.logger.debug(f"[{self.owner.pid}] wrapping {function_name}")
+        self.owner.logger.debug(f"[{self.owner.pid}] wrapping {function_name}")
         return self
 
     def __enter__(self):
