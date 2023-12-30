@@ -601,6 +601,16 @@ class Debugger:
         context.Thread(target=action, name=f"[{self.pid}] debug_from").start()
         return self
 
+    def load_libc(self):
+        """
+        quick steps until the process has loaded the libc. Not garanteed to work in all situation.
+        """
+        with context.silent:
+            while self.step_until_condition(lambda dbg : "libc" in " ".join(dbg.p.libs().keys()), limit=10) == -1:
+                self.finish()
+
+        return self
+
     # Use as : dbg = Debugger("file").remote(IP, PORT)
     def remote(self, host: str, port: int):
         """
