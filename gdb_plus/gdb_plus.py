@@ -2994,7 +2994,11 @@ class Debugger:
                     options = dbg.syscall_args[2]
  
                     if pid == 2**32 - 1:
-                        assert len(dbg.slaves) == 1, "For now I can only handle waitpid(-1) if there is only one slave"
+                        assert len(dbg.slaves) <= 1, "For now I can only handle waitpid(-1) if there is only one slave"
+                        if len(self.slaves) == 0:
+                            log.warn("The process hasn't called TRACEME yet. I will wait... (just make sure you didn't setup ptrace_emulation too late)")
+                        while len(self.slaves) == 0:
+                            sleep(0.2)
                         pid = list(dbg.slaves.keys())[0]
                         self.logger.debug("waiting for -1...")
                     
@@ -3104,7 +3108,11 @@ class Debugger:
                     options = dbg.args[2]
 
                     if pid == 2**32 - 1:
-                        assert len(dbg.slaves) == 1, "For now I can only handle waitpid(-1) if there is only one slave"
+                        assert len(dbg.slaves) <= 1, "For now I can only handle waitpid(-1) if there is only one slave"
+                        if len(self.slaves) == 0:
+                            log.warn("The process hasn't called TRACEME yet. I will wait... (just make sure you didn't setup ptrace_emulation too late)")
+                        while len(self.slaves) == 0:
+                            sleep(0.2)
                         pid = list(dbg.slaves.keys())[0]
                         self.logger.debug("waiting for -1...")
                     
@@ -3264,7 +3272,8 @@ class Debugger:
         # Only do it if we don't handle the syscall... [26/07/23]
         #if context.arch == "amd64":
         #    self.r8 = -1
-        tracer.ptrace_has_stopped.set()
+        # Wait, why ? haha. This was stupid... [24/12/23]
+        #tracer.ptrace_has_stopped.set()
         return False
 
     def PTRACE_CONT(self, _, __, *, slave, manual, **kwargs):
@@ -3295,8 +3304,13 @@ class Debugger:
         return False
 
     def PTRACE_PEEKTEXT(self, address, _, *, slave, **kwargs):
-        data = unpack(slave.read(address, context.bytes))
-        log.info(f"peeking {hex(data)} from process {slave.pid} at address {hex(address)}")
+        try:
+            data = unpack(slave.read(address, context.bytes))
+            log.info(f"peeking {hex(data)} from process {slave.pid} at address {hex(address)}")
+        except Exception:
+            data = -1
+            log.info(f"invalid address {hex(address)} to peek from process {slave.pid}. Returning -1")
+
         self.return_value = data
         return False
 
@@ -3402,8 +3416,6 @@ class Debugger:
             self.logger.debug("allocating memory for shellcode")
             address = self.alloc(len(shellcode))
 
-        self.restore_arch()
-        
         self.write(address, shellcode)
         if skip_mprotect:
             return address
