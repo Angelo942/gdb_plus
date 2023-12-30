@@ -3210,6 +3210,25 @@ class Debugger:
 
         return self
 
+    # We have problems with ptrace_group, but that was also a stupid idea so we should think about removing it... Just wait for the pid to be in the slaves... [22/12/23]
+    # No, ptrace_group is still usefull to get a process from his pid when emulating attach! [22/12/23]
+    def trace(self, slave, parent=False):
+        """
+        Setup the debugger with the provided slave, simulating the state as if a fork and call to ptrace_traceme or ptrace_attach had been made.
+        You still have to call self.emulate_ptrace() with the settings you want.
+
+        Args:
+            parent (bool): Optional. Set to True if the slave is the tracer's parent process. By default we will pretend the slave is a child.
+        """
+        self.slaves[slave.pid] = slave
+        slave.ptrace_emulated = True
+        if parent:
+            self.parent = slave
+            slave.children[self.pid] = self
+        else:
+            self.children[slave.pid] = slave
+            slave.parent = self
+
     ########################## PTRACE EMULATION ##########################
     # If attach and interrupt stop the process I want continue and detach to let it run again, otherwise just set ptrace_can_continue [08/06/23]
     # Should we handle the interruptions in a special way ? Like adding a priority when attaching ? [08/06/23] (But how to handle stop due to a SIGNAL ?)
