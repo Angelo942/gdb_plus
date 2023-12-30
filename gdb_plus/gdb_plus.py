@@ -2838,6 +2838,8 @@ class Debugger:
     # entrambi dovrebbero essere interrotti, il parent alla fine di fork, il child a metà
     # Ho deciso di lasciare correre il parent. Te la gestisci te se vuoi mettere un breakpoint mettilo dopo
     # I just discovered "gdb.events.new_inferior"... I can take the pid from event.inferior.pid, but can I do more ?
+    # interrupt is not working as well as we would like. With a callback on the event we have to call interrupt when we notice the fork, but the program will have continued for a while [22/12/23] 
+    # We should move to catch fork and catch clone if we want to allow interrupt [22/12/23]
     def set_split_on_fork(self, off=False, c=False, keep_breakpoints=False, interrupt=False, script=""):
         """
         split out a new debugging session for the child process every time you hit a fork
@@ -2851,6 +2853,10 @@ class Debugger:
             log.warn_once(DEBUG_OFF)
             return self
 
+        if self.libdebug is not None:
+            log.error("Libdebug can not split on fork. You have to use gdb.")
+            return self
+
         if off:
             self.execute("set detach-on-fork on")
             #if self.symbols["fork"] in self.breakpoints:
@@ -2861,6 +2867,8 @@ class Debugger:
             self.gdb.events.new_inferior.disconnect(self.fork_handler)
                 
         else:
+            if interrupt:
+                log.warn_once("currently split_on_fork can not interrupt the parent on the precise instruction where it forks. Use a breakpoint if you need precision")
             self.execute("set detach-on-fork off")
 
             # The interrupt may give me problems with continue_until
@@ -2871,9 +2879,9 @@ class Debugger:
                 def split(inferior):
                     # claim priority asap
                     self.raise_priority("split")
+                    stopped = self.interrupt()
                     log.info(f"splitting child: {inferior.pid}")
                     # Am I the reason why the process stopped ?
-                    stopped = self.interrupt()
                     self.children[pid] = self.split_child(inferior=inferior, script=script)
                     # Should not continue if I reached the breakpoint before the split
                     self.lower_priority("release split")
@@ -2891,7 +2899,7 @@ class Debugger:
             self.fork_handler = fork_handler
             self.gdb.events.new_inferior.connect(self.fork_handler)
             
-            return self
+        return self
 
     split_on_fork = set_split_on_fork
 
