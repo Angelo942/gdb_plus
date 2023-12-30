@@ -3456,16 +3456,35 @@ class Debugger:
 
     #Works only with GEF. I use them to avoid writing down print(self.execute("heap bins")) every time
     def bins(self):
-        print(self.execute("heap bins"))
+        stopped = self.interrupt()
+        if self.gef:
+            print(self.execute("heap bins"))
+        elif self.pwndbg:
+            print(self.execute("bins"))
+        else:
+            print("GEF or pwndbg not detected")
+        if stopped:
+            self.c(wait=False)
 
     def chunks(self):
-        print(self.execute("heap chunks"))
+        stopped = self.interrupt()
+        if self.gef:
+            print(self.execute("heap chunks"))
+        elif self.pwndbg:
+            print(self.execute("heap"))
+        else:
+            print("GEF or pwndbg not detected")
+        if stopped:
+            self.c(wait=False)
 
     def telescope(self, address=None, length = 10, reference=None):
         """
         reference: int -> print the offset of each pointer from the reference pointer 
         """
-        print(self.execute(f"telescope {hex(address) if address is not None else ''} -l {length} {'-r ' + hex(reference) if reference is not None else ''}"))
+        if self.gef:
+            print(self.execute(f"telescope {hex(address) if address is not None else ''} -l {length} {'-r ' + hex(reference) if reference is not None else ''}"))
+        else:
+            print("GEF not detected")
 
     ########################### Heresies ##########################
     

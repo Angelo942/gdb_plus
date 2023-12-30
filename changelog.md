@@ -1,6 +1,7 @@
 GDB+ 6.4.3:
 * hotfix migrate to gdb while emulate ptrace is on
 * Args support slices
+* Update heap analysis functions for pwndbg 
 * Support waitpid(-1) before process traced
 * Allow to setup ptrace_emulation without call to ptrace
 GDB+ 6.4.2:
