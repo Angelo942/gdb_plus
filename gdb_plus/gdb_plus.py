@@ -413,14 +413,14 @@ class Debugger:
 
     def __test_debugger(self):
         try:
-            self.execute("stub")
+            self.execute("gef")
             self.gef = True
             _logger.debug("user is using gef")
             return
         except:
             _logger.debug("user isn't using gef")
         try:
-            self.execute("telescope")
+            self.execute("pwngdb")
             self.pwndbg = True
             _logger.debug("user is using pwndbg")
             return
