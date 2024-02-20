@@ -2196,7 +2196,7 @@ class Debugger:
         return self.read_longs(address, 1)[0]
 
     def read_pointers(self, address: int, n: int) -> list:
-        return self.read_longs(address, n) if context.bits == 64 else self.read_int(address, n)
+        return self.read_longs(address, n) if context.bits == 64 else self.read_ints(address, n)
     
     def read_pointer(self, address: int) -> int:
         return self.read_pointers(address, 1)[0]
@@ -2240,7 +2240,7 @@ class Debugger:
         return self.write_longs(address, [value], heap = heap)
 
     def write_pointers(self, address: int, values: list, *, heap = True) -> list:
-        return self.write_longs(address, values, heap = heap) if context.bits == 64 else self.write_int(address, values, heap = heap)
+        return self.write_longs(address, values, heap = heap) if context.bits == 64 else self.write_ints(address, values, heap = heap)
     
     def write_pointer(self, address: int, value: int, *, heap = True) -> int:
         return self.write_pointers(address, [value], heap = heap)
