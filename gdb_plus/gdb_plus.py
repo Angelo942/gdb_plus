@@ -2710,8 +2710,8 @@ class Debugger:
     # Prevent null pointers
     @property
     def instruction_pointer(self):
-        ans = 0
-        while ans == 0:
+        ans = None
+        for attempts in range(2):
             # what about self.gdb.newest_frame().pc() ? [28/04/23]
             if context.arch == "amd64":
                 ans = self.rip
@@ -2721,14 +2721,18 @@ class Debugger:
                 except Exception as e:
                     print(e)
                     pwn.log.error("I failed retriving eip! make sure you set context.arch")
+                    continue
             elif context.arch == "aarch64":
                 ans = self.pc
             elif context.arch in ["riscv", "riscv32", "riscv64"]:
                 ans = self.pc
             else:
                 ...
+            
             if ans == 0:
                 log.warn("null pointer in ip ! retrying...")
+            else:
+                break        
         return ans
 
     @instruction_pointer.setter
