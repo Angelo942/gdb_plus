@@ -2509,13 +2509,17 @@ class Debugger:
     # The canary is constant right ? This way you can also set it after a leak and access it from anywhere
     @property
     def canary(self):
-        if self._canary is None:
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+
+        elif self._canary is None:
             auxval = self.auxiliary_vector
             canary_location = auxval["AT_RANDOM"]
             canary = self.read(canary_location, context.bytes)
             self._canary = b"\x00"+canary[1:]
-        return self._canary
         
+        return self._canary
+
     # We can not search for the canary while gdb is running, so for now I only check if the canary is known. [24/04/24]
     @canary.setter
     def canary(self, value):
