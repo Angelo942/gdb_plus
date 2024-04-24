@@ -2515,6 +2515,14 @@ class Debugger:
             canary = self.read(canary_location, context.bytes)
             self._canary = b"\x00"+canary[1:]
         return self._canary
+        
+    # We can not search for the canary while gdb is running, so for now I only check if the canary is known. [24/04/24]
+    @canary.setter
+    def canary(self, value):
+        if self.debugging and self._canary is not None and value != self._canary:
+            # Do we want to backup the original value to make sure we don't warn for conflict between the values set by the user ? [24/04/24]
+            log.warn(f"setting canary to: {value}, but debugger thinks canary is {self.canary}")
+        self._canary = value
      
     @property
     def special_registers(self):
