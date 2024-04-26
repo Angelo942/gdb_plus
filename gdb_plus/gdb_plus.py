@@ -1834,7 +1834,9 @@ class Debugger:
             self.syscall_breakpoints[self.syscall_table[name]] = callback
         else:
             self.execute(f"catch syscall {name}")
-            num = self.gdb.breakpoints()[-1].number
+            # In old versions of gdb (bug found in ubuntu 20.6) breakpoints() only return the breakpoints, not the catchpoints. 27/04/24
+            #num = self.gdb.breakpoints()[-1].number
+            num = int(self.execute(f"info breakpoints").split("\n")[-2].split()[0])
             self.syscall_table[name] = num
             self.syscall_breakpoints[num] = callback
 
