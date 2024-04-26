@@ -622,6 +622,8 @@ class Debugger:
             self.p = remote(host, port)
         return self
 
+    setup_remote = remote
+
     def connect(*, overwrite=True):
         """
         Connect to remote server while keeping debugger active.
