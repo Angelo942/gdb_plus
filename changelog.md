@@ -5,6 +5,9 @@ GDB+ 6.4.3:
 * Support waitpid(-1) before process traced
 * Allow to setup ptrace_emulation without call to ptrace
 * make Debugger.canary writable 
+* Debugger(binary=...) support ELF object too
+* support direct connection to gdbserver
+
 GDB+ 6.4.2:
 * handle NOPTRACE for emulate_ptrace and split_on_fork
 * NOP instructions
