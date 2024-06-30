@@ -108,6 +108,9 @@ class Debugger:
         else:
             self.debugging = True
 
+        if binary is None:
+            binary = context.binary
+
         # The idea was to let gdb interrupt only one inferior while letting the other one run, but this doesn't work [29/04/23]
         #script = "set target-async on\nset pagination off\nset non-stop on" + script
         if type(target) is tuple:
