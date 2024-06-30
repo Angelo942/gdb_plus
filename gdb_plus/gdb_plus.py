@@ -38,7 +38,7 @@ def lock_decorator(func):
 
 class Debugger:
     # If possible patch the rpath (spwn and pwninit do it automatically) instead of using env to load the correct libc. This will let you get a shell not having problems trying to preload bash too
-    def __init__(self, target: [int, process, str, list], env=None, aslr:bool=True, script:str="", from_start:bool=True, binary:[str, ELF]=None, debug_from: int=None, timeout: int=0.5, base_elf=None):
+    def __init__(self, target: [int, process, str, list, tuple], env=None, aslr:bool=True, script:str="", from_start:bool=True, binary:[str, ELF]=None, debug_from: int=None, timeout: int=0.5, base_elf=None):
         _logger.debug("debugging %s using arch: %s [%dbits]", target if binary is None else binary, context.arch, context.bits)
 
         self._capstone = None #To decompile assembly for next_inst
@@ -110,8 +110,15 @@ class Debugger:
 
         # The idea was to let gdb interrupt only one inferior while letting the other one run, but this doesn't work [29/04/23]
         #script = "set target-async on\nset pagination off\nset non-stop on" + script
+        if type(target) is tuple:
+            if len(target) != 2:
+                raise Exception("What are you trying to do ? tuples (host, port) are only for connections to a gdbserver")
+            self.elf = ELF(binary, checksec=False) if type(binary) is str else binary
+            self.p = None
+            _, self.gdb = gdb.attach(target, exe=self.elf.path, gdbscript=script, api=True)
+            self.pid = self.gdb.selected_inferior().pid
 
-        if type(target) is int:
+        elif type(target) is int:
             self.p = None
             self.pid = target
             assert binary is not None, "I need a file to work from a pid" # Not really... Let's keep it like this for now, but continue assuming we don't have a real file
