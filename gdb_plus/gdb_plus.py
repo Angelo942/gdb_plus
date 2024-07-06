@@ -56,7 +56,7 @@ class Debugger:
         self.ptrace_backups = {}
 
         self.pid = None
-        self.context = context.copy()
+        self.context_params = context.copy()
 
         self.gdb = None
         self.libdebug = None
@@ -255,7 +255,7 @@ class Debugger:
         Actions that the debugger performs every time the process is interrupted
         Handle temporary breakpoints and callbacks
         """
-        with context.local(**self.context):
+        with context.local(**self.context_params):
 
             # Current inferior will change to the inferior who stopped last
             ip = self.instruction_pointer
@@ -353,7 +353,7 @@ class Debugger:
         Actions that the debugger performs every time the process is interrupted
         Handle temporary breakpoints and callbacks
         """
-        with context.local(**self.context):
+        with context.local(**self.context_params):
 
             # If we detach there will be a step to shutdown waitpid, but libdebug will have detached before we can execute the handler, so let's just skip it.
             if self.detached:
@@ -2934,7 +2934,8 @@ class Debugger:
                         self.__set_stop("We hit a breakpoint while interrupting the process. Handle it!")
                             
                 ## Non puoi eseguire azioni dentro ad un handler degli eventi quindi lancio in un thread a parte
-                context.Thread(target=split, args = (inferior,), name=f"[{self.pid}] split_fork").start()
+                with context.local(**self.context_params):
+                    context.Thread(target=split, args = (inferior,), name=f"[{self.pid}] split_fork").start()
 
             self.fork_handler = fork_handler
             self.gdb.events.new_inferior.connect(self.fork_handler)
