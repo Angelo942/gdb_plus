@@ -2934,7 +2934,8 @@ class Debugger:
                         self.__set_stop("We hit a breakpoint while interrupting the process. Handle it!")
                             
                 ## Non puoi eseguire azioni dentro ad un handler degli eventi quindi lancio in un thread a parte
-                context.Thread(target=split, args = (inferior,), name=f"[{self.pid}] split_fork").start()
+                with context.local(**self.context):
+                    context.Thread(target=split, args = (inferior,), name=f"[{self.pid}] split_fork").start()
 
             self.fork_handler = fork_handler
             self.gdb.events.new_inferior.connect(self.fork_handler)
