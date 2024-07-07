@@ -3562,9 +3562,9 @@ class Debugger:
     def __setattr__(self, name, value):
         if self.elf and name in self.special_registers + self.registers + self.minor_registers:
             if self.gdb is not None:
-                if name.lower in ["eip, rip"] and value != self.instruction_pointer:
+                if name.lower() in ["eip", "rip", "pc"]:
                     # GDB has a bug when setting rip ! [09/06/23]
-                    jump(value)
+                    self.jump(value)
                 else:
                     self.execute(f"set ${name.lower()} = {value % 2**context.bits}")
             elif self.libdebug is not None:
