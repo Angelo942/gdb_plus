@@ -523,7 +523,11 @@ class Debugger:
             assert not self.ptrace_syscall, "libdebug can't catch ptrace syscall. Emulate with syscall = False"
             if self.syscall_breakpoints:
                 log.warn_once("you will lose all your syscall catchpoints!")
-            from libdebug import Debugger as lib_Debugger
+            try:
+                from libdebug_legacy import Debugger as lib_Debugger
+            except ImportError as e:
+                print("libdebug_legacy is not installed")
+                print("you can install it with: pip3 install git+https://github.com/Angelo942/libdebug.git@dev-legacy")
             # Disable hook stop
             assert self.libdebug is None
             assert self.gdb is not None
