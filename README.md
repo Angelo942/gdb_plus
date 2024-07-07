@@ -281,6 +281,8 @@ If the stack frame has been corrupted finish() may not work. If this is the case
 
 ## Libdebug
 By default GDB+ uses a gdbserver to debug the process. This is verry usefull when you also have to check manually gdb while you are writing a script, but can be verry slow. For this reason we now support libdebug (from version >= 0.4) as an alternative debugger. It is lacking a lot of features but can do the job for most tasks and it can be 50 times faster. 
+**NOTE**
+libdebug has been refactored in october 2023. The new version doesn't allow yet the same control over events breaking a lot of features. We are therefor using the legacy version for now.
 
 The debugger will always start with dbg, but you can switch back and forth
 
@@ -296,9 +298,9 @@ To access properties of libdebug that haven't been wrapped you can simply use `d
 
 When you switch the breakpoints and callbacks will be preserved except for those needed to emulate ptrace. Please migrate to libdebug before setting the emulator up or disable it and set it up again right after.
 
-Since libdebug isn't on PyPI yet we could't include it in the dependencies. 
+Since libdebug_legacy isn't on PyPI yet we could't include it in the dependencies. 
 You can install it manually:
-`pip3 install git+https://github.com/Angelo942/libdebug.git@parallel`
+`pip3 install git+https://github.com/Angelo942/libdebug.git`
 
 ## AARCH64
 Arm binaries ar now partially supported. The problem running them in qemu is that we can't access the pid of the process from gdb and we can't catch when the process forks. This limits the feature we can use, but the rest is working fine.
