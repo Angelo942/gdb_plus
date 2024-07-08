@@ -43,8 +43,10 @@ class Debugger:
 
         self._capstone = None #To decompile assembly for next_inst
         self._auxiliary_vector = None #only used to locate the canary
+        # Maybe it's good not to rely too much on ELF in case someone wants to use it for different kinds of executables. [08/07/24]
         self._base_libc = None
         self._base_elf = base_elf
+        self._libc = None
         self._canary = None
         self._args = None
         self._sys_args = None
@@ -2426,6 +2428,16 @@ class Debugger:
 
         return maps
     
+    @property
+    def libc(self):
+        if self._libc is None and self.p is not None:
+            self._libc = self.p.libc
+        return self._libc
+
+    @libc.setter
+    def libc(self, elf_libc: ELF):
+        self._libc = elf_libc
+
     # get base address of libc
     def get_base_libc(self):
         if self.libc is None:
@@ -2497,7 +2509,7 @@ class Debugger:
     # TODO handle multiple libraries
     @property
     def symbols(self):
-        if hasattr(self, "libc") and self.libc is not None and self.libc is not False: # If I attack to a pid I self.p doesn't have libc = None
+        if self.libc is not None: # If I attack to a pid I self.p doesn't have libc = None
             # WARNING >= 3.9
             #return self.elf.symbols | self.libc.symbols
             return {**self.elf.symbols, **self.libc.symbols} # Should work in 3.8
