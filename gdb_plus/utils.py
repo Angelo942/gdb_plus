@@ -146,11 +146,10 @@ class MyEvent(Event):
             # Unfortunately you can not use the number of threads waiting to find the max priority [18/06/23]
             super().wait()
             log_debug(f"wait [{priority}] finished")
-            # Make sure all threads know the current priority
-            backup_priority = self.priority
-            sleep(0.05)
-            if priority == backup_priority:
+            if priority == self.priority:
                 log_debug(f"[{self.pid}] met priority {priority} for {comment}")
+                # Prevent race conditions. Make sure all threads know the current priority before anyone calls lower_priority
+                sleep(0.001)
                 self.lower_priority(comment)
                 # perchè non funzia ?
                 #super().clear()
