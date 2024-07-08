@@ -93,6 +93,7 @@ class Debugger:
         self.myStopped = MyEvent() # Include original event
         self.myStopped.set() # we call __setup_gdb after an attach so the process isn't running. Make just sure this doesn't cause troubles [17/04/23]
 
+        self._cached_registers = {}
         # To know that I'm responsible for the interruption even if there is no callback
         self.stepped = False
         self.interrupted = False
@@ -453,6 +454,12 @@ class Debugger:
         """
         self.gdb.events.stop.connect(lambda event: context.Thread(target=self.__stop_handler_gdb, name=f"[{self.pid}] stop_handler_gdb").start())
         self.gdb.events.exited.connect(self.__exit_handler)
+        def clear_cache(event):
+            self.logger.debug("GDB clearing register cache")
+            self._cached_registers = {}
+        self.gdb.events.cont.connect(clear_cache)
+        # Could be improved clearing only event.regnum, but you need a map to which register corresponds to which number for each architecture [08/07/24]
+        self.gdb.events.register_changed.connect(clear_cache)
         #self.execute("set write on")
 
         # I still don't know how to disable it to let ptrace_emulate work in peace [26/07/23]
@@ -3551,11 +3558,15 @@ class Debugger:
             return False
         if name in self.special_registers + self.registers + self.minor_registers:
             if self.gdb is not None:
+                res = self._cached_registers.get(name, None)
+                if res is not None:
+                    return res
                 try:
                     res = int(self.gdb.parse_and_eval(f"${name}")) % 2**context.bits
                 except:
                     log.warn("error reading register. Retrying...")
                     res = int(self.gdb.parse_and_eval(f"${name}")) % 2**context.bits
+                self._cached_registers[name] = res
             elif self.libdebug is not None:
                 # BUG libdebug can not parse lower registers [19/11/23]
                 res = getattr(self.libdebug, name)
@@ -3579,6 +3590,7 @@ class Debugger:
                     jump(value)
                 else:
                     self.execute(f"set ${name.lower()} = {value % 2**context.bits}")
+                self._cached_registers[name] = value
             elif self.libdebug is not None:
                 setattr(self.libdebug, name, value % 2**context.bits)
             else:
