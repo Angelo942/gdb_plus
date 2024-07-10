@@ -2466,17 +2466,28 @@ class Debugger:
     # Wrong for qemu
     def get_base_elf(self):
         maps = self.libs()
+        name_binary = self.elf.path.split("/")[-1]
         # Not perfect, but is a first filter
         if "/usr/bin/qemu" in "".join(maps.keys()):
-            log.warn("process is running under qemu! I hope you are using pwndbg...")
+            if self.gef:
+                log.warn("process is running under qemu! pwndbg may be recomended")
             log.warn("I don't know how to access the libraries in qemu :(")
             self.libc = None
-            ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-            data = ansi_escape.sub('', self.execute("vmmap"))
-            for line in data.splitlines():
-                if self.elf.path.split("/")[-1] in line:
-                    return int(line.strip().split()[0], 16)
-            raise Exception("can't find binary address")
+            if self.pwndbg:
+                ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+                data = ansi_escape.sub('', self.execute("vmmap"))
+                for line in data.splitlines():
+                    if name_binary in line:
+                        return int(line.strip().split()[0], 16)
+                raise Exception("can't find binary address")
+            elif self.gef:
+                ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+                data = ansi_escape.sub('', self.execute("vmmap")).replace(chr(2), "").replace(chr(1), "")
+                for line in data.splitlines():
+                    if name_binary in line:
+                        return int(line.strip().split()[0], 16)
+                raise Exception("can't find binary address")
+
 
         if len(maps) != 0:
             return maps[self.elf.path]
