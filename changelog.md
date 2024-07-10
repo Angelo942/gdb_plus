@@ -1,3 +1,7 @@
+GDB+ 7.0.0: Fast GDB
+* increased speed up to 10x
+* removed logs to debug the library
+
 GDB+ 6.4.3:
 * hotfix migrate to gdb while emulate ptrace is on
 * Args support slices
