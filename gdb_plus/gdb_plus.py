@@ -702,6 +702,7 @@ class Debugger:
                 self.execute("quit") # Doesn't always work if after interacting manually
             except EOFError:
                 if DEBUG: self.logger.debug("GDB successfully closed")
+            self._cached_registers = {}
 
         elif self.libdebug is not None:
             self.libdebug.detach()
@@ -776,6 +777,7 @@ class Debugger:
         if not self.debugging:
             return
 
+        self._cached_registers = {}
         # May not be accurate if you switched manually before
         old_inferior = self.current_inferior
         while self.current_inferior.num != n:
