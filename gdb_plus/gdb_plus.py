@@ -535,7 +535,8 @@ class Debugger:
                 from libdebug_legacy import Debugger as lib_Debugger
             except ImportError as e:
                 print("libdebug_legacy is not installed")
-                print("you can install it with: pip3 install git+https://github.com/Angelo942/libdebug.git@dev-legacy")
+                print("you can install it with: pip3 install git+https://github.com/Angelo942/libdebug.git")
+                raise e
             # Disable hook stop
             assert self.libdebug is None
             assert self.gdb is not None
