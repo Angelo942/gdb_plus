@@ -2490,7 +2490,12 @@ class Debugger:
 
 
         if len(maps) != 0:
-            return maps[self.elf.path]
+            for path, address in maps.items():
+                if name_binary in path:
+                    return address
+            else:
+                log.warn("Make sure the name of the binary is the same as the one being debugged")
+                log.error(f"can not find {name_binary} in {list(maps.keys())}")
         
         else:
             log.warn("I can't access /proc/%d/maps", self.pid)
