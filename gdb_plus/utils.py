@@ -51,7 +51,7 @@ class Arguments:
         calling_convention = function_calling_convention[context.arch]
         if index < len(calling_convention):
             register = calling_convention[index]
-            self.dbg.logger.debug(f"argument {index} is in register {register}")
+            if DEBUG: self.dbg.logger.debug(f"argument {index} is in register {register}")
             return getattr(self.dbg, register)
         else:
             index -= calling_convention
@@ -79,7 +79,7 @@ class Arguments:
         calling_convention = function_calling_convention[context.arch]
         if index < len(calling_convention):
             register = calling_convention[index]
-            self.dbg.logger.debug(f"argument {index} is in register {register}")
+            if DEBUG: self.dbg.logger.debug(f"argument {index} is in register {register}")
             return setattr(self.dbg, register, value)
         else:
             index -= calling_convention
@@ -105,7 +105,7 @@ class Arguments_syscall:
         calling_convention = syscall_calling_convention[context.arch][1:] # The first one would have been the sys_num
         if index < len(calling_convention):
             register = calling_convention[index]
-            self.dbg.logger.debug(f"argument {index} is in register {register}")
+            if DEBUG: self.dbg.logger.debug(f"argument {index} is in register {register}")
             return getattr(self.dbg, register)
         else:
             raise Exception(f"We don't have {index + 1} arguments in a syscall!")
@@ -120,7 +120,7 @@ class Arguments_syscall:
         calling_convention = function_calling_convention[context.arch]
         if index < len(calling_convention):
             register = calling_convention[index]
-            self.dbg.logger.debug(f"argument {index} is in register {register}")
+            if DEBUG: self.dbg.logger.debug(f"argument {index} is in register {register}")
             setattr(self.dbg, register, value)
         else:
             raise Exception(f"We don't have {index + 1} arguments in a syscall!")
@@ -146,11 +146,10 @@ class MyEvent(Event):
             # Unfortunately you can not use the number of threads waiting to find the max priority [18/06/23]
             super().wait()
             log_debug(f"wait [{priority}] finished")
-            # Make sure all threads know the current priority
-            backup_priority = self.priority
-            sleep(0.05)
-            if priority == backup_priority:
+            if priority == self.priority:
                 log_debug(f"[{self.pid}] met priority {priority} for {comment}")
+                # Prevent race conditions. Make sure all threads know the current priority before anyone calls lower_priority
+                sleep(0.001)
                 self.lower_priority(comment)
                 # perchè non funzia ?
                 #super().clear()
@@ -227,7 +226,7 @@ class MyLock:
 
 
     def log(self, function_name):
-        self.owner.logger.debug(f"[{self.owner.pid}] wrapping {function_name}")
+        if DEBUG: self.owner.logger.debug(f"[{self.owner.pid}] wrapping {function_name}")
         return self
 
     def __enter__(self):
@@ -237,13 +236,13 @@ class MyLock:
         with self.__lock:
             self.event.clear()
             self.counter += 1
-            self.owner.logger.debug(f"[{self.owner.pid}] entering lock with level {self.counter}")
+            if DEBUG: self.owner.logger.debug(f"[{self.owner.pid}] entering lock with level {self.counter}")
 
     def __exit__(self, exc_type, exc_value, exc_traceback):
         if not self.owner.debugging:
             return
         with self.__lock:
-            self.owner.logger.debug(f"[{self.owner.pid}] exiting lock with level {self.counter}")
+            if DEBUG: self.owner.logger.debug(f"[{self.owner.pid}] exiting lock with level {self.counter}")
             self.counter -= 1
             # What about if we want to interrupt a continue until ? [21/06/23]
             if self.counter == 0:
