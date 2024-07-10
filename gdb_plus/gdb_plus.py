@@ -171,6 +171,14 @@ class Debugger:
             self.elf.arch = "riscv"
         
         if self.debugging:
+            if context.copy().get("arch", False) == False: # Empty context
+                if self.elf is not None:
+                    context.binary = self.elf
+                    log.info(f"context not set... Using {context}")
+                    self.context_params = context.copy()
+                else:
+                    log.warn("No context set and no binary given. This may cause problems.")
+
             self.elf.address = self.get_base_elf()
             self.__setup_gdb()
 
