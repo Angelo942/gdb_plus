@@ -2921,6 +2921,9 @@ class Debugger:
             log.error("Libdebug can not split on fork. You have to use gdb.")
             return self
 
+        if self.pwndbg:
+            log.warn_once("pwndbg may not handle correctly multi process applications. We reccomend using GEF")
+
         if off:
             self.execute("set detach-on-fork on")
             #if self.symbols["fork"] in self.breakpoints:
