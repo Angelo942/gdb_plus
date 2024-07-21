@@ -1951,7 +1951,19 @@ class Debugger:
                 # die if more than 1 +, but that's your fault
                 function, offset = [x.strip() for x in location.split("+")]
                 offset = int(offset, 16) if "0x" in offset.lower() else int(offset)
-            address = self.symbols[function] + offset
+
+            try:
+                address = self.symbols[function] + offset
+            except KeyError as e:
+                if not self.statically_linked and self.libc is None:
+                    log.error("symbol %s not found in ELF")
+                    log.error("The libc is not loaded yet. If you want to put a breakpoint there call load_libc() first!")
+                elif not self.statically_linked:
+                    log.error("symbol %s not found in ELF or libc")
+                else:
+                    log.error("symbol %s not found in ELF")
+                raise e
+
 
         else:
             raise Exception(f"parse_breakpoint is asking what is the type of {location}")
@@ -2038,6 +2050,7 @@ class Debugger:
             return
 
         address = self.parse_address(location)
+
 
         if hw:
             if DEBUG: self.logger.debug("putting hardware breakpoint in %s", self.reverse_lookup(address))
@@ -3562,7 +3575,7 @@ class Debugger:
         #    ans = self.execute(f"call (long) mprotect({hex(address)}, {hex(size)}, 7)")
         #else:
         if "mprotect" in self.symbols:
-            # I can use gdb call, but there are problems if the symbols are "fake" so put a check elf.staticaly_linked if you want to do it [04/03/23]
+            # I can use gdb call, but there are problems if the symbols are "fake" so put a check elf.statically_linked if you want to do it [04/03/23]
             ans = self.call(self.symbols["mprotect"], [address & 0xfffffffffffff000, size, constants.PROT_EXEC | constants.PROT_READ | constants.PROT_WRITE])
         ans = self.syscall(constants.SYS_mprotect.real, [address & 0xfffffffffffff000, size, constants.PROT_EXEC | constants.PROT_READ | constants.PROT_WRITE])
         
