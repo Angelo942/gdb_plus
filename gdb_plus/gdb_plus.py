@@ -928,7 +928,8 @@ class Debugger:
         if not res:
             raise Exception("NOT RUNNING")
 
-        for line in res:
+        # For some reason `catch load` has """It stopped at breakpoint -2.\nIt stopped at breakpoint 2.""" [21/07/24]
+        for line in res[::-1]:
             line = line.strip()
             #It stopped at breakpoint 2.
             if line.startswith("It stopped at breakpoint "):
