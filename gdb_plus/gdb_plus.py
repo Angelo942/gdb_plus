@@ -663,11 +663,12 @@ class Debugger:
 
     def load_libc(self):
         """
-        quick steps until the process has loaded the libc. Not garanteed to work in all situation.
+        Continue until the program has loaded the libc. Needed before setting breakpoints on libc functions.
         """
-        with context.silent:
-            while self.step_until_condition(lambda dbg : "libc" in " ".join(dbg.p.libs().keys()), limit=10) == -1:
-                self.finish()
+        self.catch("load")
+        while self.libc is None:
+            self.c()
+        self.delete_catch("load")
 
         return self
 
