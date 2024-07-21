@@ -451,7 +451,7 @@ class Debugger:
         except:
             if DEBUG: _logger.debug("user isn't using gef")
         try:
-            self.execute("pwngdb")
+            self.execute("pwndbg")
             self.pwndbg = True
             if DEBUG: _logger.debug("user is using pwndbg")
             return
