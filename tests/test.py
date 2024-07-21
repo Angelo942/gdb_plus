@@ -240,13 +240,22 @@ class Debugger_catchpoint(unittest.TestCase):
 	def tearDown(self):
 		pass	
 	
-	def test_load_libc(self):
-		print("\ntest_load_libc: ", end="")
+	def test_manual_load_libc(self):
+		print("\ntest_manual_load_libc: ", end="")
 		with context.local(binary = ELF("./cube"), from_start = True):
 			dbg = Debugger("./cube")
 			self.assertTrue(self.libc is None)
 			dbg.catch("load")
 			dbg.c()
+			self.assertTrue(self.libc is not None)
+			dbg.close()
+
+	def test_load_libc(self):
+		print("\ntest_load_libc: ", end="")
+		with context.local(binary = ELF("./cube"), from_start = True):
+			dbg = Debugger("./cube")
+			self.assertTrue(self.libc is None)
+			dbg.load_libc()
 			self.assertTrue(self.libc is not None)
 			dbg.close()
 
