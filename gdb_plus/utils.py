@@ -10,7 +10,7 @@ DEBUG = False
 # I can't always access dbg.logger, but I want to make sure not to polute the logger for the user. I only need this info when I debug my library
 def log_debug(msg, *argv):
     if DEBUG:
-        log_debug(msg, *argv)
+        log.debug(msg, *argv)
 
 class user_regs_struct:
     def __init__(self):

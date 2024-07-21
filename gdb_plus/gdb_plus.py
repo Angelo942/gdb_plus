@@ -41,7 +41,7 @@ def lock_decorator(func):
 class Debugger:
     # If possible patch the rpath (spwn and pwninit do it automatically) instead of using env to load the correct libc. This will let you get a shell not having problems trying to preload bash too
     def __init__(self, target: [int, process, str, list, tuple], env=None, aslr:bool=True, script:str="", from_start:bool=True, binary:[str, ELF]=None, debug_from: int=None, timeout: int=0.5, base_elf=None):
-        if DEBUG: _logger("debugging %s using arch: %s [%dbits]", target if binary is None else binary, context.arch, context.bits)
+        if DEBUG: _logger.debug("debugging %s using arch: %s [%dbits]", target if binary is None else binary, context.arch, context.bits)
 
         self._capstone = None #To decompile assembly for next_inst
         self._auxiliary_vector = None #only used to locate the canary
@@ -273,7 +273,7 @@ class Debugger:
         ip = self.instruction_pointer
         breakpoints = self.breakpoints[ip]
 
-        if DEBUG: _logger("[%d] stopped at address: %s for %s", self.current_inferior.pid, self.reverse_lookup(ip), self._stop_reason)
+        if DEBUG: _logger.debug("[%d] stopped at address: %s for %s", self.current_inferior.pid, self.reverse_lookup(ip), self._stop_reason)
             
         # Warn that if a parent has to listen for a signal you must tell your handler to stop the execution [22/07/23]
         if self._stop_reason in SIGNALS and SIGNALS[self._stop_reason] in self.handled_signals:
@@ -446,17 +446,17 @@ class Debugger:
         try:
             self.execute("gef")
             self.gef = True
-            if DEBUG: _logger("user is using gef")
+            if DEBUG: _logger.debug("user is using gef")
             return
         except:
-            if DEBUG: _logger("user isn't using gef")
+            if DEBUG: _logger.debug("user isn't using gef")
         try:
             self.execute("pwngdb")
             self.pwndbg = True
-            if DEBUG: _logger("user is using pwndbg")
+            if DEBUG: _logger.debug("user is using pwndbg")
             return
         except:
-            if DEBUG: _logger("user isn't using pwndbg")
+            if DEBUG: _logger.debug("user isn't using pwndbg")
 
         
     def __setup_gdb(self):
@@ -2925,7 +2925,7 @@ class Debugger:
         child.libc = self.libc
         # Set parent for ptrace [08/06/23]
         child.parent = self
-        if DEBUG: _logger("new debugger opened")
+        if DEBUG: _logger.debug("new debugger opened")
         child.write(ip, backup)
         child.logger.debug("shellcode patched")
         child.jump(ip)
