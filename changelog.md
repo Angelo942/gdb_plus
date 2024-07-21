@@ -1,3 +1,7 @@
+GDB+ 7.0.1: catchpoints
+* support gdb catchpoints
+* correct implemention of load_libc
+
 GDB+ 7.0.0: Fast GDB
 * increased speed up to 10x
 * removed logs to debug the library

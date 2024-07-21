@@ -104,8 +104,8 @@ class Debugger:
         # Maybe not needed (see set_split_on_fork)
         self.last_breakpoint_deleted = 0 # Keep track of the last temporary breakpoint deleted if we realy have to know if we hit something
 
-        self.syscall_table = {}
-        self.syscall_breakpoints = {}
+        self.event_table = {}
+        self.event_breakpoints = {}
         self.syscall_return = False
 
         if args.REMOTE or context.noptrace:
@@ -291,40 +291,56 @@ class Debugger:
         # We could also pass the stop event and read the breakpoint from there... But it would only be usefull to know that it is a catchpoint and which one, so who cares [25/07/23]
         # We have a problem with multiple catchpoints for the same syscall... [26/07/23]
         # Can we get the reason from the StopEvent ?
-        if self._stop_reason == "BREAKPOINT" and (callback := self.syscall_breakpoints.get(self._details_breakpoint_stopped, None)) is not None:
-            if self.syscall_return == False: 
-                # Make sure we don't miss the return
-                # Put above to avoid race condition after the jump
-                self.raise_priority("handling syscall")
-                should_skip = callback(self, entry=True)
-                if should_skip is not None and should_skip & SKIP_SYSCALL:
-                    self.jump(self.instruction_pointer)
-                    if not should_skip & SHOULD_STOP:
+        if self._stop_reason == "BREAKPOINT" and (callback := self.event_breakpoints.get(self._details_breakpoint_stopped, None)) is not None:
+            if DEBUG: self.logger.debug("stopped for catchpoint")
+            name = list(self.event_table.keys())[list(self.event_table.values()).index(self._details_breakpoint_stopped)]
+            # Syscalls have to be handled differently because we break both when calling it and when returning
+            if name.startswith("syscall "):
+                if self.syscall_return == False: 
+                    # Make sure we don't miss the return
+                    # Put above to avoid race condition after the jump
+                    self.raise_priority("handling syscall")
+                    should_skip = callback(self, entry=True)
+                    if should_skip is not None and should_skip & SKIP_SYSCALL:
+                        self.jump(self.instruction_pointer)
+                        if not should_skip & SHOULD_STOP:
+                            self.__hidden_continue()
+                        else:
+                            # Wait I must stop for the user, not the emulator...
+                            # I should tell any wait() that I stopped, but not waitpid...
+                            #if self.ptrace_emulated:
+                            #    self.ptrace_has_stopped.set()
+                            #else:
+                            #    # TODO TEST IT [26/07/23]
+                            self.__set_stop("stopped after skipping syscall")
+                        self.lower_priority("syscall skipped")    
+                        return
+                    # hit the return
+                    self.syscall_return = True
+                    self.c()
+                    should_stop = callback(self, entry=False)
+                    self.lower_priority("syscall handled")
+                    self.syscall_return = False
+                    if should_stop == False:
                         self.__hidden_continue()
                     else:
-                        # Wait I must stop for the user, not the emulator...
-                        # I should tell any wait() that I stopped, but not waitpid...
-                        #if self.ptrace_emulated:
-                        #    self.ptrace_has_stopped.set()
-                        #else:
-                        #    # TODO TEST IT [26/07/23]
-                        self.__set_stop("stopped after skipping syscall")
-                    self.lower_priority("syscall skipped")    
-                    return
-                # hit the return
-                self.syscall_return = True
-                self.c()
-                should_stop = callback(self, entry=False)
-                self.lower_priority("syscall handled")
-                self.syscall_return = False
-                if should_stop == False:
-                    self.__hidden_continue()
+                        self.__set_stop("returned from syscall")
                 else:
                     self.__set_stop("returned from syscall")
+                return
             else:
-                self.__set_stop("returned from syscall")
-            return
-                
+                self.raise_priority("handling event")
+                should_stop = callback(self)
+                should_stop = True if should_stop is None else should_stop
+                self.lower_priority("event handled")
+                if should_stop:
+                    should_continue = False
+                    self.__set_stop("event callback returned True or None")
+                else:
+                    if DEBUG: self.logger.debug("[%d] callback returned False", self.pid)
+                    self.__hidden_continue()
+                return
+
         if len(breakpoints) == 0:
             # Is it right to catch SIGSTOP and SIGTRAP ? [04/06/23]
             #if self._stop_reason == "SIGSEGV":
@@ -488,7 +504,7 @@ class Debugger:
                 log.warn_once(f"THE PROCESS [{self.pid}] USES PTRACE!")
             # Do we also want to delete the breakpoint once we know we are using ptrace ? [13/08/23]
             else:
-                self.delete_catch("ptrace")        
+                self.delete_catch_syscall("ptrace")        
             return False
         self.catch_syscall("ptrace", callback_ptrace)
 
@@ -550,7 +566,7 @@ class Debugger:
                     breakpoint.native_breakpoint = bp
         elif libdebug:
             assert not self.ptrace_syscall, "libdebug can't catch ptrace syscall. Emulate with syscall = False"
-            if self.syscall_breakpoints:
+            if self.event_breakpoints:
                 log.warn_once("you will lose all your syscall catchpoints!")
             try:
                 from libdebug_legacy import Debugger as lib_Debugger
@@ -647,11 +663,12 @@ class Debugger:
 
     def load_libc(self):
         """
-        quick steps until the process has loaded the libc. Not garanteed to work in all situation.
+        Continue until the program has loaded the libc. Needed before setting breakpoints on libc functions.
         """
-        with context.silent:
-            while self.step_until_condition(lambda dbg : "libc" in " ".join(dbg.p.libs().keys()), limit=10) == -1:
-                self.finish()
+        self.catch("load")
+        while self.libc is None:
+            self.c()
+        self.delete_catch("load")
 
         return self
 
@@ -698,8 +715,8 @@ class Debugger:
 
         if self.gdb is not None:
             # They will be lost
-            self.syscall_breakpoints = {}
-            self.syscall_table = {}
+            self.event_breakpoints = {}
+            self.event_table = {}
 
             try:
                 if block:
@@ -912,7 +929,8 @@ class Debugger:
         if not res:
             raise Exception("NOT RUNNING")
 
-        for line in res:
+        # For some reason `catch load` has """It stopped at breakpoint -2.\nIt stopped at breakpoint 2.""" [21/07/24]
+        for line in res[::-1]:
             line = line.strip()
             #It stopped at breakpoint 2.
             if line.startswith("It stopped at breakpoint "):
@@ -1872,37 +1890,47 @@ class Debugger:
 
         If you decide to skip the syscall remember to set the right return value
         """
-        if self.gdb is None:
-            raise Exception("not implemented yet in libdebug")
-
         if context.arch in ["riscv", "riscv32", "riscv64"]:
             log.warn_once("catch syscall not supported for RISCV")
             return None
 
-        # To avoid multiple breakpoints for the same syscall which may break my way of handling them [27/07/23]
-        if name in self.syscall_table:
-            if DEBUG: self.logger.debug("there is already a catchpoint for %s... Overwriting...", name)
-            self.syscall_breakpoints[self.syscall_table[name]] = callback
-        else:
-            self.execute(f"catch syscall {name}")
-            # In old versions of gdb (bug found in ubuntu 20.6) breakpoints() only return the breakpoints, not the catchpoints. 27/04/24
-            #num = self.gdb.breakpoints()[-1].number
-            num = int(self.execute(f"info breakpoints").split("\n")[-2].split()[0])
-            self.syscall_table[name] = num
-            self.syscall_breakpoints[num] = callback
-
-        return self
+        return self.catch_event("syscall " + name, callback)
 
     handle_syscall = catch_syscall
 
+    def delete_catch_syscall(self, name: str):
+        return self.delete_catch("syscall " + name)
+
+    def catch_event(self, name: str, callback = lambda *args, **qwargs: True):
+        if self.gdb is None:
+            raise Exception("not implemented in libdebug")
+
+        # To avoid multiple breakpoints for the same syscall which may break my way of handling them [27/07/23]
+        if name in self.event_table:
+            log.warn("there is already a catchpoint for %s... Overwriting...", name)
+            self.event_breakpoints[self.event_table[name]] = callback
+        else:
+            if DEBUG: self.logger.debug("setting catchpoint %s", name)
+            self.execute(f"catch {name}")
+            # In old versions of gdb (bug found in ubuntu 20.4) breakpoints() only return the breakpoints, not the catchpoints. 27/04/24
+            #num = self.gdb.breakpoints()[-1].number
+            num = int(self.execute(f"info breakpoints").split("\n")[-2].split()[0])
+            self.event_table[name] = num
+            self.event_breakpoints[num] = callback
+
+        return self
+
+    catch = catch_event
+
     def delete_catch(self, name: str):
-        if DEBUG: self.logger.debug("deleting syscall %s", name)
+
+        if DEBUG: self.logger.debug("deleting catchpoint %s", name)
         try:
-            bp = self.syscall_table.pop(name)
+            bp = self.event_table.pop(name)
         except KeyError:
-            log.warn("syscall %s is not being catched", name)
+            log.warn("%s is not being catched", name)
             return
-        self.syscall_breakpoints.pop(bp)
+        self.event_breakpoints.pop(bp)
         self.execute(f"delete {bp}")
         return self
 
@@ -1923,7 +1951,19 @@ class Debugger:
                 # die if more than 1 +, but that's your fault
                 function, offset = [x.strip() for x in location.split("+")]
                 offset = int(offset, 16) if "0x" in offset.lower() else int(offset)
-            address = self.symbols[function] + offset
+
+            try:
+                address = self.symbols[function] + offset
+            except KeyError as e:
+                if not self.statically_linked and self.libc is None:
+                    log.error("symbol %s not found in ELF")
+                    log.error("The libc is not loaded yet. If you want to put a breakpoint there call load_libc() first!")
+                elif not self.statically_linked:
+                    log.error("symbol %s not found in ELF or libc")
+                else:
+                    log.error("symbol %s not found in ELF")
+                raise e
+
 
         else:
             raise Exception(f"parse_breakpoint is asking what is the type of {location}")
@@ -2010,6 +2050,7 @@ class Debugger:
             return
 
         address = self.parse_address(location)
+
 
         if hw:
             if DEBUG: self.logger.debug("putting hardware breakpoint in %s", self.reverse_lookup(address))
@@ -3534,7 +3575,7 @@ class Debugger:
         #    ans = self.execute(f"call (long) mprotect({hex(address)}, {hex(size)}, 7)")
         #else:
         if "mprotect" in self.symbols:
-            # I can use gdb call, but there are problems if the symbols are "fake" so put a check elf.staticaly_linked if you want to do it [04/03/23]
+            # I can use gdb call, but there are problems if the symbols are "fake" so put a check elf.statically_linked if you want to do it [04/03/23]
             ans = self.call(self.symbols["mprotect"], [address & 0xfffffffffffff000, size, constants.PROT_EXEC | constants.PROT_READ | constants.PROT_WRITE])
         ans = self.syscall(constants.SYS_mprotect.real, [address & 0xfffffffffffff000, size, constants.PROT_EXEC | constants.PROT_READ | constants.PROT_WRITE])
         

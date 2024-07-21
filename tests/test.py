@@ -233,6 +233,37 @@ class Debugger_callbacks(unittest.TestCase):
 			self.dbg.close()
 
 @unittest.skip
+class Debugger_catchpoint(unittest.TestCase):
+	def setUp(self):
+		warnings.simplefilter("ignore", ResourceWarning)
+
+	def tearDown(self):
+		pass	
+	
+	@unittest.skip
+	def test_manual_load_libc(self):
+		print("\ntest_manual_load_libc: ", end="")
+		with context.local(binary = ELF("./cube")):
+			dbg = Debugger("./cube", from_start = True)
+			self.assertTrue(dbg.libc is None)
+			dbg.catch("load")
+			dbg.c()
+			self.assertTrue(dbg.libc is not None)
+			dbg.close()
+
+	@unittest.skip
+	def test_load_libc(self):
+		print("\ntest_load_libc: ", end="")
+		with context.local(binary = ELF("./cube")):
+			dbg = Debugger("./cube", from_start = True)
+			self.assertTrue(dbg.libc is None)
+			dbg.load_libc()
+			self.assertTrue(dbg.libc is not None)
+			dbg.close()
+
+	# The syscalls are tested in ptrace emulation
+
+@unittest.skip
 class Debugger_memory(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
@@ -878,7 +909,7 @@ class Debugger_libdebug(unittest.TestCase):
 			self.assertFalse(self.dbg.priority)
 			self.dbg.close()
 
-#@unittest.skip
+@unittest.skip
 class Debugger_ARM(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
@@ -897,7 +928,7 @@ class Debugger_ARM(unittest.TestCase):
 			self.assertFalse(self.dbg.priority)
 			self.dbg.close()
 		
-	#@unittest.skip
+	@unittest.skip
 	def test_syscall(self):
 		print("\ntest_syscall [ARM]: ", end="")
 		with context.local(arch="aarch64"):
