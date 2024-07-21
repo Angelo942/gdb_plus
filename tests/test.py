@@ -233,6 +233,26 @@ class Debugger_callbacks(unittest.TestCase):
 			self.dbg.close()
 
 @unittest.skip
+class Debugger_catchpoint(unittest.TestCase):
+	def setUp(self):
+		warnings.simplefilter("ignore", ResourceWarning)
+
+	def tearDown(self):
+		pass	
+	
+	def test_load_libc(self):
+		print("\ntest_load_libc: ", end="")
+		with context.local(binary = ELF("./cube"), from_start = True):
+			dbg = Debugger("./cube")
+			self.assertTrue(self.libc is None)
+			dbg.catch("load")
+			dbg.c()
+			self.assertTrue(self.libc is not None)
+			dbg.close()
+
+	# The syscalls are tested in ptrace emulation
+
+@unittest.skip
 class Debugger_memory(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
