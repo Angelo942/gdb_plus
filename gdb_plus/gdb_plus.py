@@ -1706,7 +1706,7 @@ class Debugger:
 
     # I still need end_pointer even if I would like to put the breakpoint on the address from which we call the function because I can't be sure that someone won't want to call a function from inside 
     # Wait, finish is doing it anyway... So let's require that call isn't used while you are inside the function, but still handle it just in case. Like a check that *(rsp - bytes) -> rip. It's not perfect, but it should at least always be true if we used the function properly [21/05/23]
-    def call(self, function: [int, str], args: list = [], *, heap=True, wait = True):
+    def call(self, function: [int, str], args: list = [], *, heap=True, wait = True, calling_convention = None):
         """
         Call any function in the binary with the parameters you want
 
@@ -1731,6 +1731,7 @@ class Debugger:
             log.warn_once(DEBUG_OFF)
 
         address = self.parse_address(function)
+        if calling_convention is None: calling_convention = function_calling_convention[context.arch]
         if DEBUG: self.logger.debug("calling %s", self.reverse_lookup(address))
 
         args, to_free  = self.__convert_args(args, heap)
@@ -1738,7 +1739,7 @@ class Debugger:
         #save registers 
         backup = self.backup()    
         
-        for register in function_calling_convention[context.arch]:
+        for register in calling_convention:
             if len(args) == 0:
                 break
             if DEBUG: self.logger.debug("%s setted to %s", register, args[0])
