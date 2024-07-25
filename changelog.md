@@ -2,6 +2,7 @@ GDB+ 7.0.1: catchpoints
 * support gdb catchpoints
 * correct implemention of load_libc
 * allow different register calling conventions for call() 
+* try to trace function calls
 
 GDB+ 7.0.0: Fast GDB
 * increased speed up to 10x

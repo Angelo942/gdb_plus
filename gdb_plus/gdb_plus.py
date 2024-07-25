@@ -1935,6 +1935,18 @@ class Debugger:
         self.execute(f"delete {bp}")
         return self
 
+    def set_ltrace(self, calling_convention = None, n_args = 3):
+        if calling_convention is None:
+            calling_convention = function_calling_convention[context.arch]
+        for name in self.elf.symbols:
+            if name.startswith("plt."):
+                def callback(dbg, *, name = name[4:]): # Needed to save the correct name
+                    print(f"{name}{[hex(getattr(dbg, calling_convention[i])) for i in range(n_args)]}", end=" ")
+                    self.finish()
+                    print(f"-> {hex(dbg.return_value)}")
+                    return False
+                self.b(name, callback=callback)
+
     # TODO take a library for relative addresses like libdebug
     def parse_address(self, location: [int, str]) -> str:
         """
