@@ -12,6 +12,7 @@ from math import ceil
 from multiprocessing import Process, Event as p_Event, Queue as p_Queue, cpu_count
 import re
 import logging as _logging
+from functools import cached_property
 
 
 # Logs to debug the library can be enabled by setting DEBUG = True in gdb_plus.utils
@@ -1934,6 +1935,51 @@ class Debugger:
         self.event_breakpoints.pop(bp)
         self.execute(f"delete {bp}")
         return self
+
+    @cached_property
+    def functions_from_gdb(self):
+        functions = []
+        raw = self.execute("info functions").split("\n")
+        while (line := raw.pop(0)) != "Non-debugging symbols:":
+            if "(" not in line:
+                continue
+            functions.append(line.split("(")[0].split(" ")[-1])
+        for line in raw[:-1]:
+            address, name = line.split()
+            if self.elf.address < int(address, 16) < self.elf.address + len(self.elf.data) and "@" not in name:
+                functions.append(name)
+        return functions
+        
+    def set_ftrace(self, calling_convention = None, *, n_args = 3, no_return = False):
+        """
+        You may seem stuck for seconds if a chunk of hundreads of symbols are not functions
+        Can not always read the return value because some "functions" may not return but jump to another function. Use no_return in case of problem 
+        """
+        seen = {}
+        if calling_convention is None:
+            calling_convention = function_calling_convention[context.arch]
+        for name, address in self.elf.symbols.items():
+            if address in seen:
+                if DEBUG: self.logger.debug("%s has the same address as %s", name, seen[address])
+            if name.startswith("got.") or name.startswith("plt.") or "@@" in name:
+                if DEBUG: self.logger.debug("%s is a library function", name)
+                continue
+            if name not in self.functions_from_gdb: # The check through info is slow, so we do it only if needed
+                try:
+                    if ".text" not in self.execute("info symbol " + name):
+                        if DEBUG: self.logger.debug("%s a function not found in the gdb infos", name)
+                        continue
+                except Exception: # No known symbol type [23/07/24] TODO test with symbols added on a stripped binary by the user
+                    if DEBUG: self.logger.debug("%s is not a function", name)
+                    continue
+            def callback(dbg, name = name):
+                print(f"{name}{[hex(getattr(dbg, calling_convention[i])) for i in range(n_args)]}")
+                if not no_return:
+                    dbg.finish()
+                    print(f"{name} -> {hex(dbg.return_value)}")
+                return False
+            self.b(name, callback=callback)
+            seen[address] = name
 
     def set_ltrace(self, calling_convention = None, n_args = 3):
         if calling_convention is None:
