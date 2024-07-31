@@ -1995,14 +1995,14 @@ class Debugger:
 
         if calling_convention is None:
             calling_convention = function_calling_convention[context.arch]
-        for name in self.elf.plt:
+        for name, address in self.elf.plt.items():
             def callback(dbg, name = name): # Needed to save the correct name
                 # TODO consider using a kind of context.calling_convention and use dbg.args here [32/07/24]
                 print(f"{name}{[hex(getattr(dbg, calling_convention[i])) for i in range(n_args)]}", end=" ")
                 dbg.finish()
                 print(f"-> {hex(dbg.return_value)}")
                 return False
-            bp = self.b(name, callback=callback, user_defined=False)
+            bp = self.b(address, callback=callback, user_defined=False)
             self.ltrace_breakpoints.append(bp)
         return self
 
@@ -2031,13 +2031,13 @@ class Debugger:
             try:
                 address = self.symbols[function] + offset
             except KeyError as e:
-                if not self.statically_linked and self.libc is None:
-                    log.error("symbol %s not found in ELF")
+                if not self.elf.statically_linked and self.libc is None:
+                    log.error("symbol %s not found in ELF", location)
                     log.error("The libc is not loaded yet. If you want to put a breakpoint there call load_libc() first!")
-                elif not self.statically_linked:
-                    log.error("symbol %s not found in ELF or libc")
+                elif not self.elf.statically_linked:
+                    log.error("symbol %s not found in ELF or libc", location)
                 else:
-                    log.error("symbol %s not found in ELF")
+                    log.error("symbol %s not found in ELF", location)
                 raise e
 
 
