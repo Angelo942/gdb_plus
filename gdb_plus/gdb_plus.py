@@ -1983,16 +1983,22 @@ class Debugger:
     # Be careful about the interactions between finish and other user breakpoints [31/07/24]
     # In particular consider skipping ptrace and wait functions if ptrace is emulated and we decide to move the breakpoints from the libc to the plt. [01/08/24]
     def set_ltrace(self, calling_convention = None, n_args = 3):
+        if self.elf.statically_linked:
+            log.warn("The binary does not use libraries!")
+            return self
+
         if calling_convention is None:
             calling_convention = function_calling_convention[context.arch]
-        for name in self.elf.symbols:
-            if name.startswith("plt."):
-                def callback(dbg, *, name = name[4:]): # Needed to save the correct name
-                    print(f"{name}{[hex(getattr(dbg, calling_convention[i])) for i in range(n_args)]}", end=" ")
-                    self.finish()
-                    print(f"-> {hex(dbg.return_value)}")
-                    return False
-                self.b(name, callback=callback)
+        for name in self.elf.plt:
+            def callback(dbg, name = name): # Needed to save the correct name
+                # TODO consider using a kind of context.calling_convention and use dbg.args here [32/07/24]
+                print(f"{name}{[hex(getattr(dbg, calling_convention[i])) for i in range(n_args)]}", end=" ")
+                dbg.finish()
+                print(f"-> {hex(dbg.return_value)}")
+                return False
+            bp = self.b(name, callback=callback, user_defined=False)
+            self.ltrace_breakpoints.append(bp)
+        return self
 
     # TODO take a library for relative addresses like libdebug
     def parse_address(self, location: [int, str]) -> str:
