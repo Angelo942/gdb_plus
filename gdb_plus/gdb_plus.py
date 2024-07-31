@@ -59,6 +59,8 @@ class Debugger:
         self.slaves = {} # I keep it to be sure I am tracing them 
         self.ptrace_breakpoints = []
         self.ptrace_backups = {}
+        self.ftrace_breakpoints = []
+        self.ltrace_breakpoints = []
 
         self.pid = None
         self.context_params = context.copy()
@@ -1980,6 +1982,10 @@ class Debugger:
             self.ftrace_breakpoints.append(bp)
         return self
 
+    def disable_ftrace(self):
+        for bp in self.ftrace_breakpoints:
+            self.delete_breakpoint(bp)
+
     # Be careful about the interactions between finish and other user breakpoints [31/07/24]
     # In particular consider skipping ptrace and wait functions if ptrace is emulated and we decide to move the breakpoints from the libc to the plt. [01/08/24]
     def set_ltrace(self, calling_convention = None, n_args = 3):
@@ -1999,6 +2005,10 @@ class Debugger:
             bp = self.b(name, callback=callback, user_defined=False)
             self.ltrace_breakpoints.append(bp)
         return self
+
+    def disable_ftrace(self):
+        for bp in self.ltrace_breakpoints:
+            self.delete_breakpoint(bp)
 
     # TODO take a library for relative addresses like libdebug
     def parse_address(self, location: [int, str]) -> str:
