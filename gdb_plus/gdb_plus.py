@@ -216,8 +216,8 @@ class Debugger:
         set_stop = []
         address = self.instruction_pointer
         if DEBUG: self.logger.debug("0x%x: %d %s", address, len(breakpoints), breakpoints)
-        # Copy because the list will be modified by delete() [06/06/23]
-        for breakpoint in breakpoints.copy():
+        # Invert list of breakpoints to make callback resolution in LIFO order
+        for breakpoint in breakpoints[::-1]:
             if breakpoint.temporary:
                 self.delete_breakpoint(breakpoint)
 
@@ -1984,6 +1984,8 @@ class Debugger:
                 self.b(address, callback=callback)
                 seen[address] = name
 
+    # Be careful about the interactions between finish and other user breakpoints [31/07/24]
+    # In particular consider skipping ptrace and wait functions if ptrace is emulated and we decide to move the breakpoints from the libc to the plt. [01/08/24]
     def set_ltrace(self, calling_convention = None, n_args = 3):
         if calling_convention is None:
             calling_convention = function_calling_convention[context.arch]
@@ -3135,6 +3137,7 @@ class Debugger:
     # I use real callback as long as we are breaking on the function it should work. The problem is if we start catch the syscall instead [08/06/23] Why ? [28/07/23]
     # Should we split the "manual" between ptrace and waitpid ? So that I can only wait for the later ? For now I will put the breakpoint a bit later so that you can do continue_until("waitpid") [28/07/23]
     # TODO teach how to add symbols in a binary for the functions if the code is statically linked and stripped
+    # TODO use plt if binary is not statically linked so that you don't need to load the libc ? [31/07/24] -> This may interfere with ltrace.
     def emulate_ptrace(self, *, off=False, wait_fun="waitpid", wait_syscall="wait4", manual=False, silent=False, signals = ["SIGSTOP"], syscall=False):
         self.restore_arch()
 

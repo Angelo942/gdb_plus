@@ -126,8 +126,9 @@ You could also use `dbg.step_until_address(<address>, <callback=None>)` if you j
 
 Breakpoints have three main features:
 * if the address is smaller than 0x10000 the address will immediately be interpreted as relative for PIE binaries
-* you can use a symbol name instead of an address such as `"main"` or `"main+0x12"`
+* you can use a symbol name instead of an address such as `"main"` or `"main+0x12"` (so far only suppored for binary and libc)
 * you can set callbacks to be executed when the breakpoint is reach and may choose to let the process continue after the execution.
+    * If multiple callbacks are set on the same address they will be executed in a LIFO order.
 
 The callback is a function that takes the debugger as parameter and returns a boolean to tell gdb if it should stop or not.
 The callbacks shouldn't be limited in what you can code. If you find problems raise an issue.
