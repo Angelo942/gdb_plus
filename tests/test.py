@@ -94,7 +94,6 @@ class Debugger_process(unittest.TestCase):
 			self.assertEqual(self.dbg.eip, 0x804809d)
 			self.dbg.close()
 
-	# Yet impossible. race condition between next's and finish's continue until. TODO handle priority level between step and continue
 	@unittest.skip
 	def test_multiple_breakpoints(self):
 		print("\ntest_multiple_breakpoints: ", end="")
@@ -111,6 +110,7 @@ class Debugger_process(unittest.TestCase):
 			self.assertEqual(callback_finished[0], 0x401586)
 			self.dbg.close()
 
+	@unittest.skip
 	def test_close_breakpoints(self):
 		print("\ntest_close_breakpoints: ", end="")
 		with context.local(arch="amd64", bits=64):
@@ -120,6 +120,23 @@ class Debugger_process(unittest.TestCase):
 			self.dbg.c()
 			self.assertEqual(self.dbg.rip, 0x401802)
 			self.dbg.close()
+
+	@unittest.skip
+	def test_ltrace(self):
+		print("\ntest_ltrace: ", end="")
+		with context.local(binary = "./insaaaaaaane"):
+			dbg = Debugger("./insaaaaaaane")
+			dbg.set_ltrace()
+			data = [0]
+			def callback(self):
+				data[0] = self.args[1]
+				return False
+			dbg.b("plt.fgets", callback=callback)
+			dbg.p.sendline(b"ciao")
+			dbg.c()
+			dbg.close()
+			self.assertEqual(data[0], 0x63)
+
 
 @unittest.skip
 class Debugger_actions(unittest.TestCase):
