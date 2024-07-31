@@ -1950,39 +1950,35 @@ class Debugger:
                 functions.append(name)
         return functions
         
-    # Could be optimized to use one debugger in parallel to call info symbol
+    # Be careful about the interactions between finish and other user breakpoints
     def set_ftrace(self, calling_convention = None, *, n_args = 3, no_return = False):
         """
-        You may seem stuck for seconds if a chunk of hundreads of symbols are not functions
         Can not always read the return value because some "functions" may not return but jump to another function. Use no_return in case of problem 
         """
-        seen = {}
         if calling_convention is None:
             calling_convention = function_calling_convention[context.arch]
+        symtab = self.elf.get_section_by_name(".symtab")
+        if not isinstance(symtab, SymbolTableSection):
+            log.warn("Can not find symbols. If you added them yourself to the binary please raise an issue.")
+            return self
         with log.progress("looking for functions in elf.symbols") as prog:
-            for idx, (name, address) in enumerate(self.elf.symbols.items()):
-                prog.status(f"{idx}/{len(self.elf.symbols)}")
-                if address in seen:
-                    if DEBUG: self.logger.debug("%s has the same address as %s", name, seen[address])
-                if name.startswith("got.") or name.startswith("plt.") or "@@" in name:
-                    if DEBUG: self.logger.debug("%s is a library function", name)
+            for idx, symbol in enumerate(symtab.iter_symbols()):
+                prog.status(f"{idx+1}/{symtab.num_symbols()}")
+                if symbol.entry["st_info"]["type"] != "STT_FUNC":
                     continue
-                if name not in self.functions_from_gdb: # The check through info is slow, so we do it only if needed
-                    try:
-                        if ".text" not in self.execute("info symbol " + name):
-                            if DEBUG: self.logger.debug("%s a function not found in the gdb infos", name)
-                            continue
-                    except Exception: # No known symbol type [23/07/24] TODO test with symbols added on a stripped binary by the user
-                        if DEBUG: self.logger.debug("%s is not a function", name)
-                        continue
-                def callback(dbg, name = name):
+                address = self.elf.symbols.get(symbol.name, None)
+                # is in the plt
+                if address is None:
+                    continue
+                def callback(dbg, name = symbol.name):
                     print(f"{name}{[hex(getattr(dbg, calling_convention[i])) for i in range(n_args)]}")
                     if not no_return:
                         dbg.finish()
                         print(f"{name} -> {hex(dbg.return_value)}")
                     return False
-                self.b(address, callback=callback)
-                seen[address] = name
+            bp = self.b(name, callback=callback, user_defined=False)
+            self.ftrace_breakpoints.append(bp)
+        return self
 
     # Be careful about the interactions between finish and other user breakpoints [31/07/24]
     # In particular consider skipping ptrace and wait functions if ptrace is emulated and we decide to move the breakpoints from the libc to the plt. [01/08/24]
