@@ -42,7 +42,7 @@ def lock_decorator(func):
 
 class Debugger:
     # If possible patch the rpath (spwn and pwninit do it automatically) instead of using env to load the correct libc. This will let you get a shell not having problems trying to preload bash too
-    def __init__(self, target: [int, process, str, list, tuple], env=None, aslr:bool=True, script:str="", from_start:bool=True, binary:[str, ELF]=None, debug_from: int=None, timeout: int=0.5, base_elf=None):
+    def __init__(self, target: [int, process, str, list, tuple], env=None, aslr:bool=True, script:str="", from_start:bool=True, binary:[str, ELF]=None, debug_from:int=None, timeout:int=0.5, base_elf:int=None, from_entry:bool=True):
         if DEBUG: _logger.debug("debugging %s using arch: %s [%dbits]", target if binary is None else binary, context.arch, context.bits)
 
         self._capstone = None #To decompile assembly for next_inst
@@ -189,7 +189,8 @@ class Debugger:
                 else:
                     log.warn("No context set and no binary given. This may cause problems.")
 
-            self.elf.address = self.get_base_elf()
+            if self.elf is not None:
+                self.elf.address = self.base_elf
             self.__setup_gdb()
 
             # Start debugging from a specific address. Wait timeout seconds for the program to reach that address. Is blocking so you may need to use context.Thread() in some cases
@@ -212,6 +213,10 @@ class Debugger:
                         break
                     else:
                         log.warn(f"{timeout}s timeout isn't enought to reach the code... Retrying...")
+            elif from_entry and self.elf is not None:
+                if self.elf.arch in ["riscv", "aarch64"]:
+                    log.warn("Debugging from entry may fail with qemu. In case set Debugger(..., from_entry = False)")
+                self.until(self.elf.entry)
 
     def __handle_breakpoints(self, breakpoints):
         should_continue = self._stop_reason != "SINGLE STEP" # Versione semplice. Se vengo da uno step non devo mai continuare e almeno adesso è già salvato [05/06/23]
@@ -665,6 +670,7 @@ class Debugger:
         context.Thread(target=action, name=f"[{self.pid}] debug_from").start()
         return self
 
+    # Still useful for cases where we don't have the binary to locate the entry point.
     def load_libc(self):
         """
         Continue until the program has loaded the libc. Needed before setting breakpoints on libc functions.
@@ -772,6 +778,7 @@ class Debugger:
         
     # I want a function to restart the process without closing and opening a new one
     # Not working properly
+    # Can use elf.entry to find entry point
     def reset(self, argv=None, reload_elf=False):
         ...
 
@@ -2021,6 +2028,7 @@ class Debugger:
             self.delete_breakpoint(bp)
 
     # TODO take a library for relative addresses like libdebug
+    # May want to increase the limit
     def parse_address(self, location: [int, str]) -> str:
         """
         parse symbols and relative addresses to return the absolute address
@@ -2028,7 +2036,7 @@ class Debugger:
         if type(location) is int:
             address = location
             if location < 0x010000:
-                address += self.base_elf
+                address += self.elf.address
 
         elif type(location) is str:
             function = location
