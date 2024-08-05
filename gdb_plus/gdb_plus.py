@@ -1954,7 +1954,8 @@ class Debugger:
         return functions
         
     # Be careful about the interactions between finish and other user breakpoints
-    def set_ftrace(self, calling_convention = None, *, n_args = 3, no_return = False):
+    # TODO print ascii strings instead of pointer
+    def set_ftrace(self, *, calling_convention = None, n_args = 3, no_return = False, custom_callback = None, exclude = []):
         """
         Can not always read the return value because some "functions" may not return but jump to another function. Use no_return in case of problem 
         """
@@ -1966,6 +1967,8 @@ class Debugger:
             return self
         with log.progress("looking for functions in elf.symbols") as prog:
             for idx, symbol in enumerate(symtab.iter_symbols()):
+                if symbol in exclude:
+                    continue
                 prog.status(f"{idx+1}/{symtab.num_symbols()}")
                 if symbol.entry["st_info"]["type"] != "STT_FUNC":
                     continue
@@ -1973,14 +1976,17 @@ class Debugger:
                 # is in the plt
                 if address is None:
                     continue
-                def callback(dbg, name = symbol.name):
-                    print(f"{name}{[hex(getattr(dbg, calling_convention[i])) for i in range(n_args)]}")
-                    if not no_return:
-                        dbg.finish()
-                        print(f"{name} -> {hex(dbg.return_value)}")
-                    return False
-            bp = self.b(name, callback=callback, user_defined=False)
-            self.ftrace_breakpoints.append(bp)
+                if custom_callback is None:
+                    def callback(dbg, name = symbol.name):
+                        print(f"{name}{[hex(getattr(dbg, calling_convention[i])) for i in range(n_args)]}")
+                        if not no_return:
+                            dbg.finish()
+                            print(f"{name} -> {hex(dbg.return_value)}")
+                        return False
+                else:
+                    callback = lambda dbg, name = symbol.name: custom_callback(dbg, name)
+                bp = self.b(address, callback=callback, user_defined=False)
+                self.ftrace_breakpoints.append(bp)
         return self
 
     def disable_ftrace(self):
@@ -1989,7 +1995,7 @@ class Debugger:
 
     # Be careful about the interactions between finish and other user breakpoints [31/07/24]
     # In particular consider skipping ptrace and wait functions if ptrace is emulated and we decide to move the breakpoints from the libc to the plt. [01/08/24]
-    def set_ltrace(self, calling_convention = None, n_args = 3):
+    def set_ltrace(self, *, calling_convention = None, n_args = 3, no_return = False, exclude = []):
         if self.elf.statically_linked:
             log.warn("The binary does not use libraries!")
             return self
@@ -1997,11 +2003,14 @@ class Debugger:
         if calling_convention is None:
             calling_convention = function_calling_convention[context.arch]
         for name, address in self.elf.plt.items():
+            if name in exclude:
+                continue
             def callback(dbg, name = name): # Needed to save the correct name
                 # TODO consider using a kind of context.calling_convention and use dbg.args here [32/07/24]
                 print(f"{name}{[hex(getattr(dbg, calling_convention[i])) for i in range(n_args)]}", end=" ")
-                dbg.finish()
-                print(f"-> {hex(dbg.return_value)}")
+                if not no_return:
+                    dbg.finish()
+                    print(f"-> {hex(dbg.return_value)}")
                 return False
             bp = self.b(address, callback=callback, user_defined=False)
             self.ltrace_breakpoints.append(bp)
