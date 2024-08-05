@@ -2991,7 +2991,11 @@ class Debugger:
 
         # Doesn't work with qemu [05/07/23]
         elif self.gdb is not None:
-            return self.gdb.newest_frame().older().pc()
+            stack_frame = self.gdb.newest_frame().older()
+            # Fail if call return on __start symbol
+            if stack_frame is None:
+                return 0
+            return stack_frame.pc()
 
         elif self.libdebug is not None:
             return self._find_rip()     
