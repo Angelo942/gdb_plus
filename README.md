@@ -62,12 +62,12 @@ Im_done.set()
 dbg.debug_from_done.wait()
 ```
 
-This should pass any check for a debugger, even searches for INT3, exept a full check that the memory hasn't been edited.
+This should pass any check for a debugger, even searches for INT3, except a full check that the code hasn't been edited.
 
-Calling your script with pwntools arguments `NOPTRACE` or `REMOTE` will allow you to disable all actions related to gdb and test your exploit localy or attack the remote target without having to comment anything. If you want a finer control you can use `ìf dbg.debugging` to discriminate the code that should be executed when gdb is opened or not.
+Calling your script with pwntools arguments `NOPTRACE` or `REMOTE` will allow you to disable all actions related to gdb and test your exploit locally or attack the remote target without having to comment anything. If you want a finer control you can use `ìf dbg.debugging` to discriminate the code that should be executed when gdb is opened or not.
 
 **Note**  
-Debugger can also take as parameter a dictionary for the environment variables. You CAN use it to preload libraries, but if you want to do it for the libc I would advise to **patch the rpath** of the binary instead (if you don't know how take a look at [spwn](https://github.com/MarcoMarce) or [pwninit](https://github.com/io12/pwninit). This will prevent problems when running `system("/bin/sh")` that will fail due to LD_PRELOAD and may hide other problems in your exploit.
+Debugger can also take as parameter a dictionary for the environment variables. You CAN use it to preload libraries, but if you want to do it for the libc I would advise to **patch the rpath** of the binary instead (if you don't know how take a look at [spwn](https://github.com/MarcoMeinardi/spwn) or [pwninit](https://github.com/io12/pwninit). This will prevent problems when running `system("/bin/sh")` that will fail due to LD_PRELOAD and may hide other problems in your exploit.
 
 **Warning**  
 Old versions of gdbserver (< 11.0.50) have problems launching 32bit binaries. If you see a crash trying to find the canary use `from_start=False` as parameter for the debugger. This will launch the process and then attach to it once the memory has been correctly mapped. Letting `from_start=True` may also cause problems if the environment variables are important to your exploit since they will be mixed with some set up by gdbserver.
@@ -126,7 +126,7 @@ You could also use `dbg.step_until_address(<address>, <callback=None>)` if you j
 
 Breakpoints have three main features:
 * if the address is smaller than 0x10000 the address will immediately be interpreted as relative for PIE binaries
-* you can use a symbol name instead of an address such as `"main"` or `"main+0x12"` (so far only suppored for binary and libc)
+* you can use a symbol name instead of an address such as `"main"` or `"main+0x12"` (so far only supported for binary and libc)
 * you can set callbacks to be executed when the breakpoint is reach and may choose to let the process continue after the execution.
     * If multiple callbacks are set on the same address they will be executed in a LIFO order.
 
@@ -223,7 +223,7 @@ We have two wrapper for the main ones:
 * `dbg.base_elf`
 * `dbg.base_libc`
 
-from gdb_plus >= 5.4.0 dbg.elf.address is already set to the correct address even with ASLR on, so you may need dbg.base_elf only if you debug a process for wich you don't have the binary
+from gdb_plus >= 5.4.0 dbg.elf.address is already set to the correct address even with ASLR on, so you may need dbg.base_elf only if you debug a process for which you don't have the binary
 
 We can also use capstone to know what is the next instruction that will be executed
 ```py
@@ -258,7 +258,7 @@ This will interrupt the process at every call to waitpid for the master and SIGS
 **Warning**
 * If the tracee stopped with a SIGSTOP gdb may bug a bit and you may need `force=True` to make it continue correctly
 * pwndbg can not handle multi-process applications and this section is only possible in native gdb or with GEF
-* Handleling multiple processes in the same debugger instead of splitting them may cause problems whith the waits
+* Handling multiple processes in the same debugger instead of splitting them may cause problems with the waits
 
 ## Call functions
 
@@ -281,9 +281,9 @@ You can pass parameters as strings or byte_arrays. By default they will be saved
 If the stack frame has been corrupted finish() may not work. If this is the case set last address of your function in `call(..., end_pointer= ...)`.
 
 ## Libdebug
-By default GDB+ uses a gdbserver to debug the process. This is verry usefull when you also have to check manually gdb while you are writing a script, but can be verry slow. For this reason we now support libdebug (from version >= 0.4) as an alternative debugger. It is lacking a lot of features but can do the job for most tasks and it can be 50 times faster. 
+By default GDB+ uses a gdbserver to debug the process. This is very useful when you also have to check manually gdb while you are writing a script, but can be very slow. For this reason we now support libdebug (from version >= 0.4) as an alternative debugger. It is lacking a lot of features but can do the job for most tasks and it can be 50 times faster. 
 **NOTE**
-libdebug has been refactored in october 2023. The new version doesn't allow yet the same control over events breaking a lot of features. We are therefor using the legacy version for now.
+libdebug has been refactored in october 2023. The new version doesn't allow yet the same control over events breaking a lot of features. We are therefore using the legacy version for now.
 
 The debugger will always start with dbg, but you can switch back and forth
 
@@ -307,7 +307,7 @@ You can install it manually:
 Arm binaries ar now partially supported. The problem running them in qemu is that we can't access the pid of the process from gdb and we can't catch when the process forks. This limits the feature we can use, but the rest is working fine.
 
 **Note**
-* set context.arch == "aarch64" at the beggining of your script
+* set context.arch == "aarch64" at the beginning of your script
 * pwndbg may be better than GEF when using qemu. In particular if you find gdb always debugging qemu instead of your process and you are sure you set the correct context you may want to try switching to pwndbg for this part.
 
 # TODO

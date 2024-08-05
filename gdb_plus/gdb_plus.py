@@ -13,6 +13,7 @@ from multiprocessing import Process, Event as p_Event, Queue as p_Queue, cpu_cou
 import re
 import logging as _logging
 from functools import cached_property
+from elftools.elf.sections import SymbolTableSection
 
 
 # Logs to debug the library can be enabled by setting DEBUG = True in gdb_plus.utils
@@ -2006,7 +2007,7 @@ class Debugger:
             self.ltrace_breakpoints.append(bp)
         return self
 
-    def disable_ftrace(self):
+    def disable_ltrace(self):
         for bp in self.ltrace_breakpoints:
             self.delete_breakpoint(bp)
 
