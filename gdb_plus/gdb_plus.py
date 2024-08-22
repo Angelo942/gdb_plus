@@ -212,8 +212,8 @@ class Debugger:
                         self.jump(address_debug_from)
                         break
                     else:
-                        log.warn(f"{timeout}s timeout isn't enought to reach the code... Retrying...")
-            elif from_entry and self.elf is not None:
+                        log.warn(f"{timeout}s timeout isn't enough to reach the code... Retrying...")
+            elif from_entry and self.elf is not None and not self.elf.statically_linked:
                 if self.elf.arch in ["riscv", "aarch64"]:
                     log.warn("Debugging from entry may fail with qemu. In case set Debugger(..., from_entry = False)")
                 self.until(self.elf.entry)
