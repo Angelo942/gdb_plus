@@ -1,6 +1,6 @@
 GDB+ 7.0.1: catchpoints
 * support gdb catchpoints
-* correct implemention of load_libc
+* correct implementation of load_libc
 * allow different register calling conventions for call() 
 * try to trace function calls
 * breakpoint callbacks are executed in LIFO order
@@ -16,7 +16,7 @@ GDB+ 6.4.3:
 * Update heap analysis functions for pwndbg 
 * Support waitpid(-1) before process traced
 * Allow to setup ptrace_emulation without call to ptrace
-* make Debugger.canary writable 
+* make Debugger.canary writeable 
 * Debugger(binary=...) support ELF object too
 * support direct connection to gdbserver
 
@@ -26,7 +26,7 @@ GDB+ 6.4.2:
 * hotfix disable lock.log with NOPTRACE
 * hotfix Removed buffer overflow in `__convert_args`
 * Assert that malloc is present before trying to allocate on heap
-* Option to connect to remote server while debugging localy
+* Option to connect to remote server while debugging locally
 * Migrate to logging library 
 * read pointers based on context
 * context manager
@@ -73,4 +73,4 @@ GDB+ 6.3.1: hotfix libdebug
 GDB+ 6.3.0: **Let's go faster**
 * Can use gdb or libdebug ad debugger
 	- gdb can be used manually, but will be slower to script
-	- libdebug has less fetures and more bugs
+	- libdebug has less features and more bugs

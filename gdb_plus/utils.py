@@ -7,14 +7,15 @@ from queue import Queue
 from dataclasses import dataclass
 
 DEBUG = False
-# I can't always access dbg.logger, but I want to make sure not to polute the logger for the user. I only need this info when I debug my library
+# I can't always access dbg.logger, but I want to make sure not to pollute the logger for the user. I only need this info when I debug my library
 def log_debug(msg, *argv):
     if DEBUG:
         log.debug(msg, *argv)
 
+# Only support amd64
 class user_regs_struct:
     def __init__(self):
-        # I should use context maybe... At least you don't have suprises like me when pack breaks [02/03/23]
+        # I should use context maybe... At least you don't have surprises like me when pack breaks [02/03/23]
         self.registers = {64: ["r15", "r14", "r13", "r12", "rbp", "rbx", "r11", "r10", "r9", "r8", "rax", "rcx", "rdx", "rsi", "rdi", "orig_ax", "rip", "cs", "eflags", "rsp", "ss", "fs_base", "gs_base", "ds", "es", "fs", "gs"]}[context.bits]
         self.size = len(self.registers)*context.bytes
 
@@ -69,7 +70,7 @@ class Arguments:
             return self.dbg.read(pointer, context.bytes)
 
 
-    # How do we handle pushes ? Do I only write arguments when at the begining of the function and give up on using this property to load arguments before a call ?
+    # How do we handle pushes ? Do I only write arguments when at the beginning of the function and give up on using this property to load arguments before a call ?
     # Only valid for arguments already set
     def __setitem__(self, index, value):
         if type(index) is slice:
@@ -110,7 +111,7 @@ class Arguments_syscall:
         else:
             raise Exception(f"We don't have {index + 1} arguments in a syscall!")
 
-    # How do we handle pushes ? Do I only write arguments when at the begining of the function and give up on using this property to load arguments before a call ?
+    # How do we handle pushes ? Do I only write arguments when at the beginning of the function and give up on using this property to load arguments before a call ?
     # Only valid for arguments already set
     def __setitem__(self, index, value):
         if type(index) is slice:
@@ -125,7 +126,7 @@ class Arguments_syscall:
         else:
             raise Exception(f"We don't have {index + 1} arguments in a syscall!")
 
-# Warning. Calling wait() before clear() returns immediatly!
+# Warning. Calling wait() before clear() returns immediately!
 # TODO add a counter on when to stop treating return False as continues
 class MyEvent(Event):
     def __init__(self):
@@ -151,7 +152,7 @@ class MyEvent(Event):
                 # Prevent race conditions. Make sure all threads know the current priority before anyone calls lower_priority
                 sleep(0.001)
                 self.lower_priority(comment)
-                # perchè non funzia ?
+                # why does it work ?
                 #super().clear()
                 break
             # If I call wait again while the event is set it won't block ! [04/04/23]
