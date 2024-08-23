@@ -119,7 +119,10 @@ class Debugger:
             self.debugging = True
 
         if binary is None:
-            binary = context.binary
+            if type(target) in [str, ELF]:
+                binary = target
+            else:
+                binary = context.binary
 
         # The idea was to let gdb interrupt only one inferior while letting the other one run, but this doesn't work [29/04/23]
         #script = "set target-async on\nset pagination off\nset non-stop on" + script
@@ -144,7 +147,7 @@ class Debugger:
             _, self.gdb = gdb.attach(target, gdbscript=script, api=True)
 
         elif args.REMOTE:
-            self.elf = ELF(target, checksec=False) if binary is None else ELF(binary, checksec=False) if type(binary) is str else binary
+            self.elf = ELF(binary, checksec=False) if type(binary) is str else binary
 
         elif context.noptrace:
             self.p = process(target, env=env, aslr=aslr)
@@ -159,7 +162,7 @@ class Debugger:
 
         if type(self.p) is process:
             self.pid = self.p.pid
-            self.elf = self.p.elf if binary is None else ELF(binary, checksec=False) if type(binary) is str else binary
+            self.elf = self.p.elf #if binary is None else ELF(binary, checksec=False) if type(binary) is str else binary
 
         if self.pid is not None:
             self.logger = _logging.getLogger(f"Debugger-{self.pid}")
