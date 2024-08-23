@@ -12,7 +12,7 @@ from math import ceil
 from multiprocessing import Process, Event as p_Event, Queue as p_Queue, cpu_count
 import re
 import logging as _logging
-from functools import cached_property
+from functools import cache, cached_property
 from elftools.elf.sections import SymbolTableSection
 
 
@@ -1851,7 +1851,25 @@ class Debugger:
 
         return self
 
-    def syscall(self, code: int, args: list, *, heap = True):
+    @cache
+    def _make_page_rwx(self, address):
+        self.call("mprotect", [address, 0x1000, constants.PROT_EXEC | constants.PROT_READ | constants.PROT_WRITE])
+        
+    def syscall(self, code: int, args: list, *, heap = True, syscall_address = None):
+        """
+        Make the program call a given syscall
+        Under qemu restrictions apply. You must have the symbols for mprotect to make the code section writable or pass as an argument the address of a syscall instruction.
+
+        Parameters
+        ----------
+        code : INT or pwnlib constant. 
+            The syscall to call
+        args : LIST of INT, pwnlib constants or STRING. 
+            Arguments to the syscall. By default strings will be allocated to the heap
+
+        syscall_address : INT, optional. 
+            Address of a syscall. Used only if the program runs under qemu and you don't have the symbols for mprotect.
+        """
         if DEBUG: self.logger.debug("syscall %d: %s", code, args)
         
         args = [code] + args
@@ -1863,25 +1881,30 @@ class Debugger:
 
         backup_registers = self.backup()
         return_address = self.instruction_pointer
-        # GDB has a bug with QEMU where I can't patch the code
+        args, to_free = self.__convert_args(args, heap)
+        return_address = self.instruction_pointer
+        # QEMU Doesn't allow to overwrite the binary even after calling mprotect
         if context.arch in ["aarch64", "riscv"]:
-            # Doesn't work because I can't get the base of the binary from qemu
-            address = self.elf.data.find(shellcode) 
-            self.jump(address)
+            if "mprotect" not in self.symbols:
+                if syscall_address is None:
+                    raise Exception("calling syscalls under qemu requires mprotect! Add the symbol or give me the address of a syscall instruction.")
+                else:
+                    self.jump(syscall_address)
+            else: 
+                self._make_page_rwx(return_address & 0xfffffffffffff000)
+                backup_memory = self.read(return_address, len(shellcode))
+                self.write(return_address, shellcode)
         else:
             backup_memory = self.read(return_address, len(shellcode))
             self.write(return_address, shellcode)
-
-        args, to_free = self.__convert_args(args, heap)
-
         for register, arg in zip(calling_convention, args):
             if DEBUG: self.logger.debug("%s setted to %s", register, arg)
             setattr(self, register, arg)
-    
+        # Execute the syscall
         self.step()
         res = self.return_value
         self.restore_backup(backup_registers)
-        if context.arch not in ["aarch64", "riscv"]:
+        if context.arch not in ["aarch64", "riscv"] or "mprotect" in self.symbols:
             self.write(return_address, backup_memory)
         self.jump(return_address)
         for pointer, n in to_free[::-1]: #I do it backward to have a coherent behaviour with heap=False, but I still don't really know if I should implement a free in that case
