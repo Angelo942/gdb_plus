@@ -2,7 +2,13 @@ import pwn
 import os
 from time import sleep
 from functools import partial
-from capstone import Cs, CS_ARCH_X86, CS_ARCH_ARM64, CS_ARCH_RISCV, CS_MODE_32, CS_MODE_64, CS_MODE_ARM, CS_MODE_RISCV32, CS_MODE_RISCV64, CS_MODE_RISCVC
+from capstone import Cs, CS_ARCH_X86, CS_ARCH_RISCV, CS_MODE_32, CS_MODE_64, CS_MODE_ARM, CS_MODE_RISCV32, CS_MODE_RISCV64, CS_MODE_RISCVC
+# Migrate to capstone v6, but keep support for v5
+try:
+    from capstone import CS_ARCH_AARCH64
+except ImportError:
+    from capstone import CS_ARCH_ARM64
+    CS_ARCH_AARCH64 = CS_ARCH_ARM64
 from threading import Event
 from queue import Queue
 from gdb_plus.utils import *
@@ -2883,7 +2889,7 @@ class Debugger:
             elif context.arch == "i386":
                 self._capstone = Cs(CS_ARCH_X86, CS_MODE_32)
             elif context.arch == "aarch64":
-                self._capstone = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+                self._capstone = Cs(CS_ARCH_AARCH64, CS_MODE_ARM)
             elif context.arch in ["riscv32", "riscv64"]:
                 self._capstone = Cs(CS_ARCH_RISCV, CS_MODE_RISCVC) #CS_MODE_RISCV32 if context.bits == 32 else CS_MODE_RISCV64)
             else:
