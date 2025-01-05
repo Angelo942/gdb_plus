@@ -3830,10 +3830,13 @@ class Debugger:
                 if res is not None:
                     return res
                 try:
-                    res = unpack(self.gdb.parse_and_eval(f"${name}").bytes, "all")
+                    # .bytes is not supported yet in ubuntu 22
+                    #res = unpack(self.gdb.parse_and_eval(f"${name}").bytes, "all")
+                    res = int(self.gdb.parse_and_eval(f"${name}")) % 2**context.bits
                 except:
                     log.warn("error reading register. Retrying...")
-                    res = unpack(self.gdb.parse_and_eval(f"${name}").bytes, "all")
+                    #res = unpack(self.gdb.parse_and_eval(f"${name}").bytes, "all")
+                    res = int(self.gdb.parse_and_eval(f"${name}")) % 2**context.bits
                 self._cached_registers[name] = res
             elif self.libdebug is not None:
                 # BUG libdebug can not parse lower registers [19/11/23]
