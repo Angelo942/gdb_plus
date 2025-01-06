@@ -220,10 +220,10 @@ While you can access the registers only when the process is at a stop, remember 
 
 Pwntools let you access the address where each library is loaded with `p.libs()[<path_to_library>]`
 We have two wrapper for the main ones:
-* `dbg.base_elf`
-* `dbg.base_libc`
+* `dbg.elf_address`
+* `dbg.libc_address`
 
-from gdb_plus >= 5.4.0 dbg.elf.address is already set to the correct address even with ASLR on, so you may need dbg.base_elf only if you debug a process for which you don't have the binary
+These are similar to dbg.elf.address and dbg.libc.address, but when set by an exploit, if the address is already known to gdb, will warn you if you got the wrong leak.
 
 We can also use capstone to know what is the next instruction that will be executed
 ```py

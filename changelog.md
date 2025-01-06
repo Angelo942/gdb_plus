@@ -5,6 +5,7 @@ GDB+ 7.0.1: catchpoints
 * try to trace function calls
 * breakpoint callbacks are executed in LIFO order
 * gdbserver starts from entry point by default
+* dbg.elf_address and dbg.libc_address warn user if the exploit sets them to the wrong value
 
 GDB+ 7.0.0: Fast GDB
 * increased speed up to 10x

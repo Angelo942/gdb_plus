@@ -2669,7 +2669,6 @@ class Debugger:
     def libc(self, elf_libc: ELF):
         self._libc = elf_libc
 
-    # get base address of libc
     def _get_base_libc(self):
         if self.libc is None:
             log.warn_once("I don't see a libc ! Set dbg.libc = ELF(<path_to_libc>)")
@@ -2696,10 +2695,21 @@ class Debugger:
             self._base_libc = self._get_base_libc()
         return self._base_libc
 
+    @base_libc.setter
+    def base_libc(self, address):
+        if self.debugging and address != self.base_libc:
+            log.warn("The base address of the libc is not the one expected! Expected: %s. Received: %s", hex(self.base_libc), hex(address))
+
+        self.libc.address = address
+        self._base_libc = address
+
+    libc_address = base_libc
+
     # get base address of binary
     # May be wrong for qemu -> Now with vmmap it should be accurate [25/08/24]
     def _get_base_elf(self):
         maps = self.libs()
+        # TODO For remote debugging use info auxv! [25/08/24]
         name_binary = self.elf.path.split("/")[-1]
         # Not perfect, but is a first filter
         if "/usr/bin/qemu" in "".join(maps.keys()):
@@ -2743,15 +2753,21 @@ class Debugger:
             #        return address - address%0x1000 #Not always true...
                     
 
-    @property # I don't wan't to rely on self.elf.address which isn't set by default for PIE binaries
+    @property
     def base_elf(self):
-        # I don't want to set it myself either because I want to be able to test leak == dbg.base_elf during my exploit
-        #if self.elf.address == 0:
-        #    self.elf.address = self._get_base_elf()
-        #return self.elf.address
         if self._base_elf is None:
             self._base_elf = self._get_base_elf()
         return self._base_elf
+
+    @base_elf.setter
+    def base_elf(self, address):
+        if self.debugging and address != self.base_elf:
+            log.warn("The base address of the binary is not the one expected! Expected: %s. Received: %s", hex(self.base_elf), hex(address))
+
+        self.elf.address = address
+        self._base_elf = address
+
+    elf_address = base_elf
 
     # TODO handle multiple libraries
     @property
