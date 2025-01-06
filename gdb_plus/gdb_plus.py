@@ -633,17 +633,6 @@ class Debugger:
             ...
         return self
 
-    # Because pwntools isn't perfect
-    # Shouldn't be needed now that we set the right context in handle_stop. [30/12/23]
-    def restore_arch(self):
-        """
-        check that the context used by pwntools is correct
-        """
-        if self.elf is not None and context.arch != self.elf.arch:
-            if DEBUG: self.logger.debug("wrong context ! Updating...")
-        context.arch = self.elf.arch
-        context.bits = self.elf.bits
-
     def debug_from(self, location: [int, str], *, event=None, timeout=0.5):
         """
         Alternative debug_from which isn't blocking.
@@ -3272,8 +3261,6 @@ class Debugger:
             dbg.c(wait=False)
             child.c(wait=False)
         """
-        
-        self.restore_arch()
 
         if not self.debugging:
             log.warn_once(DEBUG_OFF)
