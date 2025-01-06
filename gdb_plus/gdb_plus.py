@@ -2661,6 +2661,8 @@ class Debugger:
     
     @property
     def libc(self):
+        if self.elf is not None and self.elf.statically_linked:
+            return None
         if self._libc is None and self.p is not None:
             self._libc = self.p.libc
         return self._libc
