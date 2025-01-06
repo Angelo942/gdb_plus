@@ -55,7 +55,7 @@ class Arguments:
             if DEBUG: self.dbg.logger.debug(f"argument {index} is in register {register}")
             return getattr(self.dbg, register)
         else:
-            index -= calling_convention
+            index -= len(calling_convention)
         # It would be better to force the user to save the arguments at the entry point and read them later instead... [25/07/23]
         if context.arch in ["amd64", "i386"]:
             if self.dbg.next_inst.toString() in ["endbr64", "push rbp", "push ebp"]:
@@ -83,7 +83,7 @@ class Arguments:
             if DEBUG: self.dbg.logger.debug(f"argument {index} is in register {register}")
             return setattr(self.dbg, register, value)
         else:
-            index -= calling_convention
+            index -= len(calling_convention)
         if context.arch in ["amd64", "i386"]:
             if self.dbg.next_inst.toString() in ["endbr64", "push rbp", "push ebp"]:
                 pointer = self.dbg.stack_pointer + (index + 1) * context.bytes
