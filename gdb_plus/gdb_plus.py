@@ -1996,20 +1996,6 @@ class Debugger:
         self._event_breakpoints.pop(bp)
         self.execute(f"delete {bp}")
         return self
-
-    @cached_property
-    def functions_from_gdb(self):
-        functions = []
-        raw = self.execute("info functions").split("\n")
-        while (line := raw.pop(0)) != "Non-debugging symbols:":
-            if "(" not in line:
-                continue
-            functions.append(line.split("(")[0].split(" ")[-1])
-        for line in raw[:-1]:
-            address, name = line.split()
-            if self.elf.address < int(address, 16) < self.elf.address + len(self.elf.data) and "@" not in name:
-                functions.append(name)
-        return functions
         
     # Be careful about the interactions between finish and other user breakpoints
     # TODO print ascii strings instead of pointer
