@@ -140,6 +140,9 @@ class Debugger:
             _, self.gdb = gdb.attach(target, exe=self.elf.path, gdbscript=script, api=True)
             self.pid = self.current_inferior.pid
 
+        # We should check if we crash when elf.native == False to warn the user to install qemu-user, but elf doesn't exist yet... [06/01/25]
+        # Do we try only for context.native == False and context.copy == {} ? [06/01/25]
+
         elif type(target) is int:
             self.p = None
             self.pid = target
@@ -168,7 +171,7 @@ class Debugger:
 
         if type(self.p) is process:
             self.pid = self.p.pid
-            self.elf = self.p.elf #if binary is None else ELF(binary, checksec=False) if type(binary) is str else binary
+            self.elf = self.p.elf if binary is None else ELF(binary, checksec=False) if type(binary) is str else binary
 
         if self.pid is not None:
             self.logger = _logging.getLogger(f"Debugger-{self.pid}")
@@ -186,6 +189,7 @@ class Debugger:
                     del self.elf.symbols[name]
         
         if self.debugging:
+            # Would be nice to have this at the beginning in case we need qemu [06/01/25]
             if context.copy().get("arch", False) == False: # Empty context
                 if self.elf is not None:
                     context.binary = self.elf
@@ -194,17 +198,18 @@ class Debugger:
                 else:
                     log.warn("No context set and no binary given. This may cause problems.")
 
-            if self.elf is not None:
-                self.elf.address = self.base_elf
-                self.elf.size = len(self.elf.data)
             self.__setup_gdb()
+
+            if self.elf is not None:
+                self.elf.address = self.base_elf # Must be after __setup_gdb to know if we are using GEF or pwndbg
+                self.elf.size = len(self.elf.data)
 
             # Start debugging from a specific address. Wait timeout seconds for the program to reach that address. Is blocking so you may need to use context.Thread() in some cases
             # WARNING don't use 'continue' in your gdbscript when using debug_from ! [17/04/23]
             # I don't like that this is blocking, so you can't interact while waiting... Can we do it differently ? [17/04/23]
             if debug_from is not None:
                 # I can't attach again to the process
-                assert context.arch != "aarch64", "debug_from isn't supported in qemu"
+                assert context.native, "debug_from isn't supported in qemu"
                 address_debug_from = self._parse_address(debug_from)
                 backup = self.inject_sleep(address_debug_from)
                 while True:  
@@ -219,7 +224,9 @@ class Debugger:
                         break
                     else:
                         log.warn(f"{timeout}s timeout isn't enough to reach the code... Retrying...")
-            elif from_entry and from_start and self.elf is not None and not self.elf.statically_linked:
+            # This is here to have the libc always available [06/01/25]
+            # self.instruction_pointer != self.elf.entry: May not have a loader and libc, but still be considered dynamically linked
+            elif from_entry and from_start and self.elf is not None and not self.elf.statically_linked and self.instruction_pointer != self.elf.entry:
                 if not self.elf.native:
                     log.warn_once("Debugging from entry may fail with qemu. In case set Debugger(..., from_entry = False)")
                 self.until(self.elf.entry)
@@ -536,6 +543,10 @@ class Debugger:
 
         self._myStopped.pid = self.pid
         self.__test_debugger()
+
+        if not context.native and self._gef:
+            log.warn_once("Using GEF with qemu. In case of bugs try pwndbg")
+
         if self._pwndbg:
             # because for some reason they set the child...
             # But this breaks any gdbscript with set follow-fork-mode to child... [17/11/23]
@@ -561,7 +572,7 @@ class Debugger:
             log.warn_once(DEBUG_OFF)
             return
 
-        assert context.arch != "aarch64", "migrate isn't supported in qemu"
+        assert context.native, "migrate isn't supported in qemu"
 
         # Maybe put a try except to restore the backup in case of accident [06/06/23]
         if gdb:
@@ -845,6 +856,7 @@ class Debugger:
         return {inferior.num: inferior for inferior in self.gdb.inferiors()}
         #return (None,) + self.gdb.inferiors()
 
+    # TODO if possible allow for an optimisation "single inferior" or something similar where we never waste time calling the inferior [08/10/24]
     @property
     def current_inferior(self):
         if not self.debugging:
@@ -1875,10 +1887,16 @@ class Debugger:
 
         return self
 
-    @cache
-    def _make_page_rwx(self, address):
-        #self.call("mprotect", [address, 0x1000, constants.PROT_EXEC | constants.PROT_READ | constants.PROT_WRITE])
-        self.call("mprotect", [address, 0x1000, 7]) #riscv doesn't have constants yet.
+    # Can not be cached because qemu somehow changes it back at every step! [16/01/25]
+    def _make_page_rwx(self, address, size=1):
+        page_address = address - address % 0x1000
+        page_size = (size // 0x1000 + 1) * 0x1000
+
+        if self._gdb is not None:
+           self.execute(f"call (void)mprotect({page_address}, {page_size}, 0x7)")
+        else:
+            #self.call("mprotect", [page_address, size, constants.PROT_EXEC | constants.PROT_READ | constants.PROT_WRITE])
+            self.call("mprotect", [page_address, size, 7]) #riscv doesn't have constants yet.
         
     def syscall(self, code: int, args: list, *, heap = True, syscall_address = None):
         """
@@ -1907,29 +1925,29 @@ class Debugger:
         backup_registers = self.backup()
         return_address = self.instruction_pointer
         args, to_free = self.__convert_args(args, heap)
-        return_address = self.instruction_pointer
-        # QEMU Doesn't allow to overwrite the binary even after calling mprotect
-        if not context.native:
-            if "mprotect" not in self.symbols:
-                if syscall_address is None:
-                    raise Exception("calling syscalls under qemu requires mprotect! Add the symbol or give me the address of a syscall instruction.")
-                else:
-                    self.jump(syscall_address)
-            else: 
-                self._make_page_rwx(return_address & 0xfffffffffffff000)
-                backup_memory = self.read(return_address, len(shellcode))
-                self.write(return_address, shellcode)
+        if syscall_address is not None:
+            self.jump(syscall_address)
+
         else:
+            # QEMU requires to call mprotect to write in executable memory [16/01/25]
+            if not context.native:
+                if "mprotect" not in self.symbols:
+                    raise Exception("calling syscalls under qemu requires mprotect! Add the symbol or give me the address of a syscall instruction.")
+                else: 
+                    self._make_page_rwx(return_address, len(shellcode))
+                    #pass # I will let write() call mprotect if needed [16/01/25]
+        
             backup_memory = self.read(return_address, len(shellcode))
             self.write(return_address, shellcode)
+        
         for register, arg in zip(calling_convention, args):
             if DEBUG: self.logger.debug("%s setted to %s", register, arg)
             setattr(self, register, arg)
-        # Execute the syscall
+        # Execute the syscall instruction
         self.step()
         res = self.return_value
         self.restore_backup(backup_registers)
-        if context.native or "mprotect" in self.symbols:
+        if syscall_address is None:
             self.write(return_address, backup_memory)
         self.jump(return_address)
         for pointer, n in to_free[::-1]: #I do it backward to have a coherent behaviour with heap=False, but I still don't really know if I should implement a free in that case
@@ -2073,7 +2091,11 @@ class Debugger:
         """
         if type(location) is int:
             address = location
-            if self.elf.size > self.elf.address:
+
+            if not self.elf.pie:
+                return address
+
+            if self.elf.size > self.elf.address: 
                 log.warn_once("I am unable to distinguish between relative and absolute addresses. I will assume everything is an absolute address")
             elif location < self.elf.size:
                 address += self.elf.address
@@ -2363,7 +2385,8 @@ class Debugger:
         if self.gdb is not None and context.arch:
             return self.__read_gdb(address, size, inferior=inferior)
 
-        # Can not read inside qemu
+        # Data inside qemu is not updated
+        # We can not access memory inside remote gdbserver
         with open(f"/proc/{pid}/mem", "r+b") as fd:
             fd.seek(address)
             return fd.read(size)
@@ -2377,8 +2400,13 @@ class Debugger:
         try:
             inferior.write_memory(address, byte_array)
         except Exception as e: #gdb.MemoryError
-            log.warn(e)
-
+            if not context.native:
+                log.warn_once("QEMU is preventing to write on the page. Changing permissions...") # Warn only once because QEMU will reset the protection at each step and it would spam the user of errors [16/01/25]
+                self._make_page_rwx(address, len(byte_array))
+                inferior.write_memory(address, byte_array)
+                log.warn_once("Successfully changed permissions.")
+            else:
+                raise e
 
     # How to handle multiple processes ?
     def __write_libdebug(self, address: int, byte_array: bytes, *, pid = None):
@@ -2394,11 +2422,13 @@ class Debugger:
 
         if DEBUG: self.logger.debug("writing %s at 0x%x", byte_array.hex(), address)
         
-        # BUG: GDB writes in the wrong inferior...
-        if self.gdb is not None and inferior is None:
+        # BUG: GDB may write in the wrong inferior...
+        # BUG: GDB with QEMU can not write in non writable pages
+        if self.gdb is not None:
             return self.__write_gdb(address, byte_array)
 
-        # Fail if area not writable
+        # Doesn't exist if the process is not running locally (ex remote gdbserver)
+        # Doesn't matter if running under qemu because /proc/pid/mem is just a copy created at launch and nothing more 
         with open(f"/proc/{pid}/mem", "r+b") as fd:
             fd.seek(address)
             fd.write(byte_array)
@@ -2523,7 +2553,7 @@ class Debugger:
     # alloc and dealloc instead of malloc and free because you may want to keep those names for function in your exploit
 
     # what is this error ??? [04/03/23]
-    #gdb.error: The program being debugged was signalledd while in a function called from GDB.
+    #gdb.error: The program being debugged was signalled while in a function called from GDB.
     #GDB remains in the frame where the signal was received.
     #To change this behaviour use "set unwindonsignal on".
     #Evaluation of the expression containing the function
@@ -2594,7 +2624,8 @@ class Debugger:
     # Quick attempt to find maps
     @property
     def maps(self):
-        maps_raw = open(f"/proc/{self.pid}/maps").read()
+        with open(f"/proc/{self.pid}/maps") as fd:
+            maps_raw = fd.read()
         maps = {}
         for line in maps_raw.splitlines():
             line = line.split()
@@ -2611,7 +2642,8 @@ class Debugger:
         space.
         """
         try:
-            maps_raw = open(f"/proc/{self.pid}/maps").read()
+            with open(f"/proc/{self.pid}/maps") as fd:
+                maps_raw = fd.read()
         except IOError:
             maps_raw = None
 
@@ -2636,9 +2668,12 @@ class Debugger:
     
     @property
     def libc(self):
+        if not context.native:
+            log.warn_once("I don't know how to access the libraries in qemu :(")
+            return None
         if self.elf is not None and self.elf.statically_linked:
             return None
-        if self._libc is None and self.p is not None:
+        if self._libc is None and self.p is not None: # In qemu this would return the libc of qemu, not the program! [06/01/25]
             self._libc = self.p.libc
         return self._libc
 
@@ -2689,26 +2724,51 @@ class Debugger:
         # TODO For remote debugging use info auxv! [25/08/24]
         name_binary = self.elf.path.split("/")[-1]
         # Not perfect, but is a first filter
+        # We would want to use the generic "info proc mappings", but under QEMU it tries to access /proc/1/maps...
         if "/usr/bin/qemu" in "".join(maps.keys()):
-            if self._gef:
-                log.warn("process is running under qemu! pwndbg may be recommended")
-            log.warn("I don't know how to access the libraries in qemu :(")
-            self.libc = None
+            ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
             if self._pwndbg:
-                ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
                 data = ansi_escape.sub('', self.execute("vmmap"))
-                for line in data.splitlines():
-                    if name_binary in line:
-                        return int(line.strip().split()[0], 16)
-                raise Exception("can't find binary address")
             elif self._gef:
-                ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
                 data = ansi_escape.sub('', self.execute("vmmap")).replace(chr(2), "").replace(chr(1), "")
-                for line in data.splitlines():
-                    if name_binary in line:
-                        return int(line.strip().split()[0], 16)
-                raise Exception("can't find binary address")
+            else:
+                try:
+                    with open(f"/proc/{self.pid}/maps", "r") as fd:
+                        data = fd.read().replace("-", " ")
+                        name_binary = name_binary.replace("-", " ")
+                except Exception as e:
+                    log.failure("can't find binary address")
+                    log.warn("please try again with GEF or pwndbg")
+                    return 0
+                
+            for i, line in enumerate(data.splitlines()):
+                if name_binary in line:
+                    address = int(line.strip().split()[0], 16)
+                    break
+            else: 
+                log.failure("can't find binary address")
+                return 0
 
+            # Can not trust libs to find the correct page [06/01/25]
+            if context.arch in ["riscv32", "riscv64"]:
+                offset = 0
+                while self.elf.data[offset:offset+8] == b"\x00" * 8:
+                    offset += 8
+                if self.elf.data[offset:offset+0x8] != self.read(address+offset, 8):
+                    log.warn_once("QEMU messed up the elf base. Trying to find correct address...")
+                    limit = 2 if (self._gef or self._pwndbg) else 0
+                    while i > limit:
+                        i -= 1
+                        address = int(data.splitlines()[i].strip().split()[0], 16)
+                        if self.elf.data[offset:offset+0x8] == self.read(address+offset, 8):
+                            log.success(f"Found address {hex(address)}!")
+                            break
+                    else:
+                        log.failure("can't find binary address")
+                        return 0
+
+            return address
+                    
 
         if len(maps) != 0:
             for path, address in maps.items():
@@ -2749,7 +2809,7 @@ class Debugger:
     # TODO handle multiple libraries
     @property
     def symbols(self):
-        if self.libc is not None: # If I attack to a pid I self.p doesn't have libc = None
+        if self.libc is not None:
             # WARNING >= 3.9
             #return self.elf.symbols | self.libc.symbols
             return {**self.elf.symbols, **self.libc.symbols} # Should work in 3.8
@@ -3158,7 +3218,6 @@ class Debugger:
             return self
 
         if self._pwndbg:
-            log.warn_once("pwndbg may not handle correctly multi process applications. We reccomend using GEF")
 
         if off:
             self.execute("set detach-on-fork on")
