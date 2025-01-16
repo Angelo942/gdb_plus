@@ -138,7 +138,7 @@ class Debugger:
             self.elf = ELF(binary, checksec=False) if type(binary) is str else binary
             self.p = None
             _, self.gdb = gdb.attach(target, exe=self.elf.path, gdbscript=script, api=True)
-            self.pid = self.gdb.selected_inferior().pid
+            self.pid = self.current_inferior.pid
 
         elif type(target) is int:
             self.p = None
@@ -834,7 +834,7 @@ class Debugger:
         while self.current_inferior.num != n:
             if DEBUG: self.logger.debug("switching to inferior %d", n)
             self.execute(f"inferior {n}")
-            inferior = self.gdb.selected_inferior()
+            inferior = self.current_inferior
             if DEBUG: self.logger.debug("I'm inferior %d, [pid: %d]", inferior.num, inferior.pid)
             sleep(0.1)
         self.pid = self.current_inferior.pid
