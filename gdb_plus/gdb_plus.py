@@ -687,6 +687,7 @@ class Debugger:
         return self
 
     # Still useful for cases where we don't have the binary to locate the entry point.
+    # Especially when you are using a specific loader!
     def load_libc(self):
         """
         Continue until the program has loaded the libc. Needed before setting breakpoints on libc functions.
@@ -729,7 +730,11 @@ class Debugger:
 
     def detach(self, quit = True, block = False):
         """
-        Detach from the debugger.
+        Detaches the debugger from the currently running process.
+
+        Args:
+            quit (bool, optional): If True, the program is terminated after detaching. Defaults to True.
+            block (bool, optional): If True, prevent the process from continuing the execution when the debugger is not attached. Defaults to False.
         """
         if not self.debugging:
             log.warn_once(DEBUG_OFF)
@@ -774,8 +779,8 @@ class Debugger:
         Doesn't kill child processes.
         """
         self._kill_threads = True
-        if self.gdb is not None:
-            self.gdb.stopped.set()
+        #if self.gdb is not None:
+        #    self.gdb.stopped.set() # Is this really needed ? Currently seems to break the interrupt inside detach by not detecting the interruption [05/01/25]
         self.detach()
         # Yah, I should do it here, but I close the terminal in detach, so let's handle it there.
         #except:
@@ -1042,7 +1047,7 @@ class Debugger:
         # Maybe keep the step if force = True [22/O5/23]
         #self.step(force=force)
         ## I hit a breakpoint
-        #if self.instruction_pointer in self.breakpoints or self.instruction_pointer == self.last_breakpoint_deleted:
+        #if self.instruction_pointer in self.breakpoints or self.instruction_pointer == self._last_breakpoint_deleted:
         #    return
         # I don't need the thread, right ? And this way I can lock the step [12/06/23]
         with self._ptrace_lock.log("__continue_libdebug"):
@@ -2001,6 +2006,7 @@ class Debugger:
     def delete_catch_syscall(self, name: str):
         return self.delete_catch("syscall " + name)
 
+    # If you allow multiple callbacks on the same event you have to figure out a way to delete a specific catchpoint from the callback itself (ex ptrace detection) [18/01/25] 
     def catch_event(self, name: str, callback = lambda *args, **kwargs: True):
         if self.gdb is None:
             raise Exception("not implemented in libdebug")
@@ -2245,6 +2251,8 @@ class Debugger:
 
     def tb(self, *args, **kwargs):
         return self.b(*args, **kwargs, temporary=True)
+
+    temporary_breakpoint = tb
 
     def delete_breakpoint(self, breakpoint: [int, str, Breakpoint]) -> bool:
         """
