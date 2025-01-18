@@ -5,12 +5,12 @@ GDB+ is a wrapper around gdb powered by pwntools. The goal is automate your inte
 
 ## Main features
 
-* Include a python function as callback when you set a breakpoint.
-* Read the canary instead of bruteforcing it every time you need it while testing your exploit.
-* Test a specific function of a binary with the parameters you want at any time.
+* Bypass ptrace anti-debugging.
+* Include python functions as callback to your breakpoint.
+* Test / Bruteforce a specific functions of a binary with the parameters you want.
 * Log the code of a self modifying function.
 * Backup parts of your memory and restore it during future executions.
-* Don't waste time commenting your code. The arguments `NOPTRACE` and `REMOTE` make the exploit skip any action related to gdb.
+* For pwning don't worry about making a separate script to debug your exploit. The arguments `NOPTRACE` and `REMOTE` make the exploit skip any action related to gdb or attack directly the remote server.
 
 ## Installation
 
@@ -24,14 +24,39 @@ pip3 install git+https://github.com/Angelo942/gdb_plus.git@dev
 ```
 
 **Warning for pwndbg users:**  
-Previous bugs in Pwndbg used to break the api for python. While most of GDB+ should work with the current version of pwndbg [19/12/2022], pwndbg can not debug both processes after a fork, making it almost impossible to use features such as the emulation of ptrace.   
-you are strongly advised to use [GEF](https://github.com/hugsy/gef) instead.
+Previous bugs in Pwndbg used to break the api for python. While most of GDB+ should work with the current version of pwndbg [19/12/2022] some problems may arise while emulating ptrace.
+you are strongly advised to use [GEF](https://github.com/hugsy/gef) instead except if using QEMU for which pwndbg is currently better [18/01/25].
+
+## Script setup
+GDB+ is using pwntools to work with the correct architecture. It is recommended to set the `context` at the beginning of your script. You can directly use the binary if it's an ELF or the architecture (and if needed the bit size).
+
+```py
+from gdb_plus import *
+exe = ELF("./challenge")
+context.binary = exe
+
+dbg = Debugger(exe)
+...
+```
+
+```py
+from gdb_plus import *
+context.arch = "amd64"
+
+dbg = Debugger("./challenge")
+...
+```
+
+pwntools also gives you arguments that you can pass to the script to change the behaviour. In particular we use `NOPTRACE` and `REMOTE`. `python3 ./script.py NOPTRACE` sets `Debugger.debugging` to `False` and skips all actions with gdb. `python3 ./script.py REMOTE` connects to the server specified as `Debugger.setup_remote(<host>, <port>)` to launch the attack instead of spawning a local process.
+
+If you want here are a template for spwn [template_spwn.py](./examples/template_spwn.py) and pwninit [template_pwninit.py](./examples/template_pwninit.py)
 
 ## Debugging
 
 You can debug a program using the path to the binary.   
-If you really have to you can also use a process or even just his pid. 
-For pwn challenges set the remote address with `Debugger().remote(<host>, <port>)` and use the argument `REMOTE` once you want to exploit the server
+If you really have to you can also use a process or even just his pid.
+For programs running in a container you can connect directly to a given gdbserver.
+For pwn challenges set the remote address with `Debugger.setup_remote(<host>, <port>)` and use the argument `REMOTE` once you want to exploit the server
 
 ```py
 from gdb_plus import *
@@ -41,7 +66,9 @@ handle SIGALRM nopass
 """
 
 dbg = Debugger("./rev_challenge", script=gdbinit, aslr=False)
-dbg = Debugger("./pwn_challenge", script=gdbinit).remote("10.10.0.1", 1337)
+
+dbg = Debugger("./pwn_challenge", script=gdbinit)
+dbg.setup_remote("10.10.0.1", 1337)
 
 
 p = process("./challenge", aslr=False)
@@ -49,6 +76,9 @@ dbg = Debugger(p, script=gdbinit)
 
 #pidof process : 3134
 dbg = Debugger(3134, script=gdbinit, binary="./challenge")
+
+# gdbserver running on 192.168.1.234:2345
+dbg = Debugger(("192.168.1.234", 2345), script=gdbinit, binary="./challenge")
 ```
 
 By default your process will be analysed from the first instruction of the loader. If the process you are debugging has some checks you want to avoid use `Debugger(..., debug_from=<address>)` to attach with gdb at a specific address.  
@@ -74,7 +104,7 @@ Old versions of gdbserver (< 11.0.50) have problems launching 32bit binaries. If
 
 ## Control Flow
 
-The main actions for gdb are already wrapped in individual methods. For all commands not present you can reconstruct them by calling `dbg.execute(<command>)` as if you where using gdb. Just make sure to use `dbg.execute_action(<command>)` if your command will require you to call `dbg.wait()`.
+The main actions for gdb are already wrapped in individual methods. For all commands not present you can reconstruct them by calling `Debugger.execute(<command>)` as if you where using gdb. if your command will require you to call `Debugger.wait()` make sure to use `Debugger.execute_action(<command>)` instead.
 
 ```py
 dbg.jump() # set instruction pointer to specific address
@@ -87,24 +117,21 @@ dbg.interrupt() # Stop the execution of your process
 dbg.wait() # Wait until you have control of gdb
 ```
 
-In the cases where you have to interact with the process before reaching the address you want or if you would like to put some more breakpoints on the way to play manually with gdb you can use wait=False
+In the cases where you have to interact with the process before reaching the address you want you can use wait=False.
 
 ```py
 ...
 dbg.breakpoint("main+0x12", temporary=True)
-dbg.breakpoint(0x23, temporary=True)
 done = dbg.continue_until("main+0x43", wait=False)
 dbg.p.recvline()
 dbg.p.sendline(b"4")
+# Here the script will wait until you reach the offset 0x43 from main while gdb will break at offset 0x12 to let you analyse the process manually in gdb
 done.wait()
-# Here the script will wait until you reach the offset 0x43 from main while gdb will break at offset 0x12 and 0x23 to let you look at the process
 ...
 ```
 
 **Warning**  
 * `finish` can only work if the stack frame hasn't been corrupted. With libdebug it will fail if the function doesn't use the base pointer.
-* Try avoiding `interrupt` as much as possible. 
-* You may be tempted to do `dbg.instruction_pointer = dbg.parse_address(location)`, but a bug in gdb may cause an unexpected behaviour if you do so. Use `dbg.jump(location)` instead
 
 If the function modifies itself you may find yourself unable to set breakpoints where you want. To analyse these function we can run them step by step
 
@@ -125,8 +152,8 @@ You could also use `dbg.step_until_address(<address>, <callback=None>)` if you j
 ## Breakpoints
 
 Breakpoints have three main features:
-* if the address is smaller than 0x10000 the address will immediately be interpreted as relative for PIE binaries
-* you can use a symbol name instead of an address such as `"main"` or `"main+0x12"` (so far only supported for binary and libc)
+* if the address is smaller than the size of the binary the address will immediately be interpreted as relative for PIE binaries.
+* you can use a symbol name instead of an address such as `"main"` or `"main+0x12"` (so far only supported for binary and libc).
 * you can set callbacks to be executed when the breakpoint is reach and may choose to let the process continue after the execution.
     * If multiple callbacks are set on the same address they will be executed in a LIFO order.
 
@@ -167,7 +194,7 @@ def SecondCallback(dbg):
 # You can not set a breakpoint while the process is running
 dbg.breakpoint("main+0x42", callback=MyCallback, temporary = True)
 dbg.breakpoint("main+0x124", callback=SecondCallback)
-dbg.cont(until="main+0x534")
+dbg.continue_until("main+0x534")
 
 # Read the data set by the breakpoint
 print(pointer_to_secret.get())
@@ -280,6 +307,53 @@ You can pass parameters as strings or byte_arrays. By default they will be saved
 **Warning**  
 If the stack frame has been corrupted finish() may not work. If this is the case set last address of your function in `call(..., end_pointer= ...)`.
 
+## Ltrace, Ftrace and one day strace too.
+ltrace is a useful program to get an idea of what your process is doing, but unfortunately it can not work if the process traces itself. Since we can emulate ptrace we can also offer an equivalent to ltrace that works even in that case. 
+
+```py
+from gdb_plus import *
+dbg = Debugger(...)
+# dbg.emulate_ptrace() # If needed
+dbg.set_ltrace()
+...
+```
+
+Adding set_ltrace() to your script will make it print all the library functions called by the process during the execution
+
+If you only want to analyze a specific section of the binary you can also enable it for just that part.
+
+```py
+from gdb_plus import *
+dbg = Debugger(...)
+dbg.until(target_function)
+dbg.set_ltrace()
+dbg.finish()
+dbg.disable_ltrace()
+```
+
+This case would only log the functions called during the execution of the target function.
+
+Similar to ltrace that logs the library functions using gdb allows us to also define an ftrace function that would log all functions from the binary.
+
+Since some functions may be recursive or not use the return instruction at the end of the function, calling finish on each function to also log the return value may break the debugger. In that case add the argument `no_return = True` to the call to `set_ftrace()`.
+
+```py
+from gdb_plus import *
+dbg = Debugger(...)
+dbg.set_ftrace() # dbg.set_ftrace(no_return = True)
+dbg.c()
+```
+
+Tracing some basic function may be just a waste of time since the debugger has to stop every time they are called, so to improve the performances you can set the parameter `exclude` with the functions you don't want to break onto.
+
+```py
+from gdb_plus import *
+dbg = Debugger(...)
+dbg.set_ltrace(exclude=["malloc", "free", "strlen"])
+dbg.set_ftrace(exclude=["FUN_126a", "FUN_13f1"])
+dbg.c()
+```
+
 ## Libdebug
 By default GDB+ uses a gdbserver to debug the process. This is very useful when you also have to check manually gdb while you are writing a script, but can be very slow. For this reason we now support libdebug (from version >= 0.4) as an alternative debugger. It is lacking a lot of features but can do the job for most tasks and it can be 50 times faster. 
 **NOTE**
@@ -306,13 +380,14 @@ You can install it manually:
 ## AARCH64
 Arm binaries ar now partially supported. The problem running them in qemu is that we can't access the pid of the process from gdb and we can't catch when the process forks. This limits the feature we can use, but the rest is working fine.
 
+Don't forget to install qemu and gdb-multiarch. `sudo apt install qemu-user gdb-multiarch`
+
 **Note**
 * set context.arch == "aarch64" at the beginning of your script
 * pwndbg may be better than GEF when using qemu. In particular if you find gdb always debugging qemu instead of your process and you are sure you set the correct context you may want to try switching to pwndbg for this part.
 
 # TODO
 * Distinguish between process running and dead
-* Identify actions performed manually in gdb (overwrite finish and ni)
 * Improve ptrace emulation
     * handle waitpid(-1) with multiple slaves
     * emulate waitid too
@@ -323,6 +398,9 @@ Arm binaries ar now partially supported. The problem running them in qemu is tha
 * support multithread applications
 * catch sigsegv as an exit instead of user interaction
 * enable signal() with libdebug
+* migrate to new version of libdebug
 * force parent or child to stop tracing
 * wrap follow-child
 * specify relative addresses
+* hide internal breakpoints also from gdb
+* implement strace
