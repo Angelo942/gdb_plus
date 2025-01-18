@@ -30,8 +30,6 @@ class Inner_Debugger:
         self.__pointer_registers = None
         self._status_pointer = None #self.dbg.alloc(4)
 
-        self.dbg.restore_arch()
-
         assert context.arch == "amd64", f"{context.arch} is not supported for Inner_Debugger"
 
         self.logger = logging.getLogger(f"inner-debugger [{self.pid}]")
