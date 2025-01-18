@@ -511,12 +511,14 @@ class Debugger:
         def loop_handler():
             while True:
                 self.gdb.wait() # Move the wait here to se look only when needed [09/07/24]
+                if DEBUG: self.logger.debug("GDB stopped somewhere.")
                 # I ended up setting the stopped event when I close the debugger to stop the wait.
                 if self._kill_threads:
                     break
-                self.__stop_handler_gdb()
+                with context.local(**self._context_params):
+                    context.Thread(target=self.__stop_handler_gdb, name=f"[{self.pid}] stop_handler_gdb").start()
         with context.local(**self._context_params):
-            context.Thread(target=loop_handler, name=f"[{self.pid}] stop_handler_gdb").start()
+            context.Thread(target=loop_handler, name=f"[{self.pid}] loop_stop_handler_gdb").start()
         
         self.gdb.events.exited.connect(self.__exit_handler)
         def clear_cache(event):
