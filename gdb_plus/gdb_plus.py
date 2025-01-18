@@ -332,8 +332,8 @@ class Debugger:
                         else:
                             # Wait I must stop for the user, not the emulator...
                             # I should tell any wait() that I stopped, but not waitpid...
-                            #if self._ptrace_emulated:
-                            #    self._ptrace_has_stopped.set()
+                            # if self._ptrace_emulated:
+                            #     self._ptrace_has_stopped.set()
                             #else:
                             #    # TODO TEST IT [26/07/23]
                             self.__set_stop("stopped after skipping syscall")
@@ -3312,6 +3312,8 @@ class Debugger:
         Emulate all calls to ptrace and waitpid between processes debugged.
         Can hook the syscall instead of the function.
 
+        Use manual=True if you want the debugger to stop when reaching a breakpoint, whether because you are using gdb manually or because you want to observe what is going on. 
+
         Example:
             # Create debugger for child process.
             dbg.set_split_on_fork()
@@ -3372,7 +3374,6 @@ class Debugger:
             constants.PTRACE_O_SUSPEND_SECCOMP = 0x00200000
             constants.PTRACE_O_MASK     = 0x003000ff
 
-
         ptrace_dict = {constants.PTRACE_TRACEME: self._PTRACE_TRACEME,
             constants.PTRACE_POKEDATA: self._PTRACE_POKETEXT,
             constants.PTRACE_POKETEXT: self._PTRACE_POKETEXT, 
@@ -3387,234 +3388,155 @@ class Debugger:
             constants.PTRACE_SETOPTIONS: self._PTRACE_SETOPTIONS,
             constants.PTRACE_SINGLESTEP: self._PTRACE_SINGLESTEP,}
         
-        if syscall:
-            def callback_wait(dbg, entry):
-                def callback(dbg): 
-                    pid = dbg.syscall_args[0]
-                    status_pointer = dbg.syscall_args[1]
-                    options = dbg.syscall_args[2]
- 
-                    if pid == 2**32 - 1:
-                        assert len(dbg._slaves) <= 1, "For now I can only handle waitpid(-1) if there is only one slave"
-                        if len(self._slaves) == 0:
-                            log.warn("The process hasn't called TRACEME yet. I will wait... (just make sure you didn't setup ptrace_emulation too late)")
-                        while len(self._slaves) == 0:
-                            sleep(0.2)
-                        pid = list(dbg._slaves.keys())[0]
-                        if DEBUG: self.logger.debug("waiting for -1...")
-                    
-                    log.info(f'waitpid for process [{pid}]')
-                    if pid not in self._ptrace_group:
-                        raise Exception(f"We reached waitpid but we didn't have time to split the new process! Please stop the process earlier")
-                    if pid not in self._slaves:
-                        log.warn("The process hasn't called TRACEME yet. I will wait... (just make sure you didn't setup ptrace_emulation too late)")
-                    while pid not in self._slaves:
-                        sleep(0.2)
-                    tracee = dbg._slaves[pid]
-                    stopped = tracee._wait_slave(options)
-
-                    # TODO what about handling events in status ? [04/06/23]
-                    if stopped:
-                        if tracee._stop_reason == "NOT RUNNING":
-                            status = 0x0
-                        else:
-                            status = (tracee.stop_signal * 0x100 + 0x7f)
-                        dbg.return_value = pid
-                    else:
-                        status = 0x0
-                        dbg.return_value = 0x0
-                    log.info(f"setting status waitpid: {hex(status_pointer)} -> [{hex(status)}]")
-                    dbg.write(status_pointer, p32(status))
-                    # I don't handle the errors yet [19/06/23]
-                    # I would have liked it, but for now we have a bug if ret jumps on an address where we have a breakpoint that should stop, but our return False let the process run anyway [09/06/23]
-                    # Now it should work, but I don't want to risk it ahah [23/06/23]
-                    #dbg.ret()
-                    # Don't stop for a WNOHANG [09/06/23]
-
-
-                    # For some reason after the setoption it continues even with manual = False, but stops after continue... 
-                    if manual and stopped:
-                        tracee.__set_stop("waitpid asked to stop")
-                        return True
-                    else:
-                        return False
-
-                if silent:
-                    with context.silent:
-                        should_stop = callback(dbg)
-                else:
-                    should_stop = callback(dbg)
-                return SKIP_SYSCALL | should_stop
-            self.catch_syscall(wait_syscall, callback_wait)
-
-            def ptrace_callback(dbg, entry):
-                def callback(dbg):
-                    ptrace_command = dbg.syscall_args[0]
-                    pid = dbg.syscall_args[1]
-                    arg1 = dbg.syscall_args[2]
-                    arg2 = dbg.syscall_args[3]
-                    
-                    log.info(f"[{dbg.pid}] ptrace {pid} -> {ptrace_command}: ({hex(arg1)}, {hex(arg2)})")
-                    action = ptrace_dict[ptrace_command]
-
-                    if ptrace_command == constants.PTRACE_TRACEME:
-                        tracer = dbg if dbg._parent is None else dbg._parent
-                        
-                        if dbg.pid not in tracer._slaves:
-                            log.info(f"TRACEME: [{dbg.pid}] will be trace by [{tracer.pid}]")
-                            should_stop = action(tracer, manual=manual)
-                            return SKIP_SYSCALL | manual
-
-                        else:
-                            log.warn(f"[{dbg.pid}] is already traced !")
-                            dbg.return_value = -1
-                            return SKIP_SYSCALL | manual
-
-                    elif ptrace_command in [constants.PTRACE_ATTACH, constants.PTRACE_SEIZE]:
-                        
-                        if pid in dbg._slaves:
-                            log.warn(f"[{pid}] is already traced !")
-                            dbg.return_value = -1
-                            return SKIP_SYSCALL | manual
-
-                        else:
-                            tracee = dbg._ptrace_group[pid]
-                            should_stop = action(pid, arg2, slave=tracee, manual=manual)
-
-                    else:
-                        tracee = dbg._slaves[pid]
-                        should_stop = action(arg1, arg2, slave=tracee, manual=manual)
-
-                    return should_stop
-
-                if silent:
-                    with context.silent:
-                        should_stop = callback(dbg)
-                else:
-                    should_stop = callback(dbg)
-                return SKIP_SYSCALL | should_stop
-            self.catch_syscall("ptrace", ptrace_callback)
-
-        else:
+        if not syscall:
+            # Disable functions (Is it needed compared to a simple return in the callback ? I'm worried about the user manually going over the breakpoint) 
             shellcode = nop[context.arch] + return_instruction[context.arch]
+            
             address = self._parse_address(wait_fun)
             backup = self.read(address, len(shellcode))
             self.write(address, shellcode)
             self._ptrace_backups[address] = backup
-
-            def callback_wait(dbg):
-                def callback(dbg):
-                    pid = dbg.args[0]
-                    status_pointer = dbg.args[1]
-                    options = dbg.args[2]
-
-                    if pid == 2**32 - 1:
-                        assert len(dbg._slaves) <= 1, "For now I can only handle waitpid(-1) if there is only one slave"
-                        if len(self._slaves) == 0:
-                            log.warn("The process hasn't called TRACEME yet. I will wait... (just make sure you didn't setup ptrace_emulation too late)")
-                        while len(self._slaves) == 0:
-                            sleep(0.2)
-                        pid = list(dbg._slaves.keys())[0]
-                        if DEBUG: self.logger.debug("waiting for -1...")
-                    
-                    log.info(f'waitpid for process [{pid}]')
-                    if pid not in self._ptrace_group:
-                        raise Exception(f"We reached waitpid but we didn't have time to split the new process! Please stop the process earlier")
-                    if pid not in self._slaves:
-                        log.warn("The process hasn't called TRACEME yet. I will wait... (just make sure you didn't setup ptrace_emulation too late)")
-                    while pid not in self._slaves:
-                        sleep(0.2)
-                    tracee = dbg._slaves[pid]
-                    stopped = tracee._wait_slave(options)
-
-                    # TODO what about handling events in status ? [04/06/23]
-                    if stopped:
-                        if tracee._stop_reason == "NOT RUNNING":
-                            status = 0x0
-                        else:
-                            status = (tracee.stop_signal * 0x100 + 0x7f)
-                        dbg.return_value = pid
-                    else:
-                        status = 0x0
-                        dbg.return_value = 0x0
-                    log.info(f"setting status waitpid: {hex(status_pointer)} -> [{hex(status)}]")
-                    dbg.write(status_pointer, p32(status))
-                    # I don't handle the errors yet [19/06/23]
-                    # I would have liked it, but for now we have a bug if ret jumps on an address where we have a breakpoint that should stop, but our return False let the process run anyway [09/06/23]
-                    # Now it should work, but I don't want to risk it ahah [23/06/23]
-                    #dbg.ret()
-                    # Don't stop for a WNOHANG [09/06/23]
-                    if manual and stopped:
-                        slave.__set_stop("waitpid asked to stop")
-                        return True
-                    else:
-                        return False
-
-                if silent:
-                    with context.silent:
-                        return callback(dbg)
-                else:
-                    return callback(dbg)
-
-            self._ptrace_breakpoints.append(self.b(wait_fun + "+1", callback=callback_wait, user_defined=False))
 
             address = self._parse_address("ptrace")
             backup = self.read(address, len(shellcode))
             self.write(address, shellcode)
             self._ptrace_backups[address] = backup
 
-            def ptrace_callback(dbg):
-                def callback(dbg):
-                    ptrace_command = dbg.args[0]
-                    pid = dbg.args[1]
-                    arg1 = dbg.args[2]
-                    arg2 = dbg.args[3]
-            # Legacy_callback so that the program does run off if we step over the breakpoint manually
-            # Is this still needed ? [05/05/23] # Yes, you have to patch gdb's implementation of nexti and finish first
-            # I will use a normal callback. Just use IPython dbg.next() if you have to step manually [08/06/23]
+        def callback_wait(dbg, entry=None):
+            def callback(dbg): 
+                if syscall:
+                    args = dbg.syscall_args
+                else:
+                    args = dbg.args
+
+                pid = args[0]
+                status_pointer = args[1]
+                options = args[2]
+
+                if pid == 2**32 - 1:
+                    assert len(dbg._slaves) <= 1, "For now I can only handle waitpid(-1) if there is only one slave"
+                    if len(self._slaves) == 0:
+                        log.warn("The other process hasn't called TRACEME yet. I will wait... (just make sure you didn't setup ptrace_emulation too late)")
+                    while len(self._slaves) == 0:
+                        sleep(0.2)
+                    pid = list(dbg._slaves.keys())[0]
+                    if DEBUG: self.logger.debug("waiting for -1...")
+                
+                log.info(f'waitpid for process [{pid}]')
+                if pid not in self._ptrace_group:
+                    raise Exception(f"We reached waitpid but we didn't have time to split the new process! Please stop the process earlier")
+                if pid not in self._slaves:
+                    log.warn(f"The process {pid} hasn't called TRACEME yet. I will wait... (just make sure you didn't setup ptrace_emulation too late)")
+                while pid not in self._slaves:
+                    sleep(0.2)
+                tracee = dbg._slaves[pid]
+                stopped = tracee._wait_slave(options)
+
+                # TODO what about handling events in status ? [04/06/23]
+                if stopped:
+                    if tracee._stop_reason == "NOT RUNNING":
+                        status = 0x0
+                    else:
+                        status = (tracee.stop_signal * 0x100 + 0x7f)
+                    dbg.return_value = pid
+                else:
+                    status = 0x0
+                    dbg.return_value = 0x0
+                log.info(f"setting status waitpid: {hex(status_pointer)} -> [{hex(status)}]")
+                dbg.write(status_pointer, p32(status))
+                # I don't handle the errors yet [19/06/23]
+                # I would have liked it, but for now we have a bug if ret jumps on an address where we have a breakpoint that should stop, but our return False let the process run anyway [09/06/23]
+                # Now it should work, but I don't want to risk it ahah [23/06/23]
+                #dbg.ret()
+                # Don't stop for a WNOHANG [09/06/23]
+
+
+                # For some reason after the setoption it continues even with manual = False, but stops after continue... 
+                if manual and stopped:
+                    tracee.__set_stop("waitpid asked to stop")
+                    return True
+                else:
+                    return False
+
+            if silent:
+                with context.silent:
+                    should_stop = callback(dbg)
+            else:
+                should_stop = callback(dbg)
+            
+            if syscall:
+                return_code = SKIP_SYSCALL | should_stop
+            else:
+                return_code = should_stop
+
+            return return_code
+
+        if syscall:
+            self.catch_syscall(wait_syscall, callback_wait)
+        else:
+            self._ptrace_breakpoints.append(self.b(wait_fun + "+1", callback=callback_wait, user_defined=False))
+
+        # I still lose control if I hit the breakpoint on ptrace with a dbg.si()... [18/01/25]
+        def ptrace_callback(dbg, entry=None):
+            def callback(dbg):
+                if syscall:
+                    args = dbg.syscall_args
+                else:
+                    args = dbg.args
+
+                ptrace_command = args[0]
+                pid = args[1]
+                arg1 = args[2]
+                arg2 = args[3]
+                
+                log.info(f"[{dbg.pid}] ptrace {pid} -> {ptrace_command}: ({hex(arg1)}, {hex(arg2)})")
+                action = ptrace_dict[ptrace_command]
+
+                if ptrace_command == constants.PTRACE_TRACEME:
+                    tracer = dbg if dbg._parent is None else dbg._parent
                     
-                    log.info(f"[{dbg.pid}] ptrace {pid} -> {ptrace_command}: ({hex(arg1)}, {hex(arg2)})")
-                    action = ptrace_dict[ptrace_command]
-
-                    if ptrace_command == constants.PTRACE_TRACEME:
-                        tracer = dbg if dbg._parent is None else dbg._parent
-                        
-                        if dbg.pid not in tracer._slaves:
-                            log.info(f"TRACEME: [{dbg.pid}] will be trace by [{tracer.pid}]")
-                            action(tracer, manual=manual)
-                            return False
-
-                        else:
-                            log.warn(f"[{dbg.pid}] is already traced !")
-                            dbg.return_value = -1
-                            return False
-
-                    elif ptrace_command in [constants.PTRACE_ATTACH, constants.PTRACE_SEIZE]:
-                        
-                        if pid in dbg._slaves:
-                            log.warn(f"[{pid}] is already traced !")
-                            dbg.return_value = -1
-                            return False
-
-                        else:
-                            tracee = dbg._ptrace_group[pid]
-                            should_stop = action(pid, arg2, slave=tracee, manual=manual)
+                    if dbg.pid not in tracer._slaves:
+                        log.info(f"TRACEME: [{dbg.pid}] will be trace by [{tracer.pid}]")
+                        should_stop = action(tracer, manual=manual)
 
                     else:
-                        tracee = dbg._slaves[pid]
-                        should_stop = action(arg1, arg2, slave=tracee, manual=manual)
+                        log.warn(f"[{dbg.pid}] is already traced !")
+                        dbg.return_value = -1
+                        return manual
 
-                    return should_stop
+                elif ptrace_command in [constants.PTRACE_ATTACH, constants.PTRACE_SEIZE]:
+                    
+                    if pid in dbg._slaves:
+                        log.warn(f"[{pid}] is already traced !")
+                        dbg.return_value = -1
+                        return manual
 
-                if silent:
-                    with context.silent:
-                        return callback(dbg)
+                    else:
+                        tracee = dbg._ptrace_group[pid]
+                        should_stop = action(pid, arg2, slave=tracee, manual=manual)
+
                 else:
-                    return callback(dbg)
+                    tracee = dbg._slaves[pid]
+                    should_stop = action(arg1, arg2, slave=tracee, manual=manual)
 
-            # Legacy_callback so that the program does run off if we step over the breakpoint manually
-            # Is this still needed ? [05/05/23] # Yes, you have to patch gdb's implementation of nexti and finish first
-            # I will use a normal callback. Just use IPython dbg.next() if you have to step manually [08/06/23]
+                return should_stop
+
+            if silent:
+                with context.silent:
+                    should_stop = callback(dbg)
+            else:
+                should_stop = callback(dbg)
+            
+            if syscall:
+                return_code = SKIP_SYSCALL | should_stop
+            else:
+                return_code = should_stop
+            
+            return return_code
+
+        if syscall:
+            self.catch_syscall("ptrace", ptrace_callback)
+        else:
             self._ptrace_breakpoints.append(self.b("ptrace+1", callback=ptrace_callback, user_defined=False))
 
         return self
@@ -3664,7 +3586,7 @@ class Debugger:
         return False
 
     # Only function called by the slave
-    def _PTRACE_TRACEME(self, tracer, **kwargs):
+    def _PTRACE_TRACEME(self, tracer, *, manual=False, **kwargs):
         log.info("slave wants to be traced")
         tracer._slaves[self.pid] = self
         log.info(f"setting {self.pid} as slave for {tracer.pid}")
@@ -3675,9 +3597,9 @@ class Debugger:
         #    self.r8 = -1
         # Wait, why ? haha. This was stupid... [24/12/23]
         #tracer._ptrace_has_stopped.set()
-        return False
+        return manual
 
-    def _PTRACE_CONT(self, _, __, *, slave, manual, **kwargs):
+    def _PTRACE_CONT(self, _, __, *, slave, manual=False, **kwargs):
         if not manual:
             log.info(f"[{self.pid}] PTRACE_CONT will let the slave [{slave.pid}] continue")
             slave._ptrace_has_stopped.clear()
@@ -3688,7 +3610,7 @@ class Debugger:
         self.return_value = 0x0
         return manual
 
-    def _PTRACE_DETACH(self, _, __, *, slave, manual, **kwargs):
+    def _PTRACE_DETACH(self, _, __, *, slave, manual=False, **kwargs):
         log.ingo(f"ptrace detached from {slave.pid}")
         self._slaves.pop(pid)
         slave._ptrace_can_continue.set()
@@ -3696,15 +3618,15 @@ class Debugger:
             log.info(f"detach will let the slave continue")
             self.__hidden_continue(force=True)
         self.return_value = 0x0
-        return False
+        return manual
 
-    def _PTRACE_POKETEXT(self, address, data, *, slave, **kwargs):
+    def _PTRACE_POKETEXT(self, address, data, *, slave, manual=False, **kwargs):
         log.info(f"poking {hex(data)} into process {slave.pid} at address {hex(address)}")
         slave.write(address, pack(data))
         self.return_value = 0 # right ?
-        return False
+        return manual
 
-    def _PTRACE_PEEKTEXT(self, address, _, *, slave, **kwargs):
+    def _PTRACE_PEEKTEXT(self, address, _, *, slave, manual=False, **kwargs):
         try:
             data = unpack(slave.read(address, context.bytes))
             log.info(f"peeking {hex(data)} from process {slave.pid} at address {hex(address)}")
@@ -3713,9 +3635,9 @@ class Debugger:
             log.info(f"invalid address {hex(address)} to peek from process {slave.pid}. Returning -1")
 
         self.return_value = data
-        return False
+        return manual
 
-    def _PTRACE_GETREGS(self, _, pointer_registers, *, slave, **kwargs):
+    def _PTRACE_GETREGS(self, _, pointer_registers, *, slave, manual=False, **kwargs):
         registers = user_regs_struct()
         for register in slave._registers:
             value = getattr(slave, register)
@@ -3728,10 +3650,10 @@ class Debugger:
             setattr(registers, register, value)
         self.write(pointer_registers, registers.get())
         self.return_value = 0 # right ?
-        return False
+        return manual
 
     # ATTENTO CHE setattr ritorna prima che venga fatto correttamente la jump per mettere rip. Quindi potresti avere una race condition [09/06/23]
-    def _PTRACE_SETREGS(self, _, pointer_registers, *, slave, **kwargs):
+    def _PTRACE_SETREGS(self, _, pointer_registers, *, slave, manual=False, **kwargs):
         registers = user_regs_struct()
         registers.set(self.read(pointer_registers, registers.size))
         for register in slave._registers:
@@ -3744,9 +3666,9 @@ class Debugger:
             if DEBUG: self.logger.debug("setting [%d]'s register %s: 0x%x", slave.pid, register, value)
             setattr(slave, register, value)
         self.return_value = 0 
-        return False
+        return manual
 
-    def _PTRACE_SETOPTIONS(self, _, options, *, slave, **kwargs):
+    def _PTRACE_SETOPTIONS(self, _, options, *, slave, manual=False, **kwargs):
         if DEBUG: self.logger.debug("0x%x", options)
         if options & constants.PTRACE_O_EXITKILL:
             options -= constants.PTRACE_O_EXITKILL
@@ -3764,15 +3686,15 @@ class Debugger:
             raise Exception(f"{hex(options)}: Not implemented yet")
 
         self.return_value = 0x0
-        return False
+        return manual
 
-    def _PTRACE_SINGLESTEP(self, _, __, *, slave, **kwargs):
+    def _PTRACE_SINGLESTEP(self, _, __, *, slave, manual=False, **kwargs):
         log.info(f"ptrace single step from {slave.reverse_lookup(slave.instruction_pointer)}")
         slave.step()
         if DEBUG: self.logger.debug("Telling the slave that it has stopped")
         slave._ptrace_has_stopped.set()
         self.return_value = 0x0
-        return False
+        return manual
         
     # NOT TESTED YET
     def _PTRACE_INTERRUPT(self, _, __, *, slave, **kwargs):
