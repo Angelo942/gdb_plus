@@ -1890,15 +1890,32 @@ class Debugger:
         return self
 
     # Can not be cached because qemu somehow changes it back at every step! [16/01/25]
-    def _make_page_rwx(self, address, size=1):
+    def make_page_rwx(self, address: int, size : int = 1, *, syscall_address : [int, None] = None):
+        """
+        Sets the memory protections of a page to be readable, writable, and executable (RWX). 
+
+        Args:
+            address : int
+                Any address within the page to update.
+            size : OPTIONAL INT 
+                Number of bytes that have to be executable. Set if the data may overlap multiple pages.
+            syscall_address : OPTIONAL INT
+                If running under QEMU without a symbol for mprotect we require the address of an executable syscall instruction.
+
+
+        """
         page_address = address - address % 0x1000
         page_size = (size // 0x1000 + 1) * 0x1000
 
-        if self._gdb is not None:
-           self.execute(f"call (void)mprotect({page_address}, {page_size}, 0x7)")
-        else:
-            #self.call("mprotect", [page_address, size, constants.PROT_EXEC | constants.PROT_READ | constants.PROT_WRITE])
-            self.call("mprotect", [page_address, size, 7]) #riscv doesn't have constants yet.
+        if "mprotect" in self.symbols:
+            if self._gdb is not None:
+                self.execute(f"call (void)mprotect({page_address}, {page_size}, 0x7)")
+            else:
+                self.call("mprotect", [page_address, page_size, 7])
+        elif context.arch not in ["riscv32", "riscv64"]: 
+            self.syscall(constants.SYS_mprotect.real, [page_address, page_size, constants.PROT_EXEC | constants.PROT_READ | constants.PROT_WRITE], syscall_address = syscall_address)
+        else: # pwntools doesn't have constants yet for RISCV yet [18/01/25]
+            self.syscall(226, [page_address, page_size, 7], syscall_address = syscall_address)
         
     def syscall(self, code: int, args: list, *, heap = True, syscall_address = None):
         """
@@ -1936,7 +1953,7 @@ class Debugger:
                 if "mprotect" not in self.symbols:
                     raise Exception("calling syscalls under qemu requires mprotect! Add the symbol or give me the address of a syscall instruction.")
                 else: 
-                    self._make_page_rwx(return_address, len(shellcode))
+                    self.make_page_rwx(return_address, len(shellcode))
                     #pass # I will let write() call mprotect if needed [16/01/25]
         
             backup_memory = self.read(return_address, len(shellcode))
@@ -2404,7 +2421,7 @@ class Debugger:
         except Exception as e: #gdb.MemoryError
             if not context.native:
                 log.warn_once("QEMU is preventing to write on the page. Changing permissions...") # Warn only once because QEMU will reset the protection at each step and it would spam the user of errors [16/01/25]
-                self._make_page_rwx(address, len(byte_array))
+                self.make_page_rwx(address, len(byte_array))
                 inferior.write_memory(address, byte_array)
                 log.warn_once("Successfully changed permissions.")
             else:
@@ -3800,19 +3817,10 @@ class Debugger:
             if DEBUG: self.logger.debug("allocating memory for shellcode")
             address = self.alloc(len(shellcode))
 
-        self.write(address, shellcode)
-        if skip_mprotect:
-            return address
-        # How many pages does your shellcode takes
-        size = 0x1000 * ((1 + (address + len(shellcode)) // 0x1000) - address // 0x1000)
-        #if not self.elf.statically_linked:
-        #    ans = self.execute(f"call (long) mprotect({hex(address)}, {hex(size)}, 7)")
-        #else:
-        if "mprotect" in self.symbols:
-            # I can use gdb call, but there are problems if the symbols are "fake" so put a check elf.statically_linked if you want to do it [04/03/23]
-            ans = self.call("mprotect", [address & 0xfffffffffffff000, size, constants.PROT_EXEC | constants.PROT_READ | constants.PROT_WRITE])
-        ans = self.syscall(constants.SYS_mprotect.real, [address & 0xfffffffffffff000, size, constants.PROT_EXEC | constants.PROT_READ | constants.PROT_WRITE])
-        
+        if not skip_mprotect:
+            self.make_page_rwx(address, len(shellcode))
+
+        self.write(address, shellcode) # After make_page_rwx because in QEMU write may have to make the page writable anyway
         self.switch_inferior(old_inferior.num)
 
         return address
