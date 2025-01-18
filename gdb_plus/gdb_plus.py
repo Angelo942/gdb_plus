@@ -17,15 +17,14 @@ from queue import Queue
 from math import ceil
 from multiprocessing import Process, Event as p_Event, Queue as p_Queue, cpu_count
 import re
-import logging as _logging
 from functools import cache, cached_property
 from elftools.elf.sections import SymbolTableSection
 
 
 # Logs to debug the library can be enabled by setting DEBUG = True in gdb_plus.utils
-_logger = _logging.getLogger("gdb_plus")
-ch = _logging.StreamHandler()
-formatter = _logging.Formatter("%(name)s:%(funcName)s:%(message)s")
+_logger = logging.getLogger("gdb_plus")
+ch = logging.StreamHandler()
+formatter = logging.Formatter("%(name)s:%(funcName)s:%(message)s")
 ch.setFormatter(formatter)
 _logger.addHandler(ch)
 if DEBUG: _logger.level = 10
@@ -174,9 +173,9 @@ class Debugger:
             self.elf = self.p.elf if binary is None else ELF(binary, checksec=False) if type(binary) is str else binary
 
         if self.pid is not None:
-            self.logger = _logging.getLogger(f"Debugger-{self.pid}")
+            self.logger = logging.getLogger(f"Debugger-{self.pid}")
         else:
-            self.logger = _logging.getLogger(f"Remote Debugger")
+            self.logger = logging.getLogger(f"Remote Debugger")
         self.logger.addHandler(ch)
         self.logger.setLevel(_logger.level)
 
@@ -502,7 +501,6 @@ class Debugger:
             return
         except:
             if DEBUG: _logger.debug("user isn't using pwndbg")
-
         
     def __setup_gdb(self):
         """
@@ -1308,7 +1306,9 @@ class Debugger:
             # Check first that the slave isn't running in case ptrace_has_stopped hasn't been cleared correctly ? Clear it in hidden_continue instead of PTRACE_CONT ? [27/06/23]
             stopped = self._ptrace_has_stopped.is_set()
         else: 
+            if DEBUG: self.logger.debug("waiting for slave to stop.")
             self._ptrace_has_stopped.wait()
+            if DEBUG: self.logger.debug("slave has stop.")
             stopped = True
 
         # I can't clear it only here ! A wrong SIGSTOP in the step before a continue would set it again [22/07/23] 
@@ -3064,7 +3064,7 @@ class Debugger:
                     ans = self.eip
                 except Exception as e:
                     print(e)
-                    pwn.log.error("I failed retrievingg eip! make sure you set context.arch")
+                    log.error("I failed retrieving eip! make sure you set context.arch")
                     continue
             elif context.arch == "aarch64":
                 ans = self.pc
@@ -3220,6 +3220,7 @@ class Debugger:
             return self
 
         if self._pwndbg:
+            log.warn_once("pwndbg may not handle correctly multi process applications. We recommend using GEF")
 
         if off:
             self.execute("set detach-on-fork on")

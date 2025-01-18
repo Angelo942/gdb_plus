@@ -7,10 +7,7 @@ from queue import Queue
 from dataclasses import dataclass
 
 DEBUG = False
-# I can't always access dbg.logger, but I want to make sure not to pollute the logger for the user. I only need this info when I debug my library
-def log_debug(msg, *argv):
-    if DEBUG:
-        log.debug(msg, *argv)
+_logger = logging.getLogger("gdb_plus")
 
 # Only support amd64
 class user_regs_struct:
@@ -134,7 +131,7 @@ class MyEvent(Event):
         self.cleared = Event()
         #self.secret = Event()
         self.priority = 0
-        self.pid = 0
+        self.pid = 0 # here to handle multiple processes under the same debugger. 
         self.flag_enforce_stop = None
 
     # I still need a standard wait for actions not initiated by dbg.cont and dbg.next
@@ -142,13 +139,13 @@ class MyEvent(Event):
     def priority_wait(self, comment = "", priority=None):
         if priority is None:
             priority = self.priority
-        log_debug(f"[{self.pid}] waiting with priority {priority} for {comment}")
+        if DEBUG: _logger.debug(f"[{self.pid}] waiting with priority {priority} for {comment}")
         while True:
             # Unfortunately you can not use the number of threads waiting to find the max priority [18/06/23]
             super().wait()
-            log_debug(f"wait [{priority}] finished")
+            if DEBUG: _logger.debug(f"wait [{priority}] finished")
             if priority == self.priority:
-                log_debug(f"[{self.pid}] met priority {priority} for {comment}")
+                if DEBUG: _logger.debug(f"[{self.pid}] met priority {priority} for {comment}")
                 # Prevent race conditions. Make sure all threads know the current priority before anyone calls lower_priority
                 sleep(0.001)
                 self.lower_priority(comment)
@@ -175,17 +172,17 @@ class MyEvent(Event):
     #        self.cleared.set()
 
     def raise_priority(self, comment):
-        log_debug(f"[{self.pid}] raising priority [{self.priority}] -> [{self.priority + 1}] for {comment}")
+        if DEBUG: _logger.debug(f"[{self.pid}] raising priority [{self.priority}] -> [{self.priority + 1}] for {comment}")
         self.priority += 1
 
     def lower_priority(self, comment):
-        log_debug(f"[{self.pid}] lowering priority [{self.priority - 1}] <- [{self.priority}] for {comment}")
+        if DEBUG: _logger.debug(f"[{self.pid}] lowering priority [{self.priority - 1}] <- [{self.priority}] for {comment}")
         self.priority -= 1
         if self.priority < 0:
             log.warn(f"I think there is something wrong with the wait! We reached priority {self.priority}")
         if self.priority == 0:
             # Should reset when reaching 0, but also when debugging manually ? [18/06/23]
-            log_debug("reset enforce stop")
+            if DEBUG: _logger.debug("reset enforce stop")
             self.flag_enforce_stop = None    
 
     # If we enforce a stop on level 5 through a breakpoint, a return False on level 7 should still continue, but not on level 3
@@ -196,7 +193,7 @@ class MyEvent(Event):
         if self.flag_enforce_stop is None:
             return False
         else:
-            log_debug(f"priority is {self.priority}. Enforce is {self.flag_enforce_stop}")
+            if DEBUG: _logger.debug(f"priority is {self.priority}. Enforce is {self.flag_enforce_stop}")
             return self.priority >= self.flag_enforce_stop
 
 @dataclass
