@@ -1,15 +1,38 @@
-DBG+ 6.4.2:
+GDB+ 7.0.1: catchpoints
+* support gdb catchpoints
+* correct implementation of load_libc
+* allow different register calling conventions for call() 
+* try to trace function calls
+* breakpoint callbacks are executed in LIFO order
+* gdbserver starts from entry point by default
+* dbg.elf_address and dbg.libc_address warn user if the exploit sets them to the wrong value
+
+GDB+ 7.0.0: Fast GDB
+* increased speed up to 10x
+* removed the logs to debug the library
+
+GDB+ 6.4.3:
+* hotfix migrate to gdb while emulate ptrace is on
+* Args support slices
+* Update heap analysis functions for pwndbg 
+* Support waitpid(-1) before process traced
+* Allow to setup ptrace_emulation without call to ptrace
+* make Debugger.canary writeable 
+* Debugger(binary=...) support ELF object too
+* support direct connection to gdbserver
+
+GDB+ 6.4.2:
 * handle NOPTRACE for emulate_ptrace and split_on_fork
 * NOP instructions
 * hotfix disable lock.log with NOPTRACE
 * hotfix Removed buffer overflow in `__convert_args`
 * Assert that malloc is present before trying to allocate on heap
-* Option to connect to remote server while debugging localy
+* Option to connect to remote server while debugging locally
 * Migrate to logging library 
 * read pointers based on context
 * context manager
 
-DBG+ 6.4.1: syscalls
+GDB+ 6.4.1: syscalls
 * Set handlers for syscalls
 * Emulate ptrace through syscalls instead of function calls
 * Support signals with libdebug
@@ -51,4 +74,4 @@ GDB+ 6.3.1: hotfix libdebug
 GDB+ 6.3.0: **Let's go faster**
 * Can use gdb or libdebug ad debugger
 	- gdb can be used manually, but will be slower to script
-	- libdebug has less fetures and more bugs
+	- libdebug has less features and more bugs

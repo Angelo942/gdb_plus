@@ -1,23 +1,28 @@
 import unittest
 from gdb_plus import *
 import warnings
+import timeout_decorator
 
 gdbinit = """
 handle SIGALRM nopass
 source ~/.gdbinit-gef.py
 """
 
-@unittest.skip
+QUICK = 10
+MEDIUM = 30
+LONG = 60
+
+#@unittest.skip
 class Debugger_process(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
 		warnings.simplefilter("ignore", ImportWarning)
 		
 	def tearDown(self):
-		self.dbg.close()
 		pass
 
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_file_standard(self):
 		print("\ntest_file_standard: ", end="")
 		with context.local(arch="i386", bits=32):
@@ -26,16 +31,20 @@ class Debugger_process(unittest.TestCase):
 			self.assertEqual(self.dbg.recv(), b"Let's start the CTF:")
 			self.dbg.interrupt()
 			self.assertEqual(self.dbg.instruction_pointer - self.dbg.elf.address, 0x99)
+			self.dbg.close()
 			
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_noptrace(self):
 		print("\ntest_noptrace: ", end="")
 		with context.local(noptrace = True, arch="i386", bits=32):
 			self.dbg = Debugger("./start").remote("chall.pwnable.tw", 10000)
 			self.assertEqual(self.dbg.recv(), b"Let's start the CTF:")
 			self.assertFalse(self.dbg.gdb) 
+			self.dbg.close()
 			
 	#@unittest.skip
+	@timeout_decorator.timeout(MEDIUM)
 	def test_remote(self):
 		print("\ntest_remote: ", end="")
 		with context.local(arch="i386", bits=32):
@@ -53,34 +62,41 @@ class Debugger_process(unittest.TestCase):
 			self.dbg.p.sendline(b"cat /home/start/flag")
 			self.assertEqual(self.dbg.p.recv().strip(), b"FLAG{Pwn4bl3_tW_1s_y0ur_st4rt}")
 			args.REMOTE = ""
+			self.dbg.close()
 
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_process(self):
 		print("\ntest_process: ", end="")
 		with context.local(arch="i386", bits=32):
 			p = process("./start")
 			self.dbg = Debugger(p)
 			self.assertEqual(self.dbg.p.recv(), b"Let's start the CTF:")
+			self.dbg.close()
 			
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_pid(self):
 		print("\ntest_pid: ", end="")
 		with context.local(arch="i386", bits=32):
 			p = process("./start")
 			self.assertEqual(type(p.pid), int)
 			self.dbg = Debugger(p.pid, binary="./start")
+			self.dbg.close()
 
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_debug_from(self):
 		print("\ntest_debug_from: ", end="")
 		with context.local(arch="amd64", bits=64):
 			self.dbg = Debugger("./traps_withSymbols", aslr=False, debug_from=0x0401590, timeout=0.4)
 			self.assertEqual(self.dbg.rip, 0x0401590)
+			self.dbg.close()
 			
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_nonblocking_debug_from(self):
 		print("\ntest_nonblocking_debug_from: ", end="")
-
 		with context.local(arch="i386", bits=32):
 			interaction_finished = Event()
 			self.dbg = Debugger("./start", aslr=False).debug_from(0x804809d, event=interaction_finished, timeout=0.01)
@@ -88,9 +104,10 @@ class Debugger_process(unittest.TestCase):
 			interaction_finished.set()
 			self.dbg.debug_from_done.wait()
 			self.assertEqual(self.dbg.eip, 0x804809d)
+			self.dbg.close()
 
-	# Yet impossible. race condition between next's and finish's continue until. TODO handle priority level between step and continue
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_multiple_breakpoints(self):
 		print("\ntest_multiple_breakpoints: ", end="")
 		with context.local(arch="amd64", bits=64):
@@ -104,7 +121,10 @@ class Debugger_process(unittest.TestCase):
 			self.dbg.b(0x433494, callback=callback)
 			self.dbg.next()		
 			self.assertEqual(callback_finished[0], 0x401586)
+			self.dbg.close()
 
+	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_close_breakpoints(self):
 		print("\ntest_close_breakpoints: ", end="")
 		with context.local(arch="amd64", bits=64):
@@ -113,8 +133,26 @@ class Debugger_process(unittest.TestCase):
 			self.dbg.b(0x401801, callback=lambda x: False)
 			self.dbg.c()
 			self.assertEqual(self.dbg.rip, 0x401802)
+			self.dbg.close()
 
-@unittest.skip
+	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
+	def test_ltrace(self):
+		print("\ntest_ltrace: ", end="")
+		with context.local(binary = "./insaaaaaaane"):
+			dbg = Debugger("./insaaaaaaane")
+			dbg.set_ltrace()
+			data = [0]
+			def callback(self):
+				data[0] = self.args[1]
+				return False
+			dbg.b("plt.fgets", callback=callback)
+			dbg.p.sendline(b"ciao")
+			dbg.c()
+			dbg.close()
+			self.assertEqual(data[0], 0x63)
+
+#@unittest.skip
 class Debugger_actions(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
@@ -123,36 +161,44 @@ class Debugger_actions(unittest.TestCase):
 			self.dbg = Debugger("./insaaaaaaane")
 
 	def tearDown(self):
-		self.dbg.close()
-
-	# Fail, ho fatto next a mano e ho perso il controllo
-	@unittest.skip
-	def test_continue_until(self):
-		print("\ntest_continue_until: ", end="")
-		self.dbg.b(0x403ad7, temporary=True)
-		print("\nPlay with gdb once we hit address 0x403ad7 and then send continue")
-		# Possible bug: If I hit the breakpoint too soon it won't detect it... 
-		self.dbg.continue_until(0x403adb)
-		self.assertEqual(self.dbg.instruction_pointer, 0x403adb)
+		pass
 
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
+	def test_continue_until(self):
+		print("\ntest_continue_until: ", end="")
+		with context.local(arch="amd64", bits=64):
+			self.dbg.b(0x403ad7, temporary=True)
+			print("\nPlay with gdb once we hit address 0x403ad7 and then send continue")
+			# Possible bug: If I hit the breakpoint too soon it won't detect it... 
+			self.dbg.continue_until(0x403adb)
+			self.assertEqual(self.dbg.instruction_pointer, 0x403adb)
+			self.dbg.close()
+
+	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_nonblocking_continue_until(self):
 		print("\ntest_nonblocking_continue_until: ", end="")
-		done = self.dbg.continue_until(0x4038c2, wait=False)
-		self.dbg.p.sendline(b"ciao")
-		done.wait()
-		self.assertEqual(self.dbg.instruction_pointer, 0x4038c2)
+		with context.local(arch="amd64", bits=64):
+			done = self.dbg.continue_until(0x4038c2, wait=False)
+			self.dbg.p.sendline(b"ciao")
+			done.wait()
+			self.assertEqual(self.dbg.instruction_pointer, 0x4038c2)
+			self.dbg.close()
 
-@unittest.skip
+#@unittest.skip
 class Debugger_callbacks(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
-		self.dbg = Debugger("./insaaaaaaane")
+		with context.local(arch="amd64", bits=64):
+			self.dbg = Debugger("./insaaaaaaane")
 
 	def tearDown(self):
-		self.dbg.close()
+		pass	
+			
 
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_read_memory(self):
 		print("\ntest_read_memory: ", end="")
 		
@@ -164,28 +210,33 @@ class Debugger_callbacks(unittest.TestCase):
 			dbg.rsi = dbg.pop()
 			return True
 			
-		self.dbg.b(0x400786, callback=callback, temporary=True)
-		self.dbg.c(wait=True)
-
-		self.assertFalse(sum(data))
+		with context.local(arch="amd64", bits=64):	
+			self.dbg.b(0x400786, callback=callback, temporary=True)
+			self.dbg.c(wait=True)
+			self.assertFalse(sum(data))
+			self.dbg.close()
 
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_no_stop(self):
 		print("\ntest_no_stop: ", end="")
 		def callback(dbg):
 			dbg.b(0x403ad9, temporary=True)
 			return False
 
-		self.dbg.b(0x403ad0, callback=callback, temporary=True)
-		
-		self.dbg.c(wait=True)
-		#self.dbg.interactive()
-		self.assertEqual(self.dbg.rip, 0x403ad9)
-		self.assertFalse(len(self.dbg.breakpoints[0x403ad0] + self.dbg.breakpoints[0x403ad9]))
-		self.assertFalse(self.dbg.priority)
+		with context.local(arch="amd64", bits=64):
+			self.dbg.b(0x403ad0, callback=callback, temporary=True)
+			
+			self.dbg.c(wait=True)
+			#self.dbg.interactive()
+			self.assertEqual(self.dbg.rip, 0x403ad9)
+			self.assertFalse(len(self.dbg.breakpoints[0x403ad0] + self.dbg.breakpoints[0x403ad9]))
+			self.assertFalse(self.dbg.priority)
+			self.dbg.close()
 
 	# It works, but it should finish with priority 0, not 1
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_step(self):
 		print("\ntest_step: ", end="")
 
@@ -193,12 +244,15 @@ class Debugger_callbacks(unittest.TestCase):
 			dbg.step()
 			return True
 
-		self.dbg.b(0x403ad0, callback=callback, temporary=True)
-		self.dbg.c(wait=True)
-		self.assertEqual(self.dbg.rip, 0x403ad2)
-		self.assertFalse(self.dbg.priority)
+		with context.local(arch="amd64", bits=64):
+			self.dbg.b(0x403ad0, callback=callback, temporary=True)
+			self.dbg.c(wait=True)
+			self.assertEqual(self.dbg.rip, 0x403ad2)
+			self.assertFalse(self.dbg.priority)
+			self.dbg.close()
 
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_enforce_stop(self):
 		print("\ntest_enforce_stop: ", end="")
 
@@ -206,78 +260,127 @@ class Debugger_callbacks(unittest.TestCase):
 			dbg.finish()
 			return False
 
-		self.dbg.b(0x400870, callback=callback)
-		#self.dbg.b(0x40388e)
-		#self.dbg.c(wait=True)
-		self.dbg.until(0x40388e)
-		self.assertEqual(self.dbg.rip, 0x40388e)
-		self.assertFalse(self.dbg.priority)
+		with context.local(arch="amd64", bits=64):
+			self.dbg.b(0x400870, callback=callback)
+			#self.dbg.b(0x40388e)
+			#self.dbg.c(wait=True)
+			self.dbg.until(0x40388e)
+			self.assertEqual(self.dbg.rip, 0x40388e)
+			self.assertFalse(self.dbg.priority)
+			self.dbg.close()
 
-@unittest.skip
+#@unittest.skip
+class Debugger_catchpoint(unittest.TestCase):
+	def setUp(self):
+		warnings.simplefilter("ignore", ResourceWarning)
+
+	def tearDown(self):
+		pass	
+	
+	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
+	def test_manual_load_libc(self):
+		print("\ntest_manual_load_libc: ", end="")
+		with context.local(binary = ELF("./cube")):
+			dbg = Debugger("./cube", from_start = True, from_entry = False)
+			self.assertTrue(dbg.libc is None)
+			dbg.catch("load")
+			dbg.c()
+			self.assertTrue(dbg.libc is not None)
+			dbg.close()
+
+	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
+	def test_load_libc(self):
+		print("\ntest_load_libc: ", end="")
+		with context.local(binary = ELF("./cube")):
+			dbg = Debugger("./cube", from_start = True, from_entry = False)
+			self.assertTrue(dbg.libc is None)
+			dbg.load_libc()
+			self.assertTrue(dbg.libc is not None)
+			dbg.close()
+
+	# The syscalls are tested in ptrace emulation
+
+#@unittest.skip
 class Debugger_memory(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
-		self.dbg = Debugger("./cube", aslr=False, from_start=False)
+		with context.local(binary = ELF("./cube")):
+			self.dbg = Debugger("./cube", aslr=False, from_start=False)
 
 	def tearDown(self):
-		self.dbg.close()
+		pass
 		
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_register_access(self):
 		print("\ntest_register_access: ", end="")
-		self.dbg.rax = 0xdeadbeefdeadbeef
-		self.dbg.eax = 0xfafafafa
-		self.dbg.ax  = 0xbabe
-		self.dbg.ah = 0x90
-		self.assertEqual(self.dbg.rax, 0xdeadbeeffafa90be)
-		self.dbg.r11 = 0x134343432342
-		self.assertEqual(self.dbg.r11, 0x134343432342)
-		self.assertFalse(self.dbg.priority)
+		with context.local(binary = ELF("./cube")):
+			self.dbg.rax = 0xdeadbeefdeadbeef
+			self.dbg.eax = 0xfafafafa
+			self.dbg.ax  = 0xbabe
+			self.dbg.ah = 0x90
+			self.assertEqual(self.dbg.rax, 0xdeadbeeffafa90be)
+			self.dbg.r11 = 0x134343432342
+			self.assertEqual(self.dbg.r11, 0x134343432342)
+			self.assertFalse(self.dbg.priority)
+			self.dbg.close()
 
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_special_registers(self):
 		print("\ntest_special_registers: ", end="")
-		self.assertEqual(self.dbg.return_value, self.dbg.rax)
-		self.assertEqual(self.dbg.stack_pointer, self.dbg.rsp)
-		self.assertEqual(self.dbg.instruction_pointer, self.dbg.rip)
-		self.assertFalse(self.dbg.priority)
+		with context.local(binary = ELF("./cube")):
+			self.assertEqual(self.dbg.return_value, self.dbg.rax)
+			self.assertEqual(self.dbg.stack_pointer, self.dbg.rsp)
+			self.assertEqual(self.dbg.instruction_pointer, self.dbg.rip)
+			self.assertFalse(self.dbg.priority)
+			self.dbg.close()
 
 	# TODO: Test it with multiple inferiors if possible
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_alloc(self):
 		print("\ntest_alloc: ", end="")
-		pointer = self.dbg.alloc(16)
-		self.dbg.write(pointer, p64(0xdeadbeeffafa90be))
-		self.assertTrue(hex(pointer) in self.dbg.execute("heap chunks")) # WARNING THIS ONLY WORKS WITH GEF
-		self.dbg.dealloc(pointer)
-		pointer = self.dbg.alloc(16, heap=False)
-		self.dbg.write(pointer, p64(0xdeadbeeffafa90be))
-		self.dbg.dealloc(pointer, len=16, heap=False)
-		# remember dealloc in the bss will only delete the last chunk... 
-		self.assertFalse(self.dbg.priority)
+		with context.local(binary = ELF("./cube")):
+			assert self.dbg._gef, "run again with GEF"
+			pointer = self.dbg.alloc(16)
+			self.dbg.write(pointer, p64(0xdeadbeeffafa90be))
+			self.assertTrue(hex(pointer) in self.dbg.execute("heap chunks")) # WARNING THIS ONLY WORKS WITH GEF
+			self.dbg.dealloc(pointer)
+			pointer = self.dbg.alloc(16, heap=False)
+			self.dbg.write(pointer, p64(0xdeadbeeffafa90be))
+			self.dbg.dealloc(pointer, len=16, heap=False)
+			# remember dealloc in the bss will only delete the last chunk... 
+			self.assertFalse(self.dbg.priority)
+			self.dbg.close()
 
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_writes(self):
 		print("\ntest_writes: ", end="")
-		ints = [4, 6, 295342, 23, 50032]
-		strings = [b"ciao", b"come stai ?", b"questo programma fa davvero schifo"]
-		pointer = self.dbg.write_ints(None, ints)
-		self.assertEqual(ints, self.dbg.read_ints(pointer, len(ints)))
-		self.dbg.write_ints(pointer, [x*2 for x in ints])
-		self.assertEqual([x*2 for x in ints], self.dbg.read_ints(pointer, len(ints)))
-		pointer = self.dbg.write_longs(None, ints)
-		self.assertEqual(ints, self.dbg.read_longs(pointer, len(ints)))
-		self.dbg.write_longs(pointer, [x*2 for x in ints])
-		self.assertEqual([x*2 for x in ints], self.dbg.read_longs(pointer, len(ints)))
-		pointer = self.dbg.write_int(None, ints[0])
-		self.assertEqual(ints[0], self.dbg.read_int(pointer))
-		pointer = self.dbg.write_strings(None, strings*100)
-		self.assertEqual(strings*100, self.dbg.read_strings(pointer, len(strings)*100))
-		pointer = self.dbg.write_string(None, strings[0])
-		self.assertEqual(strings[0], self.dbg.read_string(pointer))		
-		self.assertFalse(self.dbg.priority)
+		with context.local(binary = ELF("./cube")):
+			ints = [4, 6, 295342, 23, 50032]
+			strings = [b"ciao", b"come stai ?", b"questo programma fa davvero schifo"]
+			pointer = self.dbg.write_ints(None, ints)
+			self.assertEqual(ints, self.dbg.read_ints(pointer, len(ints)))
+			self.dbg.write_ints(pointer, [x*2 for x in ints])
+			self.assertEqual([x*2 for x in ints], self.dbg.read_ints(pointer, len(ints)))
+			pointer = self.dbg.write_longs(None, ints)
+			self.assertEqual(ints, self.dbg.read_longs(pointer, len(ints)))
+			self.dbg.write_longs(pointer, [x*2 for x in ints])
+			self.assertEqual([x*2 for x in ints], self.dbg.read_longs(pointer, len(ints)))
+			pointer = self.dbg.write_int(None, ints[0])
+			self.assertEqual(ints[0], self.dbg.read_int(pointer))
+			pointer = self.dbg.write_strings(None, strings*100)
+			self.assertEqual(strings*100, self.dbg.read_strings(pointer, len(strings)*100))
+			pointer = self.dbg.write_string(None, strings[0])
+			self.assertEqual(strings[0], self.dbg.read_string(pointer))		
+			self.assertFalse(self.dbg.priority)
+			self.dbg.close()
 
-@unittest.skip
+#@unittest.skip
 class Debbuger_fork(unittest.TestCase):
 	from base64 import b64encode
 	def setUp(self):
@@ -285,11 +388,10 @@ class Debbuger_fork(unittest.TestCase):
 		warnings.simplefilter("ignore", ImportWarning)
 
 	def tearDown(self):
-		if hasattr(self, "dbg"):
-			self.dbg.close()
 		pass
 
-	def http_request(self, *, auth: bytes = b64encode(b"admin:admin"), keepAlive: bool = False):
+	@staticmethod
+	def http_request(auth: bytes = b64encode(b"admin:admin"), keepAlive: bool = False):
 		LINE_TERMINATOR =  b"\r\n"
 		request = []
 		request.append(b"GET / HTTP/1.1")
@@ -301,30 +403,35 @@ class Debbuger_fork(unittest.TestCase):
 		return LINE_TERMINATOR.join(request + [b""])
 
 	#@unittest.skip
+	@timeout_decorator.timeout(MEDIUM)
 	def test_continuous_follow(self):
 		print("\ntest_continuous_follow: ", end="")
 		gdbscript = """
 		set detach-on-fork off
 		set follow-fork-mode child
 		"""
-		self.dbg = Debugger("./httpd", aslr=False, script=gdbscript)
-		CALL_TO_B64DECODE = 0x26d5
-		#self.dbg.b(CALL_TO_B64DECODE)
-		#self.dbg.c(wait=False)
-		done = self.dbg.until(CALL_TO_B64DECODE, wait=False)
-		self.dbg.p.sendline(self.http_request(keepAlive=True))
-		#self.dbg.wait()
-		done.wait()
-		self.assertEqual(self.dbg.rip, 0x5555555566d5)
-		self.dbg.c()
-		self.dbg.execute("inferior 1") # We can't go back while the child is running
-		done = self.dbg.until(CALL_TO_B64DECODE, wait=False)
-		self.dbg.p.sendline(self.http_request(keepAlive=True))
-		done.wait()
-		self.assertEqual(self.dbg.rip, 0x5555555566d5)
-		self.assertFalse(self.dbg.priority)
+		with context.local(binary = ELF("./httpd")):
+			self.dbg = Debugger("./httpd", aslr=False, script=gdbscript)
+			CALL_TO_B64DECODE = 0x26d5
+			#self.dbg.b(CALL_TO_B64DECODE)
+			#self.dbg.c(wait=False)
+			done = self.dbg.until(CALL_TO_B64DECODE, wait=False)
+			self.dbg.p.sendline(self.http_request(keepAlive=True))
+			#self.dbg.wait()
+			done.wait()
+			self.assertEqual(self.dbg.rip, 0x5555555566d5)
+			self.dbg.c()
+			self.dbg.execute("inferior 1") # We can't go back while the child is running
+			done = self.dbg.until(CALL_TO_B64DECODE, wait=False)
+			self.dbg.p.sendline(self.http_request(keepAlive=True))
+			done.wait()
+			self.assertEqual(self.dbg.rip, 0x5555555566d5)
+			self.assertFalse(self.dbg.priority)
+			self.dbg.close()
 		
+	# Priority not cleared
 	#@unittest.skip
+	@timeout_decorator.timeout(MEDIUM)
 	def test_split(self):
 		print("\ntest_split: ", end="")
 		with context.local(arch = "amd64", bits = 64):
@@ -336,7 +443,7 @@ class Debbuger_fork(unittest.TestCase):
 			"""
 			dbg = Debugger("./httpd", aslr=False, script=gdbscript)
 			dbg.c(wait=False)
-			sleep(1) # wait for the child to spwn. The parrent will continue while the child is stopped at fork
+			sleep(1) # wait for the child to spwn. The parent will continue while the child is stopped at fork
 			dbg.interrupt()
 			sleep(1) # wait for the priority to get back to zero
 			self.assertFalse(dbg.priority)
@@ -351,12 +458,14 @@ class Debbuger_fork(unittest.TestCase):
 			dbg.execute("set follow-fork-mode child")
 			dbg.p.sendline(self.http_request(keepAlive=True))
 			dbg.c()
+			sleep(1)
 			self.assertEqual(dbg.rip, 0x5555555566d5)
 			self.assertFalse(dbg.priority)
 			dbg.close()
 			child.close()
 
 	#@unittest.skip
+	@timeout_decorator.timeout(MEDIUM)
 	def test_my_split_interrupt(self):
 		print("\ntest_my_split_interrupt: ", end="")
 		with context.local(arch = 'amd64'):
@@ -372,6 +481,7 @@ class Debbuger_fork(unittest.TestCase):
 			child.close()
 
 	#@unittest.skip
+	@timeout_decorator.timeout(MEDIUM)
 	def test_my_split_breakpoint(self):
 		print("\ntest_my_split_breakpoint: ", end="")
 		with context.local(arch = 'amd64'):
@@ -388,6 +498,7 @@ class Debbuger_fork(unittest.TestCase):
 			child.close()
 
 	#@unittest.skip
+	@timeout_decorator.timeout(LONG)
 	def test_ptrace_emulation(self):
 		print("\ntest_ptrace_emulation: ", end="")
 		with context.local(arch = 'amd64'):
@@ -429,6 +540,7 @@ class Debbuger_fork(unittest.TestCase):
 			dbg.close()
 
 	#@unittest.skip
+	@timeout_decorator.timeout(LONG * 4)
 	def test_ptrace_emulation_syscall(self):
 		print("\ntest_ptrace_emulation_syscall: ", end="")
 		with context.local(arch = "amd64"):
@@ -465,8 +577,8 @@ class Debbuger_fork(unittest.TestCase):
 			for i in range(1, 21):
 				child.continue_until(END_UNPACK, hw=True, loop=True)
 				
-				# Tolgo questa parte perchè dovrebbe essere gestita da emulate
-				#if i == 4:
+				#Tolgo questa parte perché dovrebbe essere gestita da emulate
+				# if i == 4:
 				#  child.continue_until(TRAP_PTRACE, loop=True)
 				#  child.step()
 				#  child.return_value = 0x0
@@ -485,10 +597,11 @@ class Debbuger_fork(unittest.TestCase):
 				flag += p32(n)
 			self.assertEqual(xor(flag, 0xd), b"CSCG{4ND_4LL_0FF_TH1S_W0RK_JU5T_T0_G3T_TH1S_STUUUP1D_FL44G??!!1}")
 
-			dbg.close()
 			child.close()
+			dbg.close()
 
 	#@unittest.skip
+	@timeout_decorator.timeout(LONG)
 	def test_ptrace_emulation_libdebug(self):
 		print("\ntest_ptrace_emulation_libdebug: ", end="")
 		with context.local(arch="amd64"):
@@ -556,204 +669,228 @@ class Debbuger_fork(unittest.TestCase):
 			dbg.close()
 			child.close()
 
-@unittest.skip
+#@unittest.skip
 class Debugger_signals(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
 		warnings.simplefilter("ignore", ImportWarning)
-		self.dbg = Debugger("./ExceptionalChecking_patched")
+			
 
 	def tearDown(self):
-		if hasattr(self, "dbg"):
-			self.dbg.close()
 		pass
 		
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_signal_gdb(self):
 		print("\ntest_signal_gdb: ", end="")
 		from queue import Queue
 		HANDLER_RET = 0x04011ff
 		CHECK_CALL = 0x0401341
-		self.dbg.p.sendline(b"serial_a_caso")
-		self.dbg.until(CHECK_CALL)
-		self.dbg.step()
-		self.dbg.next_signal = False
-		output = []
-		def callback(dbg):
-			if self.dbg.next_signal:
-				#print("\ncall signal")
-				self.dbg.signal("SIGUSR1", handler=HANDLER_RET)
-				self.dbg.next_signal = False
-			ni = self.dbg.next_inst
-			if ni.mnemonic == "int3":
-				#print("\nint3")
-				self.dbg.next_signal = True
-				self.dbg.write(self.dbg.instruction_pointer, b"\x90") #Just to avoid problems
-			else:
-				output.append(ni.toString())
-		n = self.dbg.step_until_ret(callback, limit=5)
-		# We can't use condition because the callback is called after the step
-		#self.dbg.step_until_condition(callback)
-		self.assertEqual(n, -1)
-		with open("dump_ExceptionalChecking") as fp:
-			self.assertTrue(fp.read().startswith("\n".join(output)))
-		self.assertFalse(self.dbg.priority)
+		with context.local(binary = ELF("./ExceptionalChecking_patched")):
+			self.dbg = Debugger("./ExceptionalChecking_patched")
+			self.dbg.p.sendline(b"serial_a_caso")
+			self.dbg.until(CHECK_CALL)
+			self.dbg.step()
+			self.dbg.next_signal = False
+			output = []
+			def callback(dbg):
+				if self.dbg.next_signal:
+					#print("\ncall signal")
+					self.dbg.signal("SIGUSR1", handler=HANDLER_RET)
+					self.dbg.next_signal = False
+				ni = self.dbg.next_inst
+				if ni.mnemonic == "int3":
+					#print("\nint3")
+					self.dbg.next_signal = True
+					self.dbg.write(self.dbg.instruction_pointer, b"\x90") #Just to avoid problems
+				else:
+					output.append(ni.toString())
+			n = self.dbg.step_until_ret(callback, limit=5)
+			# We can't use condition because the callback is called after the step
+			#self.dbg.step_until_condition(callback)
+			self.assertEqual(n, -1)
+			with open("dump_ExceptionalChecking") as fp:
+				self.assertTrue(fp.read().startswith("\n".join(output)))
+			self.assertFalse(self.dbg.priority)
+			self.dbg.close()
 
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_signal_handler_libdebug(self):
 		print("\ntest_signal_handler_libdebug: ", end="")
 		from queue import Queue
 		HANDLER_RET = 0x04011ff
 		CHECK_CALL = 0x0401341
-		self.dbg.migrate(libdebug=True)
-		self.dbg.p.sendline(b"serial_a_caso")
-		self.dbg.until(CHECK_CALL)
-		self.dbg.step()
-		self.dbg.next_signal = False
-		output = []
-		def callback(dbg):
-			if dbg.next_signal:
-				#print("\ncall signal")
-				dbg.signal("SIGUSR1", handler=HANDLER_RET)
-				dbg.next_signal = False
-			ni = dbg.next_inst
-			if ni.mnemonic == "int3":
-				#print("\nint3")
-				dbg.next_signal = True
-				dbg.write(dbg.instruction_pointer, b"\x90") #Just to avoid problems
-			else:
-				output.append(ni.toString())
-		self.dbg.step_until_ret(callback, limit=50)
-		with open("dump_ExceptionalChecking") as fp:
-			self.assertTrue(fp.read().startswith("\n".join(output)))
-		self.assertFalse(self.dbg.priority)
+		with context.local(binary = ELF("./ExceptionalChecking_patched")):
+			self.dbg = Debugger("./ExceptionalChecking_patched")
+			self.dbg.migrate(libdebug=True)
+			self.dbg.p.sendline(b"serial_a_caso")
+			self.dbg.until(CHECK_CALL)
+			self.dbg.step()
+			self.dbg.next_signal = False
+			output = []
+			def callback(dbg):
+				if dbg.next_signal:
+					#print("\ncall signal")
+					dbg.signal("SIGUSR1", handler=HANDLER_RET)
+					dbg.next_signal = False
+				ni = dbg.next_inst
+				if ni.mnemonic == "int3":
+					#print("\nint3")
+					dbg.next_signal = True
+					dbg.write(dbg.instruction_pointer, b"\x90") #Just to avoid problems
+				else:
+					output.append(ni.toString())
+			self.dbg.step_until_ret(callback, limit=50)
+			with open("dump_ExceptionalChecking") as fp:
+				self.assertTrue(fp.read().startswith("\n".join(output)))
+			self.assertFalse(self.dbg.priority)
+			self.dbg.close()
 
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_signal_hw_libdebug(self):
 		print("\ntest_signal_hw_libdebug: ", end="")
 		from queue import Queue
 		CHECK_CALL = 0x0401341
-		self.dbg.migrate(libdebug=True)
-		self.dbg.p.sendline(b"serial_a_caso")
-		self.dbg.until(CHECK_CALL)
-		self.dbg.step()
-		self.dbg.next_signal = False
-		output = []
-		def callback(dbg):
-			if dbg.next_signal:
-				#print("\ncall signal")
-				dbg.signal("SIGUSR1")
-				dbg.next_signal = False
-			ni = dbg.next_inst
-			if ni.mnemonic == "int3":
-				#print("\nint3")
-				dbg.next_signal = True
-				dbg.write(dbg.instruction_pointer, b"\x90") #Just to avoid problems
-			else:
-				output.append(ni.toString())
-		self.dbg.step_until_ret(callback, limit=50)
-		with open("dump_ExceptionalChecking") as fp:
-			self.assertTrue(fp.read().startswith("\n".join(output)))
-		self.assertFalse(self.dbg.priority)
+		with context.local(binary = ELF("./ExceptionalChecking_patched")):
+			self.dbg = Debugger("./ExceptionalChecking_patched")
+			self.dbg.migrate(libdebug=True)
+			self.dbg.p.sendline(b"serial_a_caso")
+			self.dbg.until(CHECK_CALL)
+			self.dbg.step()
+			self.dbg.next_signal = False
+			output = []
+			def callback(dbg):
+				if dbg.next_signal:
+					#print("\ncall signal")
+					dbg.signal("SIGUSR1")
+					dbg.next_signal = False
+				ni = dbg.next_inst
+				if ni.mnemonic == "int3":
+					#print("\nint3")
+					dbg.next_signal = True
+					dbg.write(dbg.instruction_pointer, b"\x90") #Just to avoid problems
+				else:
+					output.append(ni.toString())
+			self.dbg.step_until_ret(callback, limit=50)
+			with open("dump_ExceptionalChecking") as fp:
+				self.assertTrue(fp.read().startswith("\n".join(output)))
+			self.assertFalse(self.dbg.priority)
+			self.dbg.close()
 
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_signal_step(self):
 		print("\ntest_signal_step: ", end="")
 		CHECK_CALL = 0x0401341
-		self.dbg.p.sendline(b"serial_a_caso")
-		self.dbg.until(CHECK_CALL)
-		self.dbg.step()
-		self.dbg.next_signal = False
-		self.dbg.si(repeat=2)
-		self.dbg.signal("SIGUSR1", step=True)
-		self.assertEqual(self.dbg.instruction_pointer, 0x401196)
+		with context.local(binary = ELF("./ExceptionalChecking_patched")):
+			self.dbg = Debugger("./ExceptionalChecking_patched")
+			self.dbg.p.sendline(b"serial_a_caso")
+			self.dbg.until(CHECK_CALL)
+			self.dbg.step()
+			self.dbg.next_signal = False
+			self.dbg.si(repeat=2)
+			self.dbg.signal("SIGUSR1", step=True)
+			self.assertEqual(self.dbg.instruction_pointer, 0x401196)
+			self.dbg.close()
 
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_signal_step_libdebug(self):
 		print("\ntest_signal_step_libdebug: ", end="")
 		CHECK_CALL = 0x0401341
-		self.dbg.p.sendline(b"serial_a_caso")
-		self.dbg.until(CHECK_CALL)
-		self.dbg.step()
-		self.dbg.next_signal = False
-		self.dbg.si(repeat=2)
-		self.dbg.migrate(libdebug=True)
-		self.dbg.signal("SIGUSR1", step=True)
-		self.assertEqual(self.dbg.instruction_pointer, 0x401196)
+		with context.local(binary = ELF("./ExceptionalChecking_patched")):
+			self.dbg = Debugger("./ExceptionalChecking_patched")
+			self.dbg.p.sendline(b"serial_a_caso")
+			self.dbg.until(CHECK_CALL)
+			self.dbg.step()
+			self.dbg.next_signal = False
+			self.dbg.si(repeat=2)
+			self.dbg.migrate(libdebug=True)
+			self.dbg.signal("SIGUSR1", step=True)
+			self.assertEqual(self.dbg.instruction_pointer, 0x401196)
+			self.dbg.close()
 
-@unittest.skip
+#@unittest.skip
 class Debugger_calls(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
 		warnings.simplefilter("ignore", ImportWarning)
 
 	def tearDown(self):
-		if hasattr(self, "dbg"):
-			self.dbg.close()
+		pass
 
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_call(self):
 		print("\ntest_call: ", end="")
 		out = []
-		self.dbg = Debugger("./cube", from_start=False, aslr=False) # You must wait for the libc to be loaded to call malloc
-		for mossa in [0x00003175, 0x00003e74, 0x000038d9, 0x00001885]:
-			# Create blank cube
-			pointer = self.dbg.alloc(54*8)
-			self.dbg.write_longs(pointer, list(range(54)))
-			#for i in range(54):
-			#	self.dbg.write(pointer+i*8, p64(i))
+		with context.local(binary = "./cube"):
+			dbg = Debugger("./cube", from_start=False, aslr=False) # You must wait for the libc to be loaded to call malloc
+			for mossa in [0x00003175, 0x00003e74, 0x000038d9, 0x00001885]:
+				# Create blank cube
+				pointer = dbg.alloc(54*8)
+				dbg.write_longs(pointer, list(range(54)))
+				#for i in range(54):
+				#	dbg.write(pointer+i*8, p64(i))
 
-			self.dbg.call(mossa, [pointer])
-			out.append(f"prossima funzione {hex(self.dbg.get_base_elf() + mossa)}")
-			for i, value in enumerate(self.dbg.read_longs(pointer, 54)):
-				out.append(f"{i}: {value}")
-		#print("\n\n".join(out)) 
-		with open("./dump_Cube") as fd:
-			self.assertEqual(out, fd.read().split("\n"))
-		self.assertFalse(self.dbg.priority)
-		self.dbg.close()
+				dbg.call(mossa, [pointer])
+				out.append(f"prossima funzione {hex(dbg.elf.address + mossa)}")
+				for i, value in enumerate(dbg.read_longs(pointer, 54)):
+					out.append(f"{i}: {value}")
+			#print("\n\n".join(out)) 
+			with open("./dump_Cube") as fd:
+				self.assertEqual(out, fd.read().split("\n"))
+			self.assertFalse(dbg.priority)
+			dbg.close()
 
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_syscall_64bit(self):
 		print("\ntest_syscall: ", end="")
 		path = "./data.txt"
 		with context.local(arch="amd64", bits=64):
 			with open(path, "wb") as file:
 				file.write(b"")
-			self.dbg = Debugger("./insaaaaaaane", from_start=False) # You must wait for the libc to be loaded to call malloc
-			fd = self.dbg.syscall(constants.SYS_open, [path, constants.O_WRONLY, 0x0])
+			dbg = Debugger("./insaaaaaaane", from_start=False) # You must wait for the libc to be loaded to call malloc
+			fd = dbg.syscall(constants.SYS_open, [path, constants.O_WRONLY, 0x0])
 			data = b"ciao, come stai ?"
-			self.dbg.syscall(constants.SYS_write, [fd, data, len(data)])
-			self.dbg.syscall(constants.SYS_close, [fd])
+			dbg.syscall(constants.SYS_write, [fd, data, len(data)])
+			dbg.syscall(constants.SYS_close, [fd])
 			with open(path, "rb") as file:
 				self.assertEqual(file.read(), data)
-			self.assertFalse(self.dbg.priority)
+			self.assertFalse(dbg.priority)
+			dbg.close()
 
-@unittest.skip
+#@unittest.skip
 class Debugger_libdebug(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
 		warnings.simplefilter("ignore", ImportWarning)
 
 	def tearDown(self):
-		self.dbg.close()
+		pass
 
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_migrate(self):
 		print("\ntest_migrate: ", end="")
 		with context.local(arch="amd64", bits=64):
-			self.dbg = Debugger("./httpd", aslr=False)
-			self.dbg.migrate(libdebug=True)
-			self.assertEqual(self.dbg.instruction_pointer, 0x7ffff7fe32b0)
-			self.dbg.step()
-			self.assertEqual(self.dbg.instruction_pointer, 0x7ffff7fe32b3)
-			self.dbg.migrate(gdb=True)
-			self.assertEqual(self.dbg.instruction_pointer, 0x7ffff7fe32b3)
-			self.dbg.step()
-			self.assertEqual(self.dbg.instruction_pointer, 0x7ffff7fe4050)
-			self.assertFalse(self.dbg.priority)
+			dbg = Debugger("./httpd", aslr=False)
+			dbg.migrate(libdebug=True)
+			self.assertEqual(dbg.instruction_pointer, 0x555555555440)
+			dbg.step()
+			self.assertEqual(dbg.instruction_pointer, 0x555555555444)
+			dbg.migrate(gdb=True)
+			self.assertEqual(dbg.instruction_pointer, 0x555555555444)
+			dbg.step()
+			self.assertEqual(dbg.instruction_pointer, 0x555555555446)
+			self.assertFalse(dbg.priority)
+			dbg.close()
 
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_continue_until(self):
 		print("\ntest_continue_until [libdebug]: ", end="")
 		with context.local(arch="amd64", bits=64):
@@ -762,8 +899,10 @@ class Debugger_libdebug(unittest.TestCase):
 			self.dbg.continue_until("main")
 			self.assertEqual(self.dbg.instruction_pointer, 0x55555555570c)
 			self.assertFalse(self.dbg.priority)
+			self.dbg.close()
 
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_call(self):
 		print("\ntest_call [libdebug]: ", end="")
 		out = []
@@ -773,9 +912,11 @@ class Debugger_libdebug(unittest.TestCase):
 			address = self.dbg.call("malloc", [0x100])
 			self.assertEqual(address, 0x55555555d2a0)
 			self.assertFalse(self.dbg.priority)
+			self.dbg.close()
 			
 	# BROKEN !!!!!
 	@unittest.skip
+	@timeout_decorator.timeout(LONG)
 	def test_inner_debugger(self):	
 		print("\ntest_inner_debugger [libdebug]:")	
 		from sage.all import IntegerModRing, MatrixSpace, vector
@@ -793,52 +934,55 @@ class Debugger_libdebug(unittest.TestCase):
 				ans.append(u32(data[i*4: (i+1)*4]))
 			return ans
 
-		self.dbg = Debugger("./traps_withSymbols", aslr=False, debug_from=END_ANTI_TRACING)
-		self.dbg.next()
-		child_pid = self.dbg.return_value
-		# Wait for parent to attach
-		self.dbg.continue_until("waitpid")
-		self.dbg.finish()
+		with context.local(binary = ELF("./traps_withSymbols")):
+			self.dbg = Debugger("./traps_withSymbols", aslr=False, debug_from=END_ANTI_TRACING)
+			self.dbg.next()
+			child_pid = self.dbg.return_value
+			# Wait for parent to attach
+			self.dbg.continue_until("waitpid")
+			self.dbg.finish()
 
-		self.dbg.migrate(libdebug=True)
-		child = Inner_Debugger(self.dbg, child_pid)
+			self.dbg.migrate(libdebug=True)
+			child = Inner_Debugger(self.dbg, child_pid)
 
-		self.dbg.p.sendline(b"A"*0x40)
-		A, b = [], []
-		for i in range(1, 21):
-			if i <= 4:
-				print(i)
-				self.dbg.continue_until(PTRACE_CONT, loop=True)
-			child.continue_until(END_UNPACK, loop=True)
-			if i == 4:
-			  child.continue_until(TRAP_PTRACE)
-			  child.step()
-			  child.return_value = 0x0
-			if i in range(5, 5+0x10):
-			  A.append(parse_line(child.read(MATRIX_DATA, 0x40)))
-			  b.append(u32(child.read(MATRIX_DATA+ 0x40, 4)))
-		R = IntegerModRing(2**32)
-		M = MatrixSpace(R, 0x10, 0x10)
-		A = M(A)
-		b = vector(b)
-		x = A.solve_right(b)
-		flag = b""
-		for n in x:
-			flag += p32(n)
-		flag = xor(flag, 0xd)
-		self.assertEqual(flag, b"CSCG{4ND_4LL_0FF_TH1S_W0RK_JU5T_T0_G3T_TH1S_STUUUP1D_FL44G??!!1}")
-		self.assertFalse(self.dbg.priority)
+			self.dbg.p.sendline(b"A"*0x40)
+			A, b = [], []
+			for i in range(1, 21):
+				if i <= 4:
+					print(i)
+					self.dbg.continue_until(PTRACE_CONT, loop=True)
+				child.continue_until(END_UNPACK, loop=True)
+				if i == 4:
+					child.continue_until(TRAP_PTRACE)
+					child.step()
+					child.return_value = 0x0
+				if i in range(5, 5+0x10):
+					A.append(parse_line(child.read(MATRIX_DATA, 0x40)))
+					b.append(u32(child.read(MATRIX_DATA+ 0x40, 4)))
+			R = IntegerModRing(2**32)
+			M = MatrixSpace(R, 0x10, 0x10)
+			A = M(A)
+			b = vector(b)
+			x = A.solve_right(b)
+			flag = b""
+			for n in x:
+				flag += p32(n)
+			flag = xor(flag, 0xd)
+			self.assertEqual(flag, b"CSCG{4ND_4LL_0FF_TH1S_W0RK_JU5T_T0_G3T_TH1S_STUUUP1D_FL44G??!!1}")
+			self.assertFalse(self.dbg.priority)
+			self.dbg.close()
 
-@unittest.skip
+#@unittest.skip
 class Debugger_ARM(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
 		warnings.simplefilter("ignore", ImportWarning)
 
 	def tearDown(self):
-		self.dbg.close()
+		pass
 
 	#@unittest.skip
+	@timeout_decorator.timeout(MEDIUM)
 	def test_continue_until(self):
 		with context.local(arch="aarch64"):
 			self.dbg = Debugger("./run_prog_with_symbols")
@@ -846,37 +990,42 @@ class Debugger_ARM(unittest.TestCase):
 			self.dbg.continue_until("main")
 			self.assertEqual(self.dbg.instruction_pointer, 0x23baf8)
 			self.assertFalse(self.dbg.priority)
+			self.dbg.close()
 		
 	#@unittest.skip
+	@timeout_decorator.timeout(MEDIUM)
 	def test_syscall(self):
 		print("\ntest_syscall [ARM]: ", end="")
 		with context.local(arch="aarch64"):
-			self.dbg = Debugger("./run_prog_with_symbols")
+			dbg = Debugger("./run_prog_with_symbols")
 			path = "./data.txt"
 			with open(path, "wb") as file:
 				file.write(b"") 
-			self.dbg.continue_until("main") # You must wait for the libc to be loaded to call malloc
-			fd = self.dbg.syscall(constants.SYS_openat, [constants.AT_FDCWD, path, constants.O_WRONLY, 0x0])
+			dbg.until("main") # Get a decent stack
+			fd = dbg.syscall(constants.SYS_openat, [constants.AT_FDCWD, path, constants.O_WRONLY, 0x0])
 			data = b"ciao, come stai ?"
-			self.dbg.syscall(constants.SYS_write, [fd, data, len(data)])
-			self.dbg.syscall(constants.SYS_close, [fd])
+			dbg.syscall(constants.SYS_write, [fd, data, len(data)])
+			dbg.syscall(constants.SYS_close, [fd])
 			with open(path, "rb") as file:
 				self.assertEqual(file.read(), data)
-			self.assertFalse(self.dbg.priority)
+			self.assertFalse(dbg.priority)
+			dbg.close()
 
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_call(self):
 		print("\ntest_call [ARM]: ", end="")
 		out = []
 		with context.local(arch="aarch64"):
-			self.dbg = Debugger("./test_arm_call") # You must wait for the libc to be loaded to call malloc
-			self.dbg.until("main") # You also have to wait for something else to load aparently to call the printf...
+			dbg = Debugger("./test_arm_call")
+			dbg.until("main") # get a decent stack frame
 			for i in [3, 6, 1]:
-				self.dbg.call("forkexample", [i])
-				self.assertEqual(self.dbg.p.recvline(), f"{i}\n".encode())
-			self.dbg.c()
-			self.assertEqual(self.dbg.p.recvline(), b"all done!\n")
-			self.assertFalse(self.dbg.priority)
+				dbg.call("forkexample", [i])
+				self.assertEqual(dbg.p.recvline(), f"{i}\n".encode())
+			dbg.c()
+			self.assertEqual(dbg.p.recvline(), b"all done!\n")
+			self.assertFalse(dbg.priority)
+			dbg.close()
 
 #@unittest.skip
 class Debugger_RISCV(unittest.TestCase):
@@ -885,42 +1034,45 @@ class Debugger_RISCV(unittest.TestCase):
 		warnings.simplefilter("ignore", ImportWarning)
 
 	def tearDown(self):
-		self.dbg.close()
+		pass
 
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_continue_until(self):
-		with context.local(arch="riscv"):
+		with context.local(binary="./smash-baby"):
 			self.dbg = Debugger("./smash-baby", env={"FLAG":"flag{test}"})
 			print("\ntest_continue_until [RISCV]: ", end="")
 			self.dbg.continue_until("open")
 			self.assertEqual(self.dbg.instruction_pointer, 0x1ce38)
 			self.assertFalse(self.dbg.priority)
+			self.dbg.close()
 		
 	#@unittest.skip
+	@timeout_decorator.timeout(MEDIUM)
 	def test_syscall(self):
 		print("\ntest_syscall [RISCV]: ", end="")
-		with context.local(arch="riscv", bits=32):
-			self.dbg = Debugger("./smash-baby", env={"FLAG":"flag{test}"})
-			path = "./data.txt"
-			with open(path, "wb") as file:
-				file.write(b"") 
-			self.dbg.continue_until("main") # You must wait for the libc to be loaded to call malloc
+		with context.local(binary="./smash-baby"):
+			dbg = Debugger("./smash-baby", env={"FLAG":"flag{test}"})
+			dbg.until("main") # You must wait for the libc to be loaded to call malloc
 			data = b"ciao, come stai ?\n"
-			length = self.dbg.syscall(0x40, [0x1, data, len(data)])
+			length = dbg.syscall(0x40, [0x1, data, len(data)])
 			self.assertEqual(len(data), length)
-			self.assertEqual(self.dbg.p.recv(), data)
-			self.assertFalse(self.dbg.priority)
+			self.assertEqual(dbg.p.recv(), data)
+			self.assertFalse(dbg.priority)
+			dbg.close()
 
 	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
 	def test_call(self):
 		print("\ntest_call [RISCV]: ", end="")
 		out = []
-		with context.local(arch="riscv"):
+		with context.local(binary="./smash-baby"):
 			self.dbg = Debugger("./smash-baby")
 			self.dbg.until("main")
 			self.dbg.call("puts", [b"ciao\n"])
 			self.assertTrue(b"ciao" in self.dbg.p.recv())
 			self.assertFalse(self.dbg.priority)
+			self.dbg.close()
 
 if __name__ == "__main__":
 	with context.quiet:

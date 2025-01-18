@@ -6,9 +6,13 @@ from threading import Event, Lock
 from queue import Queue
 from dataclasses import dataclass
 
+DEBUG = False
+_logger = logging.getLogger("gdb_plus")
+
+# Only support amd64
 class user_regs_struct:
     def __init__(self):
-        # I should use context maybe... At least you don't have suprises like me when pack breaks [02/03/23]
+        # I should use context maybe... At least you don't have surprises like me when pack breaks [02/03/23]
         self.registers = {64: ["r15", "r14", "r13", "r12", "rbp", "rbx", "r11", "r10", "r9", "r8", "rax", "rcx", "rdx", "rsi", "rdi", "orig_ax", "rip", "cs", "eflags", "rsp", "ss", "fs_base", "gs_base", "ds", "es", "fs", "gs"]}[context.bits]
         self.size = len(self.registers)*context.bytes
 
@@ -38,16 +42,17 @@ class Arguments:
         # It would require to delete it when we execute an action
         self.dbg = dbg
 
-    def __getitem__(self, index: int):
-        assert type(index) is int, "I can't handle slices to access multiple arguments"
-        self.dbg.restore_arch()
+    def __getitem__(self, index: [int, slice]):
+        #assert type(index) is int, "I can't handle slices to access multiple arguments"
+        if type(index) is slice:
+            return [self[i] for i in range(0 if index.start is None else index.start, -1 if index.stop is None else index.stop, 1 if index.step is None else index.step)]
         calling_convention = function_calling_convention[context.arch]
         if index < len(calling_convention):
             register = calling_convention[index]
-            log.debug(f"argument {index} is in register {register}")
+            if DEBUG: self.dbg.logger.debug(f"argument {index} is in register {register}")
             return getattr(self.dbg, register)
         else:
-            index -= calling_convention
+            index -= len(calling_convention)
         # It would be better to force the user to save the arguments at the entry point and read them later instead... [25/07/23]
         if context.arch in ["amd64", "i386"]:
             if self.dbg.next_inst.toString() in ["endbr64", "push rbp", "push ebp"]:
@@ -62,17 +67,20 @@ class Arguments:
             return self.dbg.read(pointer, context.bytes)
 
 
-    # How do we handle pushes ? Do I only write arguments when at the begining of the function and give up on using this property to load arguments before a call ?
+    # How do we handle pushes ? Do I only write arguments when at the beginning of the function and give up on using this property to load arguments before a call ?
     # Only valid for arguments already set
     def __setitem__(self, index, value):
-        self.dbg.restore_arch()
+        if type(index) is slice:
+            for i, el in zip(range(0 if index.start is None else index.start, -1 if index.stop is None else index.stop, 1 if index.step is None else index.step), value):
+                self[i] = el
+            return
         calling_convention = function_calling_convention[context.arch]
         if index < len(calling_convention):
             register = calling_convention[index]
-            log.debug(f"argument {index} is in register {register}")
+            if DEBUG: self.dbg.logger.debug(f"argument {index} is in register {register}")
             return setattr(self.dbg, register, value)
         else:
-            index -= calling_convention
+            index -= len(calling_convention)
         if context.arch in ["amd64", "i386"]:
             if self.dbg.next_inst.toString() in ["endbr64", "push rbp", "push ebp"]:
                 pointer = self.dbg.stack_pointer + (index + 1) * context.bytes
@@ -80,39 +88,42 @@ class Arguments:
                 pointer = self.dbg.stack_pointer + (index + 2) * context.bytes
             else:
                 pointer = self.dbg.base_pointer + (index + 2) * context.bytes
-            return self.dbg.write(pointer, pack(value))
+            self.dbg.write(pointer, pack(value))
         elif context.arch == "aarch64":
             pointer = self.dbg.stack_pointer + index * context.bytes
-            return self.dbg.write(pointer, context.bytes)
+            self.dbg.write(pointer, context.bytes)
 
 class Arguments_syscall:
     def __init__(self, dbg):
         self.dbg = dbg
 
-    def __getitem__(self, index: int):
-        assert type(index) is int, "I can't handle slices to access multiple arguments"
-        self.dbg.restore_arch()
+    def __getitem__(self, index: [int, slice]):
+        if type(index) is slice:
+            return [self[i] for i, el in zip(range(0 if index.start is None else index.start, -1 if index.stop is None else index.stop, 1 if index.step is None else index.step), value)]
         calling_convention = syscall_calling_convention[context.arch][1:] # The first one would have been the sys_num
         if index < len(calling_convention):
             register = calling_convention[index]
-            log.debug(f"argument {index} is in register {register}")
+            if DEBUG: self.dbg.logger.debug(f"argument {index} is in register {register}")
             return getattr(self.dbg, register)
         else:
             raise Exception(f"We don't have {index + 1} arguments in a syscall!")
 
-    # How do we handle pushes ? Do I only write arguments when at the begining of the function and give up on using this property to load arguments before a call ?
+    # How do we handle pushes ? Do I only write arguments when at the beginning of the function and give up on using this property to load arguments before a call ?
     # Only valid for arguments already set
     def __setitem__(self, index, value):
-        self.dbg.restore_arch()
+        if type(index) is slice:
+            for i, el in zip(range(0 if index.start is None else index.start, -1 if index.stop is None else index.stop, 1 if index.step is None else index.step), value):
+                self[i] = el
+            return
         calling_convention = function_calling_convention[context.arch]
         if index < len(calling_convention):
             register = calling_convention[index]
-            log.debug(f"argument {index} is in register {register}")
-            return setattr(self.dbg, register, value)
+            if DEBUG: self.dbg.logger.debug(f"argument {index} is in register {register}")
+            setattr(self.dbg, register, value)
         else:
             raise Exception(f"We don't have {index + 1} arguments in a syscall!")
 
-# Warning. Calling wait() before clear() returns immediatly!
+# Warning. Calling wait() before clear() returns immediately!
 # TODO add a counter on when to stop treating return False as continues
 class MyEvent(Event):
     def __init__(self):
@@ -120,7 +131,7 @@ class MyEvent(Event):
         self.cleared = Event()
         #self.secret = Event()
         self.priority = 0
-        self.pid = 0
+        self.pid = 0 # here to handle multiple processes under the same debugger. 
         self.flag_enforce_stop = None
 
     # I still need a standard wait for actions not initiated by dbg.cont and dbg.next
@@ -128,18 +139,17 @@ class MyEvent(Event):
     def priority_wait(self, comment = "", priority=None):
         if priority is None:
             priority = self.priority
-        log.debug(f"[{self.pid}] waiting with priority {priority} for {comment}")
+        if DEBUG: _logger.debug(f"[{self.pid}] waiting with priority {priority} for {comment}")
         while True:
             # Unfortunately you can not use the number of threads waiting to find the max priority [18/06/23]
             super().wait()
-            log.debug(f"wait [{priority}] finished")
-            # Make sure all threads know the current priority
-            backup_priority = self.priority
-            sleep(0.05)
-            if priority == backup_priority:
-                log.debug(f"[{self.pid}] met priority {priority} for {comment}")
+            if DEBUG: _logger.debug(f"wait [{priority}] finished")
+            if priority == self.priority:
+                if DEBUG: _logger.debug(f"[{self.pid}] met priority {priority} for {comment}")
+                # Prevent race conditions. Make sure all threads know the current priority before anyone calls lower_priority
+                sleep(0.001)
                 self.lower_priority(comment)
-                # perchè non funzia ?
+                # why does it work ?
                 #super().clear()
                 break
             # If I call wait again while the event is set it won't block ! [04/04/23]
@@ -162,17 +172,17 @@ class MyEvent(Event):
     #        self.cleared.set()
 
     def raise_priority(self, comment):
-        log.debug(f"[{self.pid}] raising priority [{self.priority}] -> [{self.priority + 1}] for {comment}")
+        if DEBUG: _logger.debug(f"[{self.pid}] raising priority [{self.priority}] -> [{self.priority + 1}] for {comment}")
         self.priority += 1
 
     def lower_priority(self, comment):
-        log.debug(f"[{self.pid}] lowering priority [{self.priority - 1}] <- [{self.priority}] for {comment}")
+        if DEBUG: _logger.debug(f"[{self.pid}] lowering priority [{self.priority - 1}] <- [{self.priority}] for {comment}")
         self.priority -= 1
         if self.priority < 0:
             log.warn(f"I think there is something wrong with the wait! We reached priority {self.priority}")
         if self.priority == 0:
             # Should reset when reaching 0, but also when debugging manually ? [18/06/23]
-            log.debug("reset enforce stop")
+            if DEBUG: _logger.debug("reset enforce stop")
             self.flag_enforce_stop = None    
 
     # If we enforce a stop on level 5 through a breakpoint, a return False on level 7 should still continue, but not on level 3
@@ -183,7 +193,7 @@ class MyEvent(Event):
         if self.flag_enforce_stop is None:
             return False
         else:
-            log.debug(f"priority is {self.priority}. Enforce is {self.flag_enforce_stop}")
+            if DEBUG: _logger.debug(f"priority is {self.priority}. Enforce is {self.flag_enforce_stop}")
             return self.priority >= self.flag_enforce_stop
 
 @dataclass
@@ -214,7 +224,7 @@ class MyLock:
 
 
     def log(self, function_name):
-        #log.debug(f"[{self.owner.pid}] wrapping {function_name}")
+        if DEBUG: self.owner.logger.debug(f"[{self.owner.pid}] wrapping {function_name}")
         return self
 
     def __enter__(self):
@@ -224,13 +234,13 @@ class MyLock:
         with self.__lock:
             self.event.clear()
             self.counter += 1
-            log.debug(f"[{self.owner.pid}] entering lock with level {self.counter}")
+            if DEBUG: self.owner.logger.debug(f"[{self.owner.pid}] entering lock with level {self.counter}")
 
     def __exit__(self, exc_type, exc_value, exc_traceback):
         if not self.owner.debugging:
             return
         with self.__lock:
-            log.debug(f"[{self.owner.pid}] exiting lock with level {self.counter}")
+            if DEBUG: self.owner.logger.debug(f"[{self.owner.pid}] exiting lock with level {self.counter}")
             self.counter -= 1
             # What about if we want to interrupt a continue until ? [21/06/23]
             if self.counter == 0:
@@ -283,9 +293,9 @@ SIGNALS_from_num = ["I DON'T KNOW", "SIGHUP", "SIGINT", "SIGQUIT", "SIGILL", "SI
 # test: nop; jmp test / nop; b 0x0
 shellcode_sleep = {"amd64": b"\x90\xeb\xfe", "i386": b"\x90\xeb\xfe", "aarch64": b'\x1f \x03\xd5\x00\x00\x00\x14'}
 # syscall / int 0x80 / svc #0
-shellcode_syscall = {"amd64": b"\x0f\x05", "i386": b"\xcd\x80", "aarch64": b'\x01\x00\x00\xd4', "riscv": b's\x00\x00\x00'}
+shellcode_syscall = {"amd64": b"\x0f\x05", "i386": b"\xcd\x80", "aarch64": b'\x01\x00\x00\xd4', "riscv32": b's\x00\x00\x00', "riscv64": b's\x00\x00\x00'}
 # First register is where to save the syscall num
-syscall_calling_convention = {"amd64": ["rax", "rdi", "rsi", "rdx", "r10", "r8", "r9"], "i386": ["rax", "ebx", "ecx", "edx", "esi", "edi", "ebp"], "aarch64": ["x8"] + [f"x{i}" for i in range(6)], "riscv": ["a7"] + [f"a{i}" for i in range(6)]}
-function_calling_convention = {"amd64": ["rdi", "rsi", "rdx", "rcx", "r8", "r9"], "i386": [], "aarch64": [f"x{i}" for i in range(8)], "riscv": [f"a{i}" for i in range(8)]}
-return_instruction = {"amd64": b"\xc3", "i386": b"\xc3", "aarch64": b'\xc0\x03_\xd6', "riscv": b'g\x80\x00\x00'}
-nop = {"amd64": b"\x90", "i386": b"\x90", "aarch64": b'\x1f \x03\xd5', "riscv": b'\x13\x00\x00\x00'}
+syscall_calling_convention = {"amd64": ["rax", "rdi", "rsi", "rdx", "r10", "r8", "r9"], "i386": ["rax", "ebx", "ecx", "edx", "esi", "edi", "ebp"], "aarch64": ["x8"] + [f"x{i}" for i in range(6)], "riscv32": ["a7"] + [f"a{i}" for i in range(6)], "riscv64": ["a7"] + [f"a{i}" for i in range(6)]}
+function_calling_convention = {"amd64": ["rdi", "rsi", "rdx", "rcx", "r8", "r9"], "i386": [], "aarch64": [f"x{i}" for i in range(8)], "riscv32": [f"a{i}" for i in range(8)], "riscv64": [f"a{i}" for i in range(8)]}
+return_instruction = {"amd64": b"\xc3", "i386": b"\xc3", "aarch64": b'\xc0\x03_\xd6', "riscv32": b'g\x80\x00\x00', "riscv64": b'g\x80\x00\x00'}
+nop = {"amd64": b"\x90", "i386": b"\x90", "aarch64": b'\x1f \x03\xd5', "riscv32": b'\x13\x00\x00\x00', "riscv64": b'\x13\x00\x00\x00'}
