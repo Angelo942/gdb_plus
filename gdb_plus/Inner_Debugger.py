@@ -16,8 +16,10 @@ INT3 = b"\xcc"
 constants.PTRACE_GETREGS = 0xc
 constants.PTRACE_SETREGS = 0xd
 
+# For the situation where process A traces process B and you can not emulate the connection you can try to debug process B through process A
 # Only work if parent is tracing child (otherwise why would you need this class ?) and if the child is at a stop [02/03/23]
 # Only works for amd64 binaries.
+# Currently broken and not developed anymore
 class Inner_Debugger:
     def __init__(self, dbg: Debugger, pid: int):
         self.dbg = dbg
@@ -138,7 +140,7 @@ class Inner_Debugger:
 
     def continue_until(self, location, loop=False):
         ip = self.instruction_pointer
-        address = self.dbg.parse_address(location)
+        address = self.dbg._parse_address(location)
         if address == ip:
             if not loop:
                 self.logger.debug(f"I'm already at {self.dbg.reverse_lookup(address)}")
@@ -336,7 +338,7 @@ class Inner_Debugger:
         if name in ["dbg"]: #If __getattr__ is called with dbg it means I haven't finished initializing the class so I shouldn't call self.registers in __setattr__
             return False
         
-        if name in self.dbg.special_registers + self.dbg.registers:
+        if name in self.dbg._special_registers + self.dbg._registers:
             return getattr(self.registers, name)
 
         else:
@@ -344,7 +346,7 @@ class Inner_Debugger:
             self.__getattribute__(name)
 
     def __setattr__(self, name, value):
-        if self.dbg and name in self.dbg.special_registers + self.dbg.registers:
+        if self.dbg and name in self.dbg._special_registers + self.dbg._registers:
             registers = self.registers
             setattr(registers, name, value)
             self.registers = registers
