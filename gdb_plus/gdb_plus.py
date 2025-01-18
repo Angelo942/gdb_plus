@@ -61,7 +61,7 @@ class Debugger:
         self._args = None
         self._sys_args = None
         self._closed = Event()
-        self.parent = None
+        self._parent = None
         self.children = {} # Maybe put {self.pid: self} as first one
         self._slaves = {} # I keep it to be sure I am tracing them 
         self._ptrace_breakpoints = []
@@ -3271,8 +3271,8 @@ class Debugger:
     # Take all processes related
     @property
     def _ptrace_group(self):
-        if self.parent is not None:
-            return self.parent._ptrace_group
+        if self._parent is not None:
+            return self._parent._ptrace_group
 
         return {p.pid: p for p in self._recursive_children}
 
@@ -3614,7 +3614,7 @@ class Debugger:
         self._slaves[slave.pid] = slave
         slave._ptrace_emulated = True
         if parent:
-            self.parent = slave
+            self._parent = slave
             slave.children[self.pid] = self
         else:
             self.children[slave.pid] = slave
