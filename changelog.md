@@ -1,3 +1,6 @@
+GDB+ 7.0.2
+* Find libc used by process under QEMU
+
 GDB+ 7.0.1: catchpoints
 * support gdb catchpoints
 * correct implementation of load_libc

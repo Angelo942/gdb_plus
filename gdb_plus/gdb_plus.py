@@ -2693,15 +2693,22 @@ class Debugger:
 
         return maps
     
+    # _libc == None means that we don't know if we have a libc, but let's use _libc == -1 if we know we don't to stop searching for it
     @property
     def libc(self):
-        if not context.native:
-            log.warn_once("I don't know how to access the libraries in qemu :(")
+        if self._libc == -1:
             return None
         if self.elf is not None and self.elf.statically_linked:
+            self._libc = -1
             return None
         if self._libc is None and self.p is not None: # In qemu this would return the libc of qemu, not the program! [06/01/25]
-            self._libc = self.p.libc
+            libc = self.p.libc
+            # Usually it only happens with statically linked programs, but in case we don't have the binary or QEMU want's to be "helpful" let's handle the case where if we don't have the emulated library p.libc returns the system library used by QEMU 
+            if libc.arch == context.arch:
+                self._libc = libc
+            else:
+                self._libc = -1
+                return None
         return self._libc
 
     @libc.setter
