@@ -17,7 +17,7 @@ PORT = 0
 # $ "./exploit.py REMOTE" connects to the remote server
 dbg = Debugger({proc_args}, aslr=False).setup_remote(IP, PORT)
 p = dbg.p
-dbg.c(wait=False) # Optional
+dbg.c(wait=False) # Optional to start running the process
 
 ru  = lambda *x, **y: p.recvuntil(*x, **y)
 rl  = lambda *x, **y: p.recvline(*x, **y)
