@@ -2649,19 +2649,22 @@ class Debugger:
 
 
     # Quick attempt to find maps
+    # TODO handle remote debugging [20/01/25]
     @property
     def maps(self):
-        with open(f"/proc/{self.pid}/maps") as fd:
-            maps_raw = fd.read()
         maps = {}
-        for line in maps_raw.splitlines():
-            line = line.split()
-            start, end = line[0].split("-")
-            maps[int(start, 16)] = int(end, 16) - int(start, 16)
+        try:
+            with open(f"/proc/{self.pid}/maps") as fd:
+                maps_raw = fd.read()
+            for line in maps_raw.splitlines():
+                line = line.split()
+                start, end = line[0].split("-")
+                maps[int(start, 16)] = int(end, 16) - int(start, 16)
+        except Exception: # In remote debugging we don't have the /proc file
+            pass
         return maps
 
     # I copied it from pwntools to have access to it even if I attach directly to a pid
-    # The problem is that with qemu we get the addresses in qemu and not in the virtual memory... [01/08/23]
     def libs(self):
         """libs() -> dict
         Return a dictionary mapping the path of each shared library loaded
@@ -2672,7 +2675,7 @@ class Debugger:
             with open(f"/proc/{self.pid}/maps") as fd:
                 maps_raw = fd.read()
         except IOError:
-            maps_raw = None
+            maps_raw = ""
 
         # Enumerate all of the libraries actually loaded right now.
         maps = {}
