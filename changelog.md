@@ -1,5 +1,6 @@
-GDB+ 7.0.2
+GDB+ 7.0.2 ARM 32bit
 * Find libc used by process under QEMU
+* Experimental support for arm architecture
 
 GDB+ 7.0.1: catchpoints
 * support gdb catchpoints

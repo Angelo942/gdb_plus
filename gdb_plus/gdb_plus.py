@@ -2,7 +2,7 @@ import pwn
 import os
 from time import sleep
 from functools import partial
-from capstone import Cs, CS_ARCH_X86, CS_ARCH_RISCV, CS_MODE_32, CS_MODE_64, CS_MODE_ARM, CS_MODE_RISCV32, CS_MODE_RISCV64, CS_MODE_RISCVC
+from capstone import Cs, CS_ARCH_X86, CS_ARCH_ARM, CS_ARCH_RISCV, CS_MODE_32, CS_MODE_64, CS_MODE_ARM, CS_MODE_RISCV32, CS_MODE_RISCV64, CS_MODE_RISCVC
 # Migrate to capstone v6, but keep support for v5
 try:
     from capstone import CS_ARCH_AARCH64
@@ -2898,6 +2898,8 @@ class Debugger:
             return ["eflags", "cs", "ss", "ds", "es", "fs", "gs"]
         elif context.arch == "aarch64":
             return ["cpsr", "fpsr", "fpcr", "vg"]
+        elif context.arch == "arm":
+            return ["cpsr"]
         elif context.arch in ["riscv32", "riscv64"]:
             return []
         else:
@@ -2907,7 +2909,9 @@ class Debugger:
     @property
     def _registers(self):
         if context.arch == "aarch64":
-            return [f"x{i}" for i in range(31)] + ["sp", "pc"]
+            return [f"x{i}" for i in range(31)] + ["lr"] + ["sp", "pc"]
+        elif context.arch == "arm":
+            return [f"r{i}" for i in range(16)] + ["fp", "ip", "lr"] + ["sp", "pc"] # fp, etc... are in the 15 registers, but to allow both names to be used I have to duplicate them
         elif context.arch == "i386":
             return ["eax", "ebx", "ecx", "edx", "edi", "esi", "ebp", "esp", "eip"]
         elif context.arch == "amd64":
@@ -2922,6 +2926,8 @@ class Debugger:
     def _minor_registers(self):
         if context.arch == "aarch64":
             return [f"w{x}" for x in range(31)]
+        elif context.arch == "arm":
+            return [] # Arm can not access 16bits or less in a register
         elif context.arch == "i386":    
             return ["ax", "al", "ah",
         "bx", " bh", "bl",
@@ -2953,6 +2959,8 @@ class Debugger:
         else:
             raise Exception(f"what arch is {context.arch}")
 
+    # We should add a new type of registers for aliases so that the user can access them, but we don't duplicate them when doing backups. 
+
     @property
     def next_inst(self):
         inst = next(self.disassemble(self.instruction_pointer, 16)) #15 bytes is the maximum size for an instruction in x64
@@ -2976,6 +2984,8 @@ class Debugger:
                 self._capstone = Cs(CS_ARCH_X86, CS_MODE_32)
             elif context.arch == "aarch64":
                 self._capstone = Cs(CS_ARCH_AARCH64, CS_MODE_ARM)
+            elif context.arch == "arm":
+                self._capstone = Cs(CS_ARCH_ARM, CS_MODE_ARM)
             elif context.arch in ["riscv32", "riscv64"]:
                 self._capstone = Cs(CS_ARCH_RISCV, CS_MODE_RISCVC) #CS_MODE_RISCV32 if context.bits == 32 else CS_MODE_RISCV64)
             else:
@@ -2993,6 +3003,8 @@ class Debugger:
             return self.eax
         elif context.arch == "aarch64":
             return self.x0 # Not always true
+        elif context.arch == "arm":
+            return self.r0 # Not always true
         elif context.arch in ["riscv32", "riscv64"]:
             return self.a0
         else:
@@ -3006,6 +3018,8 @@ class Debugger:
             self.eax = value
         elif context.arch == "aarch64":
             self.x0 = value # Not always true
+        elif context.arch == "arm":
+            self.r0 = value # Not always true
         elif context.arch in ["riscv32", "riscv64"]:
             self.a0 = value # Sometimes a1 is also used
         else:
@@ -3018,7 +3032,7 @@ class Debugger:
             return self.rsp
         elif context.arch == "i386":
             return self.esp
-        elif context.arch == "aarch64":
+        elif context.arch in ["arm", "aarch64"]:
             return self.sp
         elif context.arch in ["riscv32", "riscv64"]:
             return self.sp
@@ -3033,7 +3047,7 @@ class Debugger:
             self.rsp = value
         elif context.arch == "i386":
             self.esp = value
-        elif context.arch == "aarch64":
+        elif context.arch in ["arm", "aarch64"]:
             self.sp = value
         elif context.arch in ["riscv32", "riscv64"]:
             self.sp = value
@@ -3050,7 +3064,7 @@ class Debugger:
                 self.rsp = value
             elif context.arch == "i386":
                 self.esp = value
-            elif context.arch == "aarch64":
+            elif context.arch in ["arm", "aarch64"]:
                 self.sp = value
             elif context.arch in ["riscv32", "riscv64"]:
                 self.sp = value
@@ -3063,8 +3077,8 @@ class Debugger:
             return self.rbp
         elif context.arch == "i386":
             return self.ebp
-        elif context.arch == "aarch64":
-            ...
+        elif context.arch in ["arm", "aarch64"]:
+            return self.fp # TODO check
         elif context.arch in ["riscv32", "riscv64"]:
             ...
         else:
@@ -3076,8 +3090,8 @@ class Debugger:
             self.rbp = value
         elif context.arch == "i386":
             self.ebp = value
-        elif context.arch == "aarch64":
-            ...
+        elif context.arch in ["arm", "aarch64"]:
+            self.fp = value
         elif context.arch in ["riscv32", "riscv64"]:
             ...
         else:
@@ -3098,7 +3112,7 @@ class Debugger:
                     print(e)
                     log.error("I failed retrieving eip! make sure you set context.arch")
                     continue
-            elif context.arch == "aarch64":
+            elif context.arch in ["arm", "aarch64"]:
                 ans = self.pc
             elif context.arch in ["riscv32", "riscv64"]:
                 ans = self.pc
@@ -3117,7 +3131,7 @@ class Debugger:
             self.rip = value
         elif context.arch == "i386":
             self.eip = value
-        elif context.arch == "aarch64":
+        elif context.arch in ["arm", "aarch64"]:
             self.pc = value
         elif context.arch in ["riscv32", "riscv64"]:
             self.pc = value
