@@ -2777,7 +2777,8 @@ class Debugger:
                 return 0
 
             # Can not trust libs to find the correct page [06/01/25]
-            if context.arch in ["riscv32", "riscv64"]:
+            # BUG Sometimes with arm we have the same binary at both 0x10000 and 0x20000, vmmap detects the second one, while we should use the first for the offsets... [20/01/25]
+            if context.arch in ["riscv32", "riscv64", "arm"]:
                 offset = 0
                 while self.elf.data[offset:offset+8] == b"\x00" * 8:
                     offset += 8
