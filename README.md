@@ -377,24 +377,23 @@ Since libdebug_legacy isn't on PyPI yet we could't include it in the dependencie
 You can install it manually:
 `pip3 install git+https://github.com/Angelo942/libdebug.git`
 
-## AARCH64
-Arm binaries ar now partially supported. The problem running them in qemu is that we can't access the pid of the process from gdb and we can't catch when the process forks. This limits the feature we can use, but the rest is working fine.
+## QEMU
+GDB+ can debug processes running under QEMU. The current supported architectures are arm and riscv, but 32 and 64 bits.
 
-Don't forget to install qemu and gdb-multiarch. `sudo apt install qemu-user gdb-multiarch`
+The problem running in qemu is that the base address may be off and we can't identify when the process forks. This limits the features we can use, but the rest is working fine.
+
+If your binary requires system libraries, look at the (instructions)[https://docs.pwntools.com/en/stable/qemu.html#telling-qemu-where-libraries-are] from pwntools. The main idea will be to download the libraries for cross compilation `sudo apt-get install libc6-<arch>-cross` and then copy them to QEMU `sudo ln -s /usr/<arch>-linux-gnu /etc/qemu-binfmt/<arch>`.
 
 **Note**
-* set context.arch == "aarch64" at the beginning of your script
-* pwndbg may be better than GEF when using qemu. In particular if you find gdb always debugging qemu instead of your process and you are sure you set the correct context you may want to try switching to pwndbg for this part.
+* don't forget to install qemu and gdb-multiarch. `sudo apt install qemu-user gdb-multiarch`
+* set context.arch == ... at the beginning of your script to make sure you are debugging your binary and not QEMU itself
+* pwndbg may be better than GEF when using qemu.
 
 # TODO
 * Distinguish between process running and dead
 * Improve ptrace emulation
     * handle waitpid(-1) with multiple slaves
     * emulate waitid too
-* improve support ARM binaries
-    * how to specify libraries ? (-L /usr/aarch64-linux-gnu)
-    * features for native arch
-    * arm 32 bit
 * support multithread applications
 * catch sigsegv as an exit instead of user interaction
 * enable signal() with libdebug
