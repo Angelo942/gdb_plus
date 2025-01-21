@@ -1,4 +1,4 @@
-GDB+ 7.0.2 ARM 32bit
+GDB+ 7.1.0 QEMU support
 * Find libc used by process under QEMU
 * Experimental support for arm architecture
 
