@@ -2661,12 +2661,16 @@ class Debugger:
             #I know it's not perfect, but damn I don't want to implement a heap logic for the bss ahahah
             #Just use the heap if you can
 
-    def nop(self, address, instructions = 1):
+    # We could make size round up to the start of next instruction, but should we ? [23/01/25]
+    def nop(self, address, instructions = 1, *, size = None):
         address = self._parse_address(address)
-        code = self.disassemble(address, instructions*10)
-        size = 0
-        for i in range(instructions):
-            size += next(code).size
+        if size is None:
+            code = self.disassemble(address, instructions*10)
+            size = 0
+            for i in range(instructions):
+                size += next(code).size
+        if size % len(nop[context.arch]) != 0:
+            log.warn(f"I have to nop {size} bytes, but this is not divisible by the length of our nop instruction ({len(nop[context.arch])}).")
         backup = self.read(address, size)
         self.write(address, nop[context.arch] * (size // len(nop[context.arch])))
         return backup
