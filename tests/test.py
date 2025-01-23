@@ -1069,14 +1069,14 @@ class Debugger_RISCV(unittest.TestCase):
 		with context.local(binary="./smash-baby"):
 			self.dbg = Debugger("./smash-baby")
 			self.dbg.until("main")
-			self.dbg.call("puts", [b"ciao\n"])
-			self.assertTrue(b"ciao" in self.dbg.p.recv())
+			self.dbg.call("puts", [b"ciao"])
+			self.assertEqual(b"ciao\n", self.dbg.p.recv())
 			self.assertFalse(self.dbg.priority)
 			self.dbg.close()
 
 	#@unittest.skip
 	@timeout_decorator.timeout(QUICK)
-	def test_call(self):
+	def test_exploit(self):
 		print("\ntest_exploit [RISCV]: ", end="")
 		out = []
 		with context.local(binary="./risky-business"):
