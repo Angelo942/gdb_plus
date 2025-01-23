@@ -123,20 +123,37 @@ class Debugger:
         else:
             self.debugging = True
 
-        if binary is None:
-            if type(target) in [str, ELF]:
+        # If we know the binary we are sure that binary is defined and of type ELF. [23/01/25]
+        if type(binary) is str:
+            binary = ELF(binary, checksec=False)
+        elif binary is None:
+            if type(target) is str:
+                binary = ELF(target, checksec=False)
+            elif type(target) is ELF:
                 binary = target
+                target = target.path # gdb.debug doesn't support an ELF
+            elif type(target) is process:
+                binary = target.elf
             else:
-                binary = context.binary
+                binary = context.binary # Should this really be the fail-safe or do we want to make it the default ? [23/01/25]
+        self.elf = binary
+
+        # Moved here in case we need qemu. Did I miss a case where we don't know the binary yet ? [23/01/25]
+        if not context.copy().get("arch", False): # Empty context
+            if self.elf is not None:
+                context.binary = self.elf
+                log.info(f"context not set... Using {context}")
+                self._context_params = context.copy()
+            else:
+                log.warn("No context set and no binary given. This may cause problems.")
 
         # The idea was to let gdb interrupt only one inferior while letting the other one run, but this doesn't work [29/04/23]
         #script = "set target-async on\nset pagination off\nset non-stop on" + script
         if type(target) is tuple:
             if len(target) != 2:
                 raise Exception("What are you trying to do ? tuples (host, port) are only for connections to a gdbserver")
-            self.elf = ELF(binary, checksec=False) if type(binary) is str else binary
             self.p = None
-            _, self.gdb = gdb.attach(target, exe=self.elf.path, gdbscript=script, api=True)
+            self.gdb = self.__attach_gdb(target, exe=self.elf.path, gdbscript=script)
             self.pid = self.current_inferior.pid
 
         # We should check if we crash when elf.native == False to warn the user to install qemu-user, but elf doesn't exist yet... [06/01/25]
@@ -146,16 +163,15 @@ class Debugger:
             self.p = None
             self.pid = target
             assert binary is not None, "I need a file to work from a pid" # Not really... Let's keep it like this for now, but continue assuming we don't have a real file
-            self.elf = ELF(binary, checksec=False) if type(binary) is str else binary
             # We may want to run the script only at the end in case the user really insists on putting a continue in it. [17/11/23]
-            _, self.gdb = gdb.attach(target, gdbscript=script, api=True)
+            self.gdb = self.__attach_gdb(target, gdbscript=script)
 
         elif type(target) is process:
             self.p = target
-            _, self.gdb = gdb.attach(target, gdbscript=script, api=True)
+            self.gdb = self.__attach_gdb(target, gdbscript=script)
 
         elif args.REMOTE:
-            self.elf = ELF(binary, checksec=False) if type(binary) is str else binary
+            pass
 
         elif context.noptrace:
             self.p = process(target, env=env, aslr=aslr)
@@ -163,14 +179,18 @@ class Debugger:
         elif from_start:
             self.p = gdb.debug(target, env=env, aslr=aslr, gdbscript=script, api=True)
             self.gdb = self.p.gdb
+            if not context.native:
+                try: 
+                    self.execute("info tasks")
+                except Exception:
+                    log.error("You need to install gdb-multiarch to debug binaries under qemu!")
 
         else:
             self.p = process(target, env=env, aslr=aslr)
-            _, self.gdb = gdb.attach(self.p, gdbscript=script, api=True)
+            self.gdb = self.__attach_gdb(self.p, gdbscript=script)
 
         if type(self.p) is process:
             self.pid = self.p.pid
-            self.elf = self.p.elf if binary is None else ELF(binary, checksec=False) if type(binary) is str else binary
 
         if self.pid is not None:
             self.logger = logging.getLogger(f"Debugger-{self.pid}")
@@ -188,14 +208,6 @@ class Debugger:
                     del self.elf.symbols[name]
         
         if self.debugging:
-            # Would be nice to have this at the beginning in case we need qemu [06/01/25]
-            if context.copy().get("arch", False) == False: # Empty context
-                if self.elf is not None:
-                    context.binary = self.elf
-                    log.info(f"context not set... Using {context}")
-                    self._context_params = context.copy()
-                else:
-                    log.warn("No context set and no binary given. This may cause problems.")
 
             self.__setup_gdb()
 
@@ -215,7 +227,7 @@ class Debugger:
                     self.detach()
                     sleep(timeout)
                     # what happens if there is a continue in script ? It should break the script, but usually it's the last instruction so who cares ? Just warn them in the docs [06/04/23]
-                    _, self.gdb = gdb.attach(self.pid, gdbscript=script, api=True) # P is gdbserver...
+                    self.gdb = self.__attach_gdb(self.pid, gdbscript=script) # P is gdbserver...
                     self.__setup_gdb()
                     if self.instruction_pointer - address_debug_from in range(0, len(backup)): # I'm in the sleep shellcode
                         self.write(address_debug_from, backup)
@@ -644,6 +656,13 @@ class Debugger:
             ...
         return self
 
+    # Here to have only one check that we can indeed attach to the process
+    def __attach_gdb(self, target, gdbscript=None, exe=None):
+        if not context.native:
+            log.error("We can not attach to a process under QEMU")
+        _, debugger = gdb.attach(target, gdbscript=gdbscript, exe=exe, api=True)
+        return debugger
+
     def debug_from(self, location: [int, str], *, event=None, timeout=0.5):
         """
         Alternative debug_from which isn't blocking.
@@ -671,7 +690,7 @@ class Debugger:
                 # Maybe the process is being traced and I can't attach to it yet
                 try:
                     # what happens if there is a continue in script ? It should break the script, but usually it's the last instruction so who cares ? Just warn them in the docs [06/04/23]
-                    _, self.gdb = gdb.attach(self.p.pid, gdbscript=self.gdbscript, api=True) # P is gdbserver...
+                    self.gdb = self.__attach_gdb(self.p.pid, gdbscript=self.gdbscript) # P is gdbserver...
                 except Exception as e:
                     if DEBUG: self.logger.debug("can't attach in debug_from because of %s... Retrying...", e)
                     continue
