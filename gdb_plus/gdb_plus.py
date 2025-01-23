@@ -177,7 +177,11 @@ class Debugger:
             self.p = process(target, env=env, aslr=aslr)
         
         elif from_start:
-            self.p = gdb.debug(target, env=env, aslr=aslr, gdbscript=script, api=True)
+            try:
+                self.p = gdb.debug(target, env=env, aslr=aslr, gdbscript=script, api=True)
+            except pwn.exception.PwnlibException:
+                if not context.native:
+                    log.error(f"Could not debug program for {context.arch}. Did you install qemu-user ?")
             self.gdb = self.p.gdb
             if not context.native:
                 try: 
