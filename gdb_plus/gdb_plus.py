@@ -1125,9 +1125,19 @@ class Debugger:
         priority = self._raise_priority("avoid race condition in continue until")
         self.cont(wait=True, force=force)
         # Should we take into consideration the inferior too ? [29/04/23]
+        
+        def has_callback():
+            for bp in self.breakpoints[self.instruction_pointer]:
+                if bp.callback is not None:
+                    return True
+            return False
+
         while self.instruction_pointer != address:
-            log.info(f"[{self.pid}] stopped at {self.reverse_lookup (self.instruction_pointer)} for '{self._stop_reason}' instead of {self.reverse_lookup(address)}")
-            log.warn_once("I assume this happened because you are using gdb manually. Finish what you are doing and let the process run. I will handle the rest")
+            log.warn(f"[{self.pid}] stopped at {self.reverse_lookup (self.instruction_pointer)} for '{self._stop_reason}' instead of {self.reverse_lookup(address)}")
+            if self._stop_reason == "BREAKPOINT" and has_callback(): # It would maybe be best to ban return None and force the user to set True or False. [23/01/25]
+                log.warn_once("The process stopped on a breakpoint with callback. If you wanted it to continue remember to make your callback return False")
+            else:
+                log.warn_once("I assume this happened because you are using gdb manually. Finish what you are doing and let the process run. I will handle the rest")
             wont_use_this_priority = self.execute_action("", sender="continue just to reset the wait")
             # I don't trust the previous priority, while the first one should be safe
             self._priority_wait(comment="continue_until", priority = priority + 1)
