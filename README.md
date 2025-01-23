@@ -28,6 +28,8 @@ if you want to debug `ARM` and `RISCV` binaries you will also need `qemu` and `g
 sudo apt install gdb-multiarch qemu-user
 ```
 
+See the chapter about [QEMU](#qemu) for more informations on how to set up the system libraries for the architecture you want to emulate and some limitations when debugging under the emulator.
+
 ### gdb_plus
 
 stable version
@@ -397,9 +399,9 @@ You can install it manually:
 `pip3 install git+https://github.com/Angelo942/libdebug.git`
 
 ## QEMU
-GDB+ can debug processes running under QEMU. The current supported architectures are arm and riscv, but 32 and 64 bits.
+GDB+ can debug processes running under QEMU. The current supported architectures are arm and riscv, both 32 and 64 bits.
 
-The problem running in qemu is that the base address may be off and we can't identify when the process forks. This limits the features we can use, but the rest is working fine.
+The problem running in qemu is that the base address may be off, we can't identify when the process forks and we can't attach to a running process. This limits the features we can use, but the rest is working fine.
 
 If your binary requires system libraries, look at the (instructions)[https://docs.pwntools.com/en/stable/qemu.html#telling-qemu-where-libraries-are] from pwntools. The main idea will be to download the libraries for cross compilation `sudo apt-get install libc6-<arch>-cross` and then copy them to QEMU `sudo ln -s /usr/<arch>-linux-gnu /etc/qemu-binfmt/<arch>`.
 
