@@ -1826,7 +1826,7 @@ class Debugger:
             setattr(self, register, args.pop(0))
             
         #Should I offset the stack pointer to preserve the stack frame ? No, right ?
-        for arg in args:
+        for arg in args[::-1]:
             self.push(arg)
         
         return_address = self.instruction_pointer
@@ -1835,6 +1835,7 @@ class Debugger:
         alignment = 0
         while self.stack_pointer % 0x10 != 0x0:
             self.push(0)
+            alignment += 1
         if context.arch in ["i386", "amd64"]:
             self.push(return_address)
         elif context.arch == "aarch64":
