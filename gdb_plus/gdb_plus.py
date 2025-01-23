@@ -2,7 +2,7 @@ import pwn
 import os
 from time import sleep
 from functools import partial
-from capstone import Cs, CS_ARCH_X86, CS_ARCH_RISCV, CS_MODE_32, CS_MODE_64, CS_MODE_ARM, CS_MODE_RISCV32, CS_MODE_RISCV64, CS_MODE_RISCVC
+from capstone import Cs, CS_ARCH_X86, CS_ARCH_ARM, CS_ARCH_RISCV, CS_MODE_32, CS_MODE_64, CS_MODE_ARM, CS_MODE_RISCV32, CS_MODE_RISCV64, CS_MODE_RISCVC
 # Migrate to capstone v6, but keep support for v5
 try:
     from capstone import CS_ARCH_AARCH64
@@ -123,20 +123,37 @@ class Debugger:
         else:
             self.debugging = True
 
-        if binary is None:
-            if type(target) in [str, ELF]:
+        # If we know the binary we are sure that binary is defined and of type ELF. [23/01/25]
+        if type(binary) is str:
+            binary = ELF(binary, checksec=False)
+        elif binary is None:
+            if type(target) is str:
+                binary = ELF(target, checksec=False)
+            elif type(target) is ELF:
                 binary = target
+                target = target.path # gdb.debug doesn't support an ELF
+            elif type(target) is process:
+                binary = target.elf
             else:
-                binary = context.binary
+                binary = context.binary # Should this really be the fail-safe or do we want to make it the default ? [23/01/25]
+        self.elf = binary
+
+        # Moved here in case we need qemu. Did I miss a case where we don't know the binary yet ? [23/01/25]
+        if not context.copy().get("arch", False): # Empty context
+            if self.elf is not None:
+                context.binary = self.elf
+                log.info(f"context not set... Using {context}")
+                self._context_params = context.copy()
+            else:
+                log.warn("No context set and no binary given. This may cause problems.")
 
         # The idea was to let gdb interrupt only one inferior while letting the other one run, but this doesn't work [29/04/23]
         #script = "set target-async on\nset pagination off\nset non-stop on" + script
         if type(target) is tuple:
             if len(target) != 2:
                 raise Exception("What are you trying to do ? tuples (host, port) are only for connections to a gdbserver")
-            self.elf = ELF(binary, checksec=False) if type(binary) is str else binary
             self.p = None
-            _, self.gdb = gdb.attach(target, exe=self.elf.path, gdbscript=script, api=True)
+            self.gdb = self.__attach_gdb(target, exe=self.elf.path, gdbscript=script)
             self.pid = self.current_inferior.pid
 
         # We should check if we crash when elf.native == False to warn the user to install qemu-user, but elf doesn't exist yet... [06/01/25]
@@ -146,31 +163,38 @@ class Debugger:
             self.p = None
             self.pid = target
             assert binary is not None, "I need a file to work from a pid" # Not really... Let's keep it like this for now, but continue assuming we don't have a real file
-            self.elf = ELF(binary, checksec=False) if type(binary) is str else binary
             # We may want to run the script only at the end in case the user really insists on putting a continue in it. [17/11/23]
-            _, self.gdb = gdb.attach(target, gdbscript=script, api=True)
+            self.gdb = self.__attach_gdb(target, gdbscript=script)
 
         elif type(target) is process:
             self.p = target
-            _, self.gdb = gdb.attach(target, gdbscript=script, api=True)
+            self.gdb = self.__attach_gdb(target, gdbscript=script)
 
         elif args.REMOTE:
-            self.elf = ELF(binary, checksec=False) if type(binary) is str else binary
+            pass
 
         elif context.noptrace:
             self.p = process(target, env=env, aslr=aslr)
         
         elif from_start:
-            self.p = gdb.debug(target, env=env, aslr=aslr, gdbscript=script, api=True)
+            try:
+                self.p = gdb.debug(target, env=env, aslr=aslr, gdbscript=script, api=True)
+            except pwn.exception.PwnlibException:
+                if not context.native:
+                    log.error(f"Could not debug program for {context.arch}. Did you install qemu-user ?")
             self.gdb = self.p.gdb
+            if not context.native:
+                try: 
+                    self.execute("info tasks")
+                except Exception:
+                    log.error("You need to install gdb-multiarch to debug binaries under qemu!")
 
         else:
             self.p = process(target, env=env, aslr=aslr)
-            _, self.gdb = gdb.attach(self.p, gdbscript=script, api=True)
+            self.gdb = self.__attach_gdb(self.p, gdbscript=script)
 
         if type(self.p) is process:
             self.pid = self.p.pid
-            self.elf = self.p.elf if binary is None else ELF(binary, checksec=False) if type(binary) is str else binary
 
         if self.pid is not None:
             self.logger = logging.getLogger(f"Debugger-{self.pid}")
@@ -188,14 +212,6 @@ class Debugger:
                     del self.elf.symbols[name]
         
         if self.debugging:
-            # Would be nice to have this at the beginning in case we need qemu [06/01/25]
-            if context.copy().get("arch", False) == False: # Empty context
-                if self.elf is not None:
-                    context.binary = self.elf
-                    log.info(f"context not set... Using {context}")
-                    self._context_params = context.copy()
-                else:
-                    log.warn("No context set and no binary given. This may cause problems.")
 
             self.__setup_gdb()
 
@@ -215,7 +231,7 @@ class Debugger:
                     self.detach()
                     sleep(timeout)
                     # what happens if there is a continue in script ? It should break the script, but usually it's the last instruction so who cares ? Just warn them in the docs [06/04/23]
-                    _, self.gdb = gdb.attach(self.pid, gdbscript=script, api=True) # P is gdbserver...
+                    self.gdb = self.__attach_gdb(self.pid, gdbscript=script) # P is gdbserver...
                     self.__setup_gdb()
                     if self.instruction_pointer - address_debug_from in range(0, len(backup)): # I'm in the sleep shellcode
                         self.write(address_debug_from, backup)
@@ -644,6 +660,17 @@ class Debugger:
             ...
         return self
 
+    # Here to have only one check that we can indeed attach to the process
+    def __attach_gdb(self, target, gdbscript=None, exe=None):
+        if not context.native:
+            log.error("We can not attach to a process under QEMU")
+        _, debugger = gdb.attach(target, gdbscript=gdbscript, exe=exe, api=True)
+        try: 
+            debugger.execute("info tasks", to_string=True)
+        except Exception:
+            log.error("Can not attach to process! Did you set ptrace scope to 0 ? (/etc/sysctl.d/10-ptrace.conf)")
+        return debugger
+
     def debug_from(self, location: [int, str], *, event=None, timeout=0.5):
         """
         Alternative debug_from which isn't blocking.
@@ -671,7 +698,7 @@ class Debugger:
                 # Maybe the process is being traced and I can't attach to it yet
                 try:
                     # what happens if there is a continue in script ? It should break the script, but usually it's the last instruction so who cares ? Just warn them in the docs [06/04/23]
-                    _, self.gdb = gdb.attach(self.p.pid, gdbscript=self.gdbscript, api=True) # P is gdbserver...
+                    self.gdb = self.__attach_gdb(self.p.pid, gdbscript=self.gdbscript) # P is gdbserver...
                 except Exception as e:
                     if DEBUG: self.logger.debug("can't attach in debug_from because of %s... Retrying...", e)
                     continue
@@ -1102,9 +1129,19 @@ class Debugger:
         priority = self._raise_priority("avoid race condition in continue until")
         self.cont(wait=True, force=force)
         # Should we take into consideration the inferior too ? [29/04/23]
+        
+        def has_callback():
+            for bp in self.breakpoints[self.instruction_pointer]:
+                if bp.callback is not None:
+                    return True
+            return False
+
         while self.instruction_pointer != address:
-            log.info(f"[{self.pid}] stopped at {self.reverse_lookup (self.instruction_pointer)} for '{self._stop_reason}' instead of {self.reverse_lookup(address)}")
-            log.warn_once("I assume this happened because you are using gdb manually. Finish what you are doing and let the process run. I will handle the rest")
+            log.warn(f"[{self.pid}] stopped at {self.reverse_lookup (self.instruction_pointer)} for '{self._stop_reason}' instead of {self.reverse_lookup(address)}")
+            if self._stop_reason == "BREAKPOINT" and has_callback(): # It would maybe be best to ban return None and force the user to set True or False. [23/01/25]
+                log.warn_once("The process stopped on a breakpoint with callback. If you wanted it to continue remember to make your callback return False")
+            else:
+                log.warn_once("I assume this happened because you are using gdb manually. Finish what you are doing and let the process run. I will handle the rest")
             wont_use_this_priority = self.execute_action("", sender="continue just to reset the wait")
             # I don't trust the previous priority, while the first one should be safe
             self._priority_wait(comment="continue_until", priority = priority + 1)
@@ -1803,7 +1840,7 @@ class Debugger:
             setattr(self, register, args.pop(0))
             
         #Should I offset the stack pointer to preserve the stack frame ? No, right ?
-        for arg in args:
+        for arg in args[::-1]:
             self.push(arg)
         
         return_address = self.instruction_pointer
@@ -1812,6 +1849,7 @@ class Debugger:
         alignment = 0
         while self.stack_pointer % 0x10 != 0x0:
             self.push(0)
+            alignment += 1
         if context.arch in ["i386", "amd64"]:
             self.push(return_address)
         elif context.arch == "aarch64":
@@ -2637,31 +2675,38 @@ class Debugger:
             #I know it's not perfect, but damn I don't want to implement a heap logic for the bss ahahah
             #Just use the heap if you can
 
-    def nop(self, address, instructions = 1):
+    # We could make size round up to the start of next instruction, but should we ? [23/01/25]
+    def nop(self, address, instructions = 1, *, size = None):
         address = self._parse_address(address)
-        code = self.disassemble(address, instructions*10)
-        size = 0
-        for i in range(instructions):
-            size += next(code).size
+        if size is None:
+            code = self.disassemble(address, instructions*10)
+            size = 0
+            for i in range(instructions):
+                size += next(code).size
+        if size % len(nop[context.arch]) != 0:
+            log.warn(f"I have to nop {size} bytes, but this is not divisible by the length of our nop instruction ({len(nop[context.arch])}).")
         backup = self.read(address, size)
         self.write(address, nop[context.arch] * (size // len(nop[context.arch])))
         return backup
 
 
     # Quick attempt to find maps
+    # TODO handle remote debugging [20/01/25]
     @property
     def maps(self):
-        with open(f"/proc/{self.pid}/maps") as fd:
-            maps_raw = fd.read()
         maps = {}
-        for line in maps_raw.splitlines():
-            line = line.split()
-            start, end = line[0].split("-")
-            maps[int(start, 16)] = int(end, 16) - int(start, 16)
+        try:
+            with open(f"/proc/{self.pid}/maps") as fd:
+                maps_raw = fd.read()
+            for line in maps_raw.splitlines():
+                line = line.split()
+                start, end = line[0].split("-")
+                maps[int(start, 16)] = int(end, 16) - int(start, 16)
+        except Exception: # In remote debugging we don't have the /proc file
+            pass
         return maps
 
     # I copied it from pwntools to have access to it even if I attach directly to a pid
-    # The problem is that with qemu we get the addresses in qemu and not in the virtual memory... [01/08/23]
     def libs(self):
         """libs() -> dict
         Return a dictionary mapping the path of each shared library loaded
@@ -2672,7 +2717,7 @@ class Debugger:
             with open(f"/proc/{self.pid}/maps") as fd:
                 maps_raw = fd.read()
         except IOError:
-            maps_raw = None
+            maps_raw = ""
 
         # Enumerate all of the libraries actually loaded right now.
         maps = {}
@@ -2693,15 +2738,20 @@ class Debugger:
 
         return maps
     
+    # _libc == None means that we don't know if we have a libc, but let's use _libc == -1 if we know we don't to stop searching for it
     @property
     def libc(self):
-        if not context.native:
-            log.warn_once("I don't know how to access the libraries in qemu :(")
+        if self._libc == -1:
             return None
         if self.elf is not None and self.elf.statically_linked:
+            self._libc = -1
             return None
         if self._libc is None and self.p is not None: # In qemu this would return the libc of qemu, not the program! [06/01/25]
-            self._libc = self.p.libc
+            with context.silent: # I don't want to print checksec for the libc [23/01/25]
+                libc = self.p.libc
+            # If the program hasn't loaded it's libc yet, p.libc returns the system libc used by QEMU [20/01/25]
+            if libc.arch == context.arch:
+                self._libc = libc
         return self._libc
 
     @libc.setter
@@ -2713,10 +2763,6 @@ class Debugger:
             log.warn_once("I don't see a libc ! Set dbg.libc = ELF(<path_to_libc>)")
             return 0
         maps = self.libs()
-        if "/usr/bin/qemu" in "".join(maps.keys()):
-            log.warn("I don't know how to access the libraries in qemu :(")
-            self.libc = None
-            return 0
         if len(maps) != 0:
             return maps[self.libc.path]
         else:
@@ -2777,7 +2823,8 @@ class Debugger:
                 return 0
 
             # Can not trust libs to find the correct page [06/01/25]
-            if context.arch in ["riscv32", "riscv64"]:
+            # BUG Sometimes with arm we have the same binary at both 0x10000 and 0x20000, vmmap detects the second one, while we should use the first for the offsets... [20/01/25]
+            if context.arch in ["riscv32", "riscv64", "arm"]:
                 offset = 0
                 while self.elf.data[offset:offset+8] == b"\x00" * 8:
                     offset += 8
@@ -2891,6 +2938,8 @@ class Debugger:
             return ["eflags", "cs", "ss", "ds", "es", "fs", "gs"]
         elif context.arch == "aarch64":
             return ["cpsr", "fpsr", "fpcr", "vg"]
+        elif context.arch == "arm":
+            return ["cpsr"]
         elif context.arch in ["riscv32", "riscv64"]:
             return []
         else:
@@ -2900,7 +2949,9 @@ class Debugger:
     @property
     def _registers(self):
         if context.arch == "aarch64":
-            return [f"x{i}" for i in range(31)] + ["sp", "pc"]
+            return [f"x{i}" for i in range(31)] + ["lr"] + ["sp", "pc"]
+        elif context.arch == "arm":
+            return [f"r{i}" for i in range(16)] + ["fp", "ip", "lr"] + ["sp", "pc"] # fp, etc... are in the 15 registers, but to allow both names to be used I have to duplicate them
         elif context.arch == "i386":
             return ["eax", "ebx", "ecx", "edx", "edi", "esi", "ebp", "esp", "eip"]
         elif context.arch == "amd64":
@@ -2915,6 +2966,8 @@ class Debugger:
     def _minor_registers(self):
         if context.arch == "aarch64":
             return [f"w{x}" for x in range(31)]
+        elif context.arch == "arm":
+            return [] # Arm can not access 16bits or less in a register
         elif context.arch == "i386":    
             return ["ax", "al", "ah",
         "bx", " bh", "bl",
@@ -2946,6 +2999,8 @@ class Debugger:
         else:
             raise Exception(f"what arch is {context.arch}")
 
+    # We should add a new type of registers for aliases so that the user can access them, but we don't duplicate them when doing backups. 
+
     @property
     def next_inst(self):
         inst = next(self.disassemble(self.instruction_pointer, 16)) #15 bytes is the maximum size for an instruction in x64
@@ -2969,6 +3024,8 @@ class Debugger:
                 self._capstone = Cs(CS_ARCH_X86, CS_MODE_32)
             elif context.arch == "aarch64":
                 self._capstone = Cs(CS_ARCH_AARCH64, CS_MODE_ARM)
+            elif context.arch == "arm":
+                self._capstone = Cs(CS_ARCH_ARM, CS_MODE_ARM)
             elif context.arch in ["riscv32", "riscv64"]:
                 self._capstone = Cs(CS_ARCH_RISCV, CS_MODE_RISCVC) #CS_MODE_RISCV32 if context.bits == 32 else CS_MODE_RISCV64)
             else:
@@ -2986,6 +3043,8 @@ class Debugger:
             return self.eax
         elif context.arch == "aarch64":
             return self.x0 # Not always true
+        elif context.arch == "arm":
+            return self.r0 # Not always true
         elif context.arch in ["riscv32", "riscv64"]:
             return self.a0
         else:
@@ -2999,6 +3058,8 @@ class Debugger:
             self.eax = value
         elif context.arch == "aarch64":
             self.x0 = value # Not always true
+        elif context.arch == "arm":
+            self.r0 = value # Not always true
         elif context.arch in ["riscv32", "riscv64"]:
             self.a0 = value # Sometimes a1 is also used
         else:
@@ -3011,7 +3072,7 @@ class Debugger:
             return self.rsp
         elif context.arch == "i386":
             return self.esp
-        elif context.arch == "aarch64":
+        elif context.arch in ["arm", "aarch64"]:
             return self.sp
         elif context.arch in ["riscv32", "riscv64"]:
             return self.sp
@@ -3026,7 +3087,7 @@ class Debugger:
             self.rsp = value
         elif context.arch == "i386":
             self.esp = value
-        elif context.arch == "aarch64":
+        elif context.arch in ["arm", "aarch64"]:
             self.sp = value
         elif context.arch in ["riscv32", "riscv64"]:
             self.sp = value
@@ -3043,7 +3104,7 @@ class Debugger:
                 self.rsp = value
             elif context.arch == "i386":
                 self.esp = value
-            elif context.arch == "aarch64":
+            elif context.arch in ["arm", "aarch64"]:
                 self.sp = value
             elif context.arch in ["riscv32", "riscv64"]:
                 self.sp = value
@@ -3056,8 +3117,8 @@ class Debugger:
             return self.rbp
         elif context.arch == "i386":
             return self.ebp
-        elif context.arch == "aarch64":
-            ...
+        elif context.arch in ["arm", "aarch64"]:
+            return self.fp # TODO check
         elif context.arch in ["riscv32", "riscv64"]:
             ...
         else:
@@ -3069,8 +3130,8 @@ class Debugger:
             self.rbp = value
         elif context.arch == "i386":
             self.ebp = value
-        elif context.arch == "aarch64":
-            ...
+        elif context.arch in ["arm", "aarch64"]:
+            self.fp = value
         elif context.arch in ["riscv32", "riscv64"]:
             ...
         else:
@@ -3091,7 +3152,7 @@ class Debugger:
                     print(e)
                     log.error("I failed retrieving eip! make sure you set context.arch")
                     continue
-            elif context.arch == "aarch64":
+            elif context.arch in ["arm", "aarch64"]:
                 ans = self.pc
             elif context.arch in ["riscv32", "riscv64"]:
                 ans = self.pc
@@ -3110,7 +3171,7 @@ class Debugger:
             self.rip = value
         elif context.arch == "i386":
             self.eip = value
-        elif context.arch == "aarch64":
+        elif context.arch in ["arm", "aarch64"]:
             self.pc = value
         elif context.arch in ["riscv32", "riscv64"]:
             self.pc = value
