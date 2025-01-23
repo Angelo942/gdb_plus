@@ -14,18 +14,37 @@ GDB+ is a wrapper around gdb powered by pwntools. The goal is automate your inte
 
 ## Installation
 
-stable
+### System requirements
+
+First make sure to have `gdb` installed
+
+```bash
+sudo apt install gdb gdbserver
 ```
+
+if you want to debug `ARM` and `RISCV` binaries you will also need `qemu` and `gdb-multiarch`
+
+```bash
+sudo apt install gdb-multiarch qemu-user
+```
+
+### gdb_plus
+
+stable version
+
+```bash
 pip3 install gdb_plus
 ```
+
 or dev branch
-```
+
+```bash
 pip3 install git+https://github.com/Angelo942/gdb_plus.git@dev
 ```
 
 **Warning for pwndbg users:**  
 Previous bugs in Pwndbg used to break the api for python. While most of GDB+ should work with the current version of pwndbg [19/12/2022] some problems may arise while emulating ptrace.
-you are strongly advised to use [GEF](https://github.com/hugsy/gef) instead except if using QEMU for which pwndbg is currently better [18/01/25].
+you are strongly advised to use [GEF](https://github.com/hugsy/gef) instead except if using QEMU for which pwndbg is currently a better option [18/01/25].
 
 ## Script setup
 GDB+ is using pwntools to work with the correct architecture. It is recommended to set the `context` at the beginning of your script. You can directly use the binary if it's an ELF or the architecture (and if needed the bit size).
@@ -403,3 +422,4 @@ If your binary requires system libraries, look at the (instructions)[https://doc
 * specify relative addresses
 * hide internal breakpoints also from gdb
 * implement strace
+* allow access to float registers or aliases
