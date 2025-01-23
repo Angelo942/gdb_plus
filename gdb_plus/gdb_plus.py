@@ -661,6 +661,10 @@ class Debugger:
         if not context.native:
             log.error("We can not attach to a process under QEMU")
         _, debugger = gdb.attach(target, gdbscript=gdbscript, exe=exe, api=True)
+        try: 
+            debugger.execute("info tasks", to_string=True)
+        except Exception:
+            log.error("Can not attach to process! Did you set ptrace scope to 0 ? (/etc/sysctl.d/10-ptrace.conf)")
         return debugger
 
     def debug_from(self, location: [int, str], *, event=None, timeout=0.5):

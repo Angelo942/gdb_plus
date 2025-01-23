@@ -259,7 +259,7 @@ print(dbg.next_inst.mnemonic)   # "mov"
 ```
 
 ## Fork
-You can set the debugger to spwn a new instance of gdb every time the process calls fork with `dbg.set_split_on_fork()`. The child will stop as soon as the process is created by fork, but will wait for the debugger to stop before creating the new object
+You can set the debugger to spwn a new instance of gdb every time the process calls fork with `dbg.set_split_on_fork()`. The child will stop as soon as the process is created by fork, but will wait for the debugger to stop before creating the new object. To allow gdb to attach to the second process though you need to set the ptrace scope to 0 (`$sudo nano /etc/sysctl.d/10-ptrace.conf`).
 
 ```py
 dbg = Debugger("http_server").set_split_on_fork()
