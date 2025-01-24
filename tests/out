@@ -1,0 +1,75 @@
+
+test_continuous_follow: [ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./httpd\n'
+
+test_my_split_breakpoint: [ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./traps_withSymbols\n'
+
+test_my_split_interrupt: [ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./traps_withSymbols\n'
+
+test_ptrace_emulation: [ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./traps_withSymbols\n'
+
+test_ptrace_emulation_libdebug: 
+test_ptrace_emulation_syscall: 
+test_split: [ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./httpd\n'
+
+test_call [ARM]: [ERROR] argv must be strings or bytes: [None, '--help']
+[ERROR] argv must be strings or bytes: [None, '--help']
+
+test_syscall [ARM]: [ERROR] argv must be strings or bytes: [None, '--help']
+
+test_call [RISCV]: [ERROR] argv must be strings or bytes: [None, '--help']
+[ERROR] argv must be strings or bytes: [None, '--help']
+
+test_syscall [RISCV]: [ERROR] argv must be strings or bytes: [None, '--help']
+[ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./insaaaaaaane\n'
+[ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./insaaaaaaane\n'
+[ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./insaaaaaaane\n'
+[ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./insaaaaaaane\n'
+[ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./insaaaaaaane\n'
+[ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./insaaaaaaane\n'
+
+test_call: [ERROR] './cube' is not marked as executable (+x)
+
+test_syscall: [ERROR] './insaaaaaaane' is not marked as executable (+x)
+
+test_load_libc: [ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./cube\n'
+
+test_manual_load_libc: [ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./cube\n'
+
+test_call [libdebug]: [ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./cube\n'
+
+test_continue_until [libdebug]: [ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./httpd\n'
+
+test_migrate: [ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./httpd\n'
+[ERROR] './cube' is not marked as executable (+x)
+[ERROR] './cube' is not marked as executable (+x)
+[ERROR] './cube' is not marked as executable (+x)
+[ERROR] './cube' is not marked as executable (+x)
+
+test_close_breakpoints: [ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./traps_withSymbols\n'
+
+test_debug_from: [ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./traps_withSymbols\n'
+
+test_file_standard: [ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./start\n'
+
+test_ltrace: [ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./insaaaaaaane\n'
+
+test_multiple_breakpoints: [ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./traps_withSymbols\n'
+
+test_nonblocking_debug_from: [ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./start\n'
+
+test_noptrace: [ERROR] './start' is not marked as executable (+x)
+
+test_pid: [ERROR] './start' is not marked as executable (+x)
+
+test_process: [ERROR] './start' is not marked as executable (+x)
+
+test_remote: 
+test_signal_gdb: [ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./ExceptionalChecking_patched\n'
+
+test_signal_handler_libdebug: [ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./ExceptionalChecking_patched\n'
+
+test_signal_hw_libdebug: [ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./ExceptionalChecking_patched\n'
+
+test_signal_step: [ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./ExceptionalChecking_patched\n'
+
+test_signal_step_libdebug: [ERROR] gdbserver did not output its pid (maybe chmod +x?): b'gdbserver: Cannot exec ./ExceptionalChecking_patched\n'

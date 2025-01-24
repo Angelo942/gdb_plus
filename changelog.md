@@ -1,3 +1,8 @@
+GDB+ 7.1.0 QEMU support
+* Find libc used by process under QEMU
+* Warn users for missing qemu or gdb-multiarch
+* support for arm 32 architecture
+
 GDB+ 7.0.1: catchpoints
 * support gdb catchpoints
 * correct implementation of load_libc

