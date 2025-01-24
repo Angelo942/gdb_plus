@@ -2,6 +2,12 @@ import unittest
 from gdb_plus import *
 import warnings
 import timeout_decorator
+import os 
+import sys 
+
+# Test can be executed independent of the execution path
+test_dir = os.path.dirname(os.path.abspath(__file__))
+os.chdir(test_dir)
 
 gdbinit = """
 handle SIGALRM nopass

@@ -386,6 +386,20 @@ Don't forget to install qemu and gdb-multiarch. `sudo apt install qemu-user gdb-
 * set context.arch == "aarch64" at the beginning of your script
 * pwndbg may be better than GEF when using qemu. In particular if you find gdb always debugging qemu instead of your process and you are sure you set the correct context you may want to try switching to pwndbg for this part.
 
+# Potential Problems 
+## Ptrace
+Attaching to a process with GDB as a normal user may fail with:
+
+```sh
+ptrace: Operation not permitted
+```
+
+This is due to kernel hardening in linux. It can be disabled with:
+
+```sh
+echo 0 > /proc/sys/kernel/yama/ptrace_scope
+```
+
 # TODO
 * Distinguish between process running and dead
 * Improve ptrace emulation
