@@ -99,7 +99,7 @@ class Debugger:
         self._breakpoint_handled = Event()
 
         self._handled_signals = {}
-        self.gdbscript = script # For non blocking debug_from
+        self.gdbscript = script if script is not None else "" # For non blocking debug_from
         self.debug_from_done = Event()
 
         # MyEvent allows calls to wait in parallel
