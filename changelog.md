@@ -1,3 +1,6 @@
+GDB+ 7.1.1
+* Check libc_address and elf_address correctly aligned.
+
 GDB+ 7.1.0 QEMU support
 * Find libc used by process under QEMU
 * Warn users for missing qemu or gdb-multiarch

@@ -2793,6 +2793,9 @@ class Debugger:
         if self.debugging and address != self.base_libc:
             log.warn("The base address of the libc is not the one expected! Expected: %s. Received: %s", hex(self.base_libc), hex(address))
 
+        if address % 0x1000:
+            log.warn("The address %s is not a multiple of the page size 0x1000. Are you sure this is your base address ?", hex(address))
+
         self.libc.address = address
         self._base_libc = address
 
@@ -2883,6 +2886,9 @@ class Debugger:
         if self.debugging and address != self.base_elf:
             log.warn("The base address of the binary is not the one expected! Expected: %s. Received: %s", hex(self.base_elf), hex(address))
 
+        if address % 0x1000:
+            log.warn("The address %s is not a multiple of the page size 0x1000. Are you sure this is your base address ?", hex(address))
+             
         self.elf.address = address
         self._base_elf = address
 
