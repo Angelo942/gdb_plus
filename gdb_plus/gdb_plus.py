@@ -3880,8 +3880,10 @@ class Debugger:
         """
         if self._gef:
             print(self.execute(f"telescope {hex(address) if address is not None else ''} -l {length} {'-r ' + hex(reference) if reference is not None else ''}"))
+        elif self._pwndbg:
+            print(self.execute(f"telescope {hex(address) if address is not None else ''} {length}"))
         else:
-            print("GEF not detected")
+            print("telescope requires GEF or pwndbg")
 
     ########################### Heresies ##########################
     
