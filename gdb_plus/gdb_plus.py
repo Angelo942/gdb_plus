@@ -3878,6 +3878,10 @@ class Debugger:
         """
         reference: int -> print the offset of each pointer from the reference pointer 
         """
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+            return
+
         if self._gef:
             print(self.execute(f"telescope {hex(address) if address is not None else ''} -l {length} {'-r ' + hex(reference) if reference is not None else ''}"))
         elif self._pwndbg:
