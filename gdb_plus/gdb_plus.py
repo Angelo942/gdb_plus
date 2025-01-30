@@ -634,6 +634,8 @@ class Debugger:
             self.detach(block=True)
             if DEBUG: self.logger.debug("migrating to libdebug")
             self.gdb = None
+            self._gef = False
+            self._pwndbg = False
             self._detached  = False
             self.libdebug = lib_Debugger(multithread=False)
             while not self.libdebug.attach(self.pid, options=False):
