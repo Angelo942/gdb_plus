@@ -47,7 +47,7 @@ def lock_decorator(func):
 
 class Debugger:
     # If possible patch the rpath (spwn and pwninit do it automatically) instead of using env to load the correct libc. This will let you get a shell not having problems trying to preload bash too
-    def __init__(self, target: [int, process, str, list, tuple], env=None, aslr:bool=True, script:str="", from_start:bool=True, binary:[str, ELF]=None, debug_from:int=None, timeout:int=0.5, base_elf:int=None, from_entry:bool=True, silent=True):
+    def __init__(self, target: [int, process, str, list, tuple], env=None, aslr:bool=True, script:str="", from_start:bool=True, binary:[str, ELF]=None, debug_from:int=None, timeout:int=0.5, base_elf:int=None, from_entry:bool=True, silent=False):
         if DEBUG: _logger.debug("debugging %s using arch: %s [%dbits]", target if binary is None else binary, context.arch, context.bits)
 
         self._capstone = None #To decompile assembly for next_inst
