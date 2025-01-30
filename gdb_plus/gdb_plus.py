@@ -47,7 +47,7 @@ def lock_decorator(func):
 
 class Debugger:
     # If possible patch the rpath (spwn and pwninit do it automatically) instead of using env to load the correct libc. This will let you get a shell not having problems trying to preload bash too
-    def __init__(self, target: [int, process, str, list, tuple], env=None, aslr:bool=True, script:str="", from_start:bool=True, binary:[str, ELF]=None, debug_from:int=None, timeout:int=0.5, base_elf:int=None, from_entry:bool=True):
+    def __init__(self, target: [int, process, str, list, tuple], env=None, aslr:bool=True, script:str="", from_start:bool=True, binary:[str, ELF]=None, debug_from:int=None, timeout:int=0.5, base_elf:int=None, from_entry:bool=True, silent=False):
         if DEBUG: _logger.debug("debugging %s using arch: %s [%dbits]", target if binary is None else binary, context.arch, context.bits)
 
         self._capstone = None #To decompile assembly for next_inst
@@ -70,6 +70,7 @@ class Debugger:
 
         self.pid = None
         self._context_params = context.copy() # Be careful to check that you are using the right context arch for the binary before calling gdb
+        self.silent = silent
 
         self.gdb = None
         self.libdebug = None
@@ -178,7 +179,7 @@ class Debugger:
         
         elif from_start:
             try:
-                self.p = gdb.debug(target, env=env, aslr=aslr, gdbscript=script, api=True)
+                self.p = self.__silence(gdb.debug, target, env=env, aslr=aslr, gdbscript=script, api=True)
             except pwn.exception.PwnlibException:
                 if not context.native:
                     log.error(f"Could not debug program for {context.arch}. Did you install qemu-user ?")
@@ -664,7 +665,7 @@ class Debugger:
     def __attach_gdb(self, target, gdbscript=None, exe=None):
         if not context.native:
             log.error("We can not attach to a process under QEMU")
-        _, debugger = gdb.attach(target, gdbscript=gdbscript, exe=exe, api=True)
+        _, debugger = self.__silence(gdb.attach, target, gdbscript=gdbscript, exe=exe, api=True)
         try: 
             debugger.execute("info tasks", to_string=True)
         except Exception:
@@ -814,11 +815,18 @@ class Debugger:
         #    if DEBUG: self.logger.debug("can't detach because process has already exited")
         # Can't close the process if I just attached to the pid
         if self.p:
-            self.p.close()
+            self.__silence(self.p.close)
         if self.r is not None:
-            self.r.close()
+            self.__silence(self.r.close)
         if self._backup_p is not None:
-            self._backup_p.close()
+            self.__silence(self._backup_p.close)
+
+    def __silence(self, fun, *args, **kwargs):
+        if self.silent:
+            with context.silent:
+                return fun(*args, **kwargs)
+        else:
+            return fun(*args, **kwargs)
 
     # Now we may have problems if the user try calling it...
     # should warn to use execute_action and wait if they are doing something that will let the process run
