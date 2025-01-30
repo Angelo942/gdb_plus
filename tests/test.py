@@ -2,6 +2,10 @@ import unittest
 from gdb_plus import *
 import warnings
 import timeout_decorator
+import os 
+
+test_dir = os.path.dirname(os.path.abspath(__file__))
+os.chdir(test_dir)
 
 gdbinit = """
 handle SIGALRM nopass
