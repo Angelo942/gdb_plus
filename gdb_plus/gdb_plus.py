@@ -2758,7 +2758,14 @@ class Debugger:
             return None
         if self._libc is None and self.p is not None: # In qemu this would return the libc of qemu, not the program! [06/01/25]
             with context.silent: # I don't want to print checksec for the libc [23/01/25]
-                libc = self.p.libc
+                if type(self.p) is remote:
+                    if not context.native:
+                        log.warn("I can not find the libc! Please set it manually.") # Maybe we need to allow the user to pass it to Debugger.__init__ [01/02/25]
+                        self._libc = -1
+                    else:
+                        libc = self.elf.libc
+                else:
+                    libc = self.p.libc
             # If the program hasn't loaded it's libc yet, p.libc returns the system libc used by QEMU [20/01/25]
             if libc.arch == context.arch:
                 self._libc = libc
