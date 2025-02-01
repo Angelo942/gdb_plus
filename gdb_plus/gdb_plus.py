@@ -598,7 +598,7 @@ class Debugger:
             if DEBUG: self.logger.debug("migrating to gdb")
             self.libdebug = None
             self._detached  = False
-            self.gdb = self.__attach_gdb(self.pid, gdbscript=script, api=True)
+            self.gdb = self.__attach_gdb(self.pid, gdbscript=script)
             self.__setup_gdb()
             # Catch SIGSTOP
             address = self.instruction_pointer
