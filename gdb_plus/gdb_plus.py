@@ -737,7 +737,7 @@ class Debugger:
         self._host = host
         self._port = port
         if args.REMOTE:
-            self.p = remote(host, port)
+            self.p = self.__silence(remote, host, port)
         return self
 
     setup_remote = remote
