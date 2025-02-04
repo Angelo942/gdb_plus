@@ -3913,13 +3913,13 @@ class Debugger:
                 if res is not None:
                     return res
                 try:
-                    # .bytes is not supported yet in ubuntu 22
-                    #res = unpack(self.gdb.parse_and_eval(f"${name}").bytes, "all")
-                    res = int(self.gdb.parse_and_eval(f"${name}")) % 2**context.bits
+                    reg = self.gdb.parse_and_eval(f"${name}")
                 except:
                     log.warn("error reading register. Retrying...")
-                    #res = unpack(self.gdb.parse_and_eval(f"${name}").bytes, "all")
-                    res = int(self.gdb.parse_and_eval(f"${name}")) % 2**context.bits
+                    reg = self.gdb.parse_and_eval(f"${name}")
+                # .bytes is not supported yet in ubuntu 22
+                #res = unpack(reg.bytes, "all")
+                res = int(reg) & ((1 << reg.type.sizeof * 8) - 1)
                 self._cached_registers[name] = res
             elif self.libdebug is not None:
                 # BUG libdebug can not parse lower registers [19/11/23]
@@ -3944,10 +3944,10 @@ class Debugger:
                     self.jump(value)
                 else:
                     # a single reference to a gdb.Value of a register can be used to assign the value (no need for modulo). `self.gdb.parse_and_eval(f"${name}").assign(value)`. It would be nice to have only a list of references to all registers and use them, but while they can be used to assign values, you can not read values updated during the execution. [13/08/24]
-                    self.execute(f"set ${name.lower()} = {value % 2**context.bits}")
-                self._cached_registers[name] = value
+                    self.execute(f"set ${name.lower()} = {value}")
+                # self._cached_registers[name] = value % 2**context.bits # I can not guarantee that this will be correct
             elif self.libdebug is not None:
-                setattr(self.libdebug, name, value % 2**context.bits)
+                setattr(self.libdebug, name, value % 2**context.bits) # I don't remember if libdebug accepts negative values
             else:
                 ...
         else:
