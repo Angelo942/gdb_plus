@@ -166,10 +166,12 @@ class Debugger:
             assert binary is not None, "I need a file to work from a pid" # Not really... Let's keep it like this for now, but continue assuming we don't have a real file
             # We may want to run the script only at the end in case the user really insists on putting a continue in it. [17/11/23]
             self.gdb = self.__attach_gdb(target, gdbscript=script)
+            from_entry = False # Until we don't have a proper check to know if we are in the loader or not...
 
         elif type(target) is process:
             self.p = target
             self.gdb = self.__attach_gdb(target, gdbscript=script)
+            from_entry = False
 
         elif args.REMOTE:
             pass
@@ -193,6 +195,7 @@ class Debugger:
         else:
             self.p = process(target, env=env, aslr=aslr)
             self.gdb = self.__attach_gdb(self.p, gdbscript=script)
+            from_entry = False
 
         if type(self.p) is process:
             self.pid = self.p.pid
@@ -242,7 +245,7 @@ class Debugger:
                         log.warn(f"{timeout}s timeout isn't enough to reach the code... Retrying...")
             # This is here to have the libc always available [06/01/25]
             # self.instruction_pointer != self.elf.entry: May not have a loader and libc, but still be considered dynamically linked
-            elif from_entry and from_start and self.elf is not None and not self.elf.statically_linked and self.instruction_pointer != self.elf.entry:
+            elif from_entry and from_start and self.elf is not None and not self.elf.statically_linked and self.instruction_pointer != self.elf.entry: # TODO check if we are in loader instead of not on the entry point [03/02/25]
                 if not self.elf.native:
                     log.warn_once("Debugging from entry may fail with qemu. In case set Debugger(..., from_entry = False)")
                 self.until(self.elf.entry)
@@ -3283,7 +3286,7 @@ class Debugger:
         self.switch_inferior(old_inferior.num)
         if DEBUG: self.logger.debug("detaching from child [%d]", pid)
         self.execute(f"detach inferiors {n}")
-        child = Debugger(pid, binary=self.elf.path, script=script)
+        child = Debugger(pid, binary=self.elf, script=script, from_start=False, silent=self.silent)
         # needed even though by default they both inherit the module's priority since the user may change the priority of a specific debugger. [17/11/23]
         child.logger.setLevel(self.logger.level)
         # TODO copy all syscall handlers in the parent ? [31/07/23]
