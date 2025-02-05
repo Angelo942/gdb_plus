@@ -55,6 +55,7 @@ class Debugger:
         # Maybe it's good not to rely too much on ELF in case someone wants to use it for different kinds of executables. [08/07/24]
         self._exe = None
         self._libc = None
+        self._ld = None
         self._canary = None
         self._args = None
         self._sys_args = None
@@ -160,19 +161,16 @@ class Debugger:
 
         # We should check if we crash when elf.native == False to warn the user to install qemu-user, but elf doesn't exist yet... [06/01/25]
         # Do we try only for context.native == False and context.copy == {} ? [06/01/25]
-
         elif type(target) is int:
             self.p = None
             self.pid = target
             assert self.exe is not None, "I need a file to work from a pid" # Not really... Let's keep it like this for now, but continue assuming we don't have a real file
             # We may want to run the script only at the end in case the user really insists on putting a continue in it. [17/11/23]
             self.gdb = self.__attach_gdb(target, gdbscript=script)
-            from_entry = False # Until we don't have a proper check to know if we are in the loader or not...
 
         elif type(target) is process:
             self.p = target
             self.gdb = self.__attach_gdb(target, gdbscript=script)
-            from_entry = False
 
         elif args.REMOTE:
             pass
@@ -196,7 +194,6 @@ class Debugger:
         else:
             self.p = process(target, env=env, aslr=aslr)
             self.gdb = self.__attach_gdb(self.p, gdbscript=script)
-            from_entry = False
 
         if type(self.p) is process:
             self.pid = self.p.pid
@@ -241,7 +238,7 @@ class Debugger:
                         log.warn(f"{timeout}s timeout isn't enough to reach the code... Retrying...")
             # This is here to have the libc always available [06/01/25]
             # self.instruction_pointer != self.exe.entry: May not have a loader and libc, but still be considered dynamically linked
-            elif from_entry and from_start and self.exe is not None and not self.elf.statically_linked and self.instruction_pointer != self.elf.entry: # TODO check if we are in loader instead of not on the entry point [03/02/25]
+            elif from_entry and self.exe is not None and not self.exe.statically_linked and self.instruction_pointer in self.ld:
                 if not context.native:
                     log.warn_once("Debugging from entry may fail with qemu. In case set Debugger(..., from_entry = False)")
                 self.until(self.exe.entry)
@@ -2766,6 +2763,32 @@ class Debugger:
                 break
         else:
             log.warn(f"can not find {file.name} in the binaries loaded in gdb")
+
+    @property
+    def ld(self):
+        if self._ld == -1:
+            return None
+        elif not self.debugging or (self.exe is not None and self.exe.statically_linked):
+            self._ld = 1
+            return None
+        elif self._ld is None:
+            for path, addresses in self.libs.items():
+                if "ld-" in path.split("/")[-1]:
+                    try:
+                        self._ld = EXE(path, address=addresses[0], end_address=addresses[-1])
+                    except Exception:
+                        if not self.local_debugging:
+                            log.warn(f"can not access {path} from remote server.")
+                    break
+            else:
+                log.warn_once("Can not find loader...")
+                self._ld = -1
+                return None
+        return self._ld
+
+    @ld.setter
+    def ld(self, elf_ld: ELF):
+        self._ld = elf_ld
     
     # _libc == None means that we don't know if we have a libc, but let's use _libc == -1 if we know we don't to stop searching for it
     # What if the user doesn't care about the libc ? Is it fair to have so many warnings when we are accessing it internally ? Maybe we should silence them if the libc is not accessed by the user. [05/02/25]
