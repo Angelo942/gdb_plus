@@ -210,6 +210,27 @@ class Breakpoint:
         self.temporary = temporary
         self.user_defined = user_defined
 
+# Right now it's only an ELF, but we can consider extending it to PE for windows one day
+# isinstance(obj, ELF) will accept bot EXE and ELF
+class EXE(ELF):
+    def __init__(self, path, address=0, end_address=None, **kwargs):
+        if isinstance(path, ELF): 
+            self.__dict__ = path.__dict__.copy()
+            self.__class__ = EXE
+        else:
+            super().__init__(path, **kwargs)
+        self.name = self.path.split("/")[-1]
+        self.address = address
+        self.end_address = end_address
+        self.size = len(self.data)
+
+    def __contains__(self, value):
+        if self.end_address is None:
+            log.warn(f"I don't know which one is the last page of {self.name}. Please set end_address!")
+            return False
+        
+        return self.address < value < self.end_address
+
 class MyLock:
     def __init__(self, event, owner):
         self.owner = owner
