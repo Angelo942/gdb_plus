@@ -2711,6 +2711,8 @@ class Debugger:
             with open(f"/proc/{self.pid}/maps") as fd:
                 maps_raw = fd.read()
             for line in maps_raw.splitlines():
+                if not context.native and "/qemu-" in line:
+                    break
                 line = line.split()
                 start, end = line[0].split("-")
                 maps[int(start, 16)] = int(end, 16) - int(start, 16)
@@ -2737,6 +2739,8 @@ class Debugger:
         for line in maps_raw.splitlines():
             if '/' not in line: continue
             path = line[line.index('/'):]
+            if not context.native and "/qemu-" in path: # Everything after the QEMU binary is only libs for QEMU that we don't want. Be careful though if this breaks something [04/02/25]
+                break
             path = os.path.realpath(path)
             if path not in maps:
                 maps[path]=0
