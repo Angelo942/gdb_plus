@@ -2719,6 +2719,7 @@ class Debugger:
         return maps
 
     # I copied it from pwntools to have access to it even if I attach directly to a pid
+    @property
     def libs(self):
         """libs() -> dict
         Return a dictionary mapping the path of each shared library loaded
