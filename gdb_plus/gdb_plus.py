@@ -2732,7 +2732,7 @@ class Debugger:
             with open(f"/proc/{self.pid}/maps") as fd:
                 maps_raw = fd.read()
         except IOError:
-            maps_raw = ""
+            maps_raw = self.execute("info proc map")
 
         # Enumerate all of the libraries actually loaded right now.
         maps = {}
