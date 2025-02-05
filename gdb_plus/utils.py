@@ -223,6 +223,7 @@ class EXE(ELF):
         self.address = address
         self.end_address = end_address
         self.size = len(self.data)
+        self.range = end_address - address
 
     def __contains__(self, value):
         if self.end_address is None:

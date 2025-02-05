@@ -2163,7 +2163,7 @@ class Debugger:
             if not self.exe.pie:
                 return address
 
-            if not address in self.exe:
+            if not address in self.exe and address < self.exe.range: # NOTE: I'm not sure yet if we should only use only allow relative breakpoints in len(exe.data) or the whole range of pages allocated to the program [05/02/25]
                 address += self.exe.address
 
         elif type(location) is str:
