@@ -220,9 +220,23 @@ class EXE(ELF):
         else:
             super().__init__(path, **kwargs)
         self.name = self.path.split("/")[-1]
-        self.address = address
+        self._address = address
         self.end_address = end_address
         self.size = len(self.data)
+
+    @property
+    def address(self):
+        return self._address
+        
+    @address.setter
+    def address(self, address):
+        if self.address != 0 and self.address != address:
+            log.warn("The base address of %s is not the one expected! Expected: %s. Received: %s", self.name, hex(self.base_libc), hex(address))
+
+        if address % 0x1000:
+            log.warn("The address %s is not a multiple of the page size 0x1000. Are you sure this is your base address ?", hex(address))
+        
+        self._address = address
 
     @property
     def range(self):

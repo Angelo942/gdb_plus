@@ -3199,23 +3199,17 @@ class Debugger:
     def libc(self, elf_libc: ELF):
         self._libc = elf_libc
 
+    # NOTE: Here for backward compatibility with 7.0 
     @property
     def base_libc(self):
         if self.libc is None:
             log.error("I don't see a libc ! Set dbg.libc = ELF(<path_to_libc>)")
         return self.libc.address
-
     @base_libc.setter
     def base_libc(self, address):
-        if self.debugging and address != self.base_libc:
-            log.warn("The base address of the libc is not the one expected! Expected: %s. Received: %s", hex(self.base_libc), hex(address))
-
-        if address % 0x1000:
-            log.warn("The address %s is not a multiple of the page size 0x1000. Are you sure this is your base address ?", hex(address))
-
+        if self.libc is None:
+            log.error("I don't see a libc ! Set dbg.libc = ELF(<path_to_libc>)")
         self.libc.address = address
-        self._base_libc = address
-
     libc_address = base_libc
 
     # If we don't have the binary we may consider iterating over the libraries to find a name that doesn't start with lib or ld- [05/02/25]
@@ -3225,24 +3219,16 @@ class Debugger:
             self._set_range(self._exe)
 
         return self._exe 
-    
+
     elf = exe
 
+    # NOTE: Here for backward compatibility with 7.0 
     @property
     def base_elf(self):
-        return self._exe.address
-
+        return self.exe.address
     @base_elf.setter
     def base_elf(self, address):
-        if self.debugging and address != self.base_elf:
-            log.warn("The base address of the binary is not the one expected! Expected: %s. Received: %s", hex(self.base_elf), hex(address))
-
-        if address % 0x1000:
-            log.warn("The address %s is not a multiple of the page size 0x1000. Are you sure this is your base address ?", hex(address))
-             
         self.exe.address = address
-        self._base_elf = address
-
     elf_address = base_elf
     exe_address = base_elf
 
