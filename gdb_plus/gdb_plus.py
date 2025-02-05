@@ -2721,6 +2721,7 @@ class Debugger:
         return maps
 
     # I copied it from pwntools to have access to it even if I attach directly to a pid
+    # TODO consider making a way to access all the libraries in the form of a dict of EXE [05/02/25]
     @property
     def libs(self):
         """libs() -> dict
@@ -2743,15 +2744,18 @@ class Debugger:
                 break
             path = os.path.realpath(path)
             if path not in maps:
-                maps[path]=0
+                maps[path]= []
 
         for lib in maps:
             path = os.path.realpath(lib)
             for line in maps_raw.splitlines():
                 if line.endswith(path):
-                    address = line.split('-')[0]
-                    maps[lib] = int(address, 16)
-                    break
+                    if len(maps[lib]) == 0:
+                        address = line.split('-')[0]
+                        maps[lib].append(int(address, 16))
+                    address = line.split()[0].split('-')[-1]
+                    maps[lib].append(int(address, 16))
+            maps[lib] = [maps[lib][0], maps[lib][-1]] # Keep only start and end of the file in memory
 
         return maps
     
