@@ -223,7 +223,12 @@ class EXE(ELF):
         self.address = address
         self.end_address = end_address
         self.size = len(self.data)
-        self.range = end_address - address
+
+    @property
+    def range(self):
+        if self.end_address is None:
+            return 0
+        return self.end_address - self.address
 
     def __contains__(self, value):
         if self.end_address is None:

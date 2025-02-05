@@ -3098,11 +3098,34 @@ class Debugger:
 
         for path, addresses in self.libs.items():
             if file.name == path.split("/")[-1]:
-                file.address = addresses[0]
+                address = addresses[0]
                 file.end_address = addresses[-1]
                 break
         else:
             log.warn(f"can not find {file.name} in the binaries loaded in gdb")
+            return
+
+        # NOTE: Can not trust libs to find the correct page [06/01/25]
+        # BUG Sometimes with arm we have the same binary at both 0x10000 and 0x20000, vmmap detects the second one, while we should use the first for the offsets... [20/01/25]
+        if context.arch in ["riscv32", "riscv64", "arm"]:
+            offset = 0
+            while file.data[offset:offset+8] == b"\x00" * 8:
+                offset += 8
+            if file.data[offset:offset+0x8] != self.read(address+offset, 8):
+                log.warn_once("QEMU messed up the elf base. Trying to find correct address...")
+                limit = 2 if (self._gef or self._pwndbg) else 0
+                while i > limit:
+                    i -= 1
+                    address = int(data.splitlines()[i].strip().split()[0], 16)
+                    if file.data[offset:offset+0x8] == self.read(address+offset, 8):
+                        log.success(f"Found address {hex(address)}!")
+                        break
+                else:
+                    log.failure("can't find binary address. Consider disabling ASLR.")
+                    file.address = 0
+                    return
+        
+        file.address = address
 
     @property
     def ld(self):
@@ -3232,7 +3255,6 @@ class Debugger:
             return {**self.exe.symbols, **self.libc.symbols} # Should work in 3.8
         else:
             return self.exe.symbols
-
 
    ########################## FORKS ##########################
     # TODO find a better name [28/02/23]
