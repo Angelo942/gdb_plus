@@ -2434,7 +2434,7 @@ class Debugger:
         else:
             log.critical("couldn't find a solution")
 
-    ########################## MEMORY ACCESS ##########################
+   ########################## MEMORY ACCESS ##########################
 
     def __read_gdb(self, address: int, size: int, *, inferior = None) -> bytes:
 
@@ -2692,6 +2692,346 @@ class Debugger:
         self.write(address, nop[context.arch] * (size // len(nop[context.arch])))
         return backup
 
+    # taken from GEF to locate the canary
+    @property
+    def _auxiliary_vector(self):
+        if not self._saved_auxiliary_vector:
+            auxiliary_vector = {}
+            auxv_info = self.execute("info auxv")
+            if "failed" in auxv_info:
+                err(auxv_info)
+                return None
+            for line in auxv_info.splitlines():
+                line = line.split('"')[0].strip()  # remove the ending string (if any)
+                line = line.split()  # split the string by whitespace(s)
+                if len(line) < 4:
+                    continue
+                __av_type = line[1]
+                __av_value = line[-1]
+                auxiliary_vector[__av_type] = int(__av_value, base=0)
+            self._saved_auxiliary_vector = auxiliary_vector
+        return self._saved_auxiliary_vector
+
+    # The canary is constant right ? This way you can also set it after a leak and access it from anywhere
+    @property
+    def canary(self):
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+
+        elif self._canary is None:
+            auxval = self._auxiliary_vector
+            canary_location = auxval["AT_RANDOM"]
+            canary = self.read(canary_location, context.bytes)
+            self._canary = b"\x00"+canary[1:]
+        
+        return self._canary
+
+    # We can not search for the canary while gdb is running, so for now I only check if the canary is known. [24/04/24]
+    @canary.setter
+    def canary(self, value):
+        if self.debugging and self._canary is not None and value != self._canary:
+            # Do we want to backup the original value to make sure we don't warn for conflict between the values set by the user ? [24/04/24]
+            log.warn(f"setting canary to: {value}, but debugger thinks canary is {self.canary}")
+        self._canary = value
+     
+    @property
+    def _special_registers(self):
+        if context.arch in ["i386", "amd64"]:
+            return ["eflags", "cs", "ss", "ds", "es", "fs", "gs"]
+        elif context.arch == "aarch64":
+            return ["cpsr", "fpsr", "fpcr", "vg"]
+        elif context.arch == "arm":
+            return ["cpsr"]
+        elif context.arch in ["riscv32", "riscv64"]:
+            return []
+        else:
+            raise Exception(f"what arch is {context.arch}")
+
+    # WARNING reset expects the last two registers to be sp and ip. backup expects the last register to be ip
+    @property
+    def _registers(self):
+        if context.arch == "aarch64":
+            return [f"x{i}" for i in range(31)] + ["lr"] + ["sp", "pc"]
+        elif context.arch == "arm":
+            return [f"r{i}" for i in range(16)] + ["fp", "ip", "lr"] + ["sp", "pc"] # fp, etc... are in the 15 registers, but to allow both names to be used I have to duplicate them
+        elif context.arch == "i386":
+            return ["eax", "ebx", "ecx", "edx", "edi", "esi", "ebp", "esp", "eip"]
+        elif context.arch == "amd64":
+            return ["rax", "rbx", "rcx", "rdx", "rdi", "rsi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "rbp", "rsp", "rip"]
+        elif context.arch in ["riscv32", "riscv64"]:
+            return [f"t{i}" for i in range(7)] + [f"s{i}" for i in range(12)] + [f"a{i}" for i in range(8)] + ["ra", "gp", "tp", "sp"] + ["pc"]
+        else:
+            raise Exception(f"what arch is {context.arch}")
+
+    # Making ax accessible will probably be faster that having to write 
+    @property
+    def _minor_registers(self):
+        if context.arch == "aarch64":
+            return [f"w{x}" for x in range(31)]
+        elif context.arch == "arm":
+            return [] # Arm can not access 16bits or less in a register
+        elif context.arch == "i386":    
+            return ["ax", "al", "ah",
+        "bx", " bh", "bl",
+        "cx", " ch", "cl",
+        "dx", " dh", "dl",
+        "si", "sil",
+        "di", "dil",
+        "sp", "spl",
+        "bp", "bpl"]
+        elif context.arch == "amd64":
+            return ["ax", "al", "ah",
+        "bx", " bh", "bl",
+        "cx", " ch", "cl",
+        "dx", " dh", "dl",
+        "si", "sil",
+        "di", "dil",
+        "sp", "spl",
+        "bp", "bpl"] + ["eax", "ebx", "ecx", "edx", "esi", "edi",
+            "r8d", "r8w", "r8l",
+            "r9d", "r9w", "r9l",
+            "r10d", "r10w", "r10l",
+            "r11d", "r11w", "r11l",            
+            "r12d", "r12w", "r12l",
+            "r13d", "r13w", "r13l",
+            "r14d", "r14w", "r14l",
+            "r15d", "r15w", "r15l"]
+        elif context.arch in ["riscv32", "riscv64"]:
+            return []
+        else:
+            raise Exception(f"what arch is {context.arch}")
+
+    # We should add a new type of registers for aliases so that the user can access them, but we don't duplicate them when doing backups. 
+
+    @property
+    def next_inst(self):
+        inst = next(self.disassemble(self.instruction_pointer, 16)) #15 bytes is the maximum size for an instruction in x64
+        inst.toString = partial(lambda self: f"{self.mnemonic} {self.op_str}".strip(), inst)
+        if context.arch in ["amd64", "i386"]:
+            inst.is_call = inst.mnemonic == "call"
+        elif context.arch == "aarch64":
+            inst.is_call = inst.mnemonic == "bl"
+        elif context.arch in ["riscv32", "riscv64"]:
+            inst.is_call = inst.mnemonic == "jal"
+        else:
+            ...
+        return inst
+
+    # May be useful for Inner_Debugger
+    def disassemble(self, address, size):
+        if self._capstone is None:
+            if context.arch == "amd64":
+                self._capstone = Cs(CS_ARCH_X86, CS_MODE_64)
+            elif context.arch == "i386":
+                self._capstone = Cs(CS_ARCH_X86, CS_MODE_32)
+            elif context.arch == "aarch64":
+                self._capstone = Cs(CS_ARCH_AARCH64, CS_MODE_ARM)
+            elif context.arch == "arm":
+                self._capstone = Cs(CS_ARCH_ARM, CS_MODE_ARM)
+            elif context.arch in ["riscv32", "riscv64"]:
+                self._capstone = Cs(CS_ARCH_RISCV, CS_MODE_RISCVC) #CS_MODE_RISCV32 if context.bits == 32 else CS_MODE_RISCV64)
+            else:
+                raise Exception(f"what arch is {context.arch}")
+
+        return self._capstone.disasm(self.read(address, size), address)
+
+   ########################## Generic references ##########################
+
+    @property
+    def return_value(self):
+        if context.arch == "amd64":
+            return self.rax
+        elif context.arch == "i386":
+            return self.eax
+        elif context.arch == "aarch64":
+            return self.x0 # Not always true
+        elif context.arch == "arm":
+            return self.r0 # Not always true
+        elif context.arch in ["riscv32", "riscv64"]:
+            return self.a0
+        else:
+            ...
+
+    @return_value.setter
+    def return_value(self, value):
+        if context.arch == "amd64":
+            self.rax = value
+        elif context.arch == "i386":
+            self.eax = value
+        elif context.arch == "aarch64":
+            self.x0 = value # Not always true
+        elif context.arch == "arm":
+            self.r0 = value # Not always true
+        elif context.arch in ["riscv32", "riscv64"]:
+            self.a0 = value # Sometimes a1 is also used
+        else:
+            ...
+
+
+    @property
+    def stack_pointer(self):
+        if context.arch == "amd64":
+            return self.rsp
+        elif context.arch == "i386":
+            return self.esp
+        elif context.arch in ["arm", "aarch64"]:
+            return self.sp
+        elif context.arch in ["riscv32", "riscv64"]:
+            return self.sp
+        else:
+            ...
+
+    # issue: setting $sp is not allowed when other stack frames are selected... https://sourceware.org/gdb/onlinedocs/gdb/Registers.html [04/03/23]
+    @stack_pointer.setter
+    def stack_pointer(self, value):
+        # May move this line to push and pop if someone can argue a good reason to.
+        if context.arch == "amd64":
+            self.rsp = value
+        elif context.arch == "i386":
+            self.esp = value
+        elif context.arch in ["arm", "aarch64"]:
+            self.sp = value
+        elif context.arch in ["riscv32", "riscv64"]:
+            self.sp = value
+        else:
+            ...
+        while self.stack_pointer != value:
+            if self.gdb is None:
+                raise Exception("Error setting stack pointer!")
+
+            if DEBUG: self.logger.debug("forcing last frame")
+            self.execute("select-frame 0") # I don't know what frames are for, but if you need to push or pop you just want to work on the current frame i guess ? [04/03/23]
+
+            if context.arch == "amd64":
+                self.rsp = value
+            elif context.arch == "i386":
+                self.esp = value
+            elif context.arch in ["arm", "aarch64"]:
+                self.sp = value
+            elif context.arch in ["riscv32", "riscv64"]:
+                self.sp = value
+            else:
+                ...
+
+    @property
+    def base_pointer(self):
+        if context.arch == "amd64":
+            return self.rbp
+        elif context.arch == "i386":
+            return self.ebp
+        elif context.arch in ["arm", "aarch64"]:
+            return self.fp # TODO check
+        elif context.arch in ["riscv32", "riscv64"]:
+            ...
+        else:
+            ...
+    
+    @base_pointer.setter
+    def base_pointer(self, value):
+        if context.arch == "amd64":
+            self.rbp = value
+        elif context.arch == "i386":
+            self.ebp = value
+        elif context.arch in ["arm", "aarch64"]:
+            self.fp = value
+        elif context.arch in ["riscv32", "riscv64"]:
+            ...
+        else:
+            ...
+
+    # Prevent null pointers
+    @property
+    def instruction_pointer(self):
+        ans = None
+        for attempts in range(2):
+            # what about self.gdb.newest_frame().pc() ? [28/04/23]
+            if context.arch == "amd64":
+                ans = self.rip
+            elif context.arch == "i386":
+                try:
+                    ans = self.eip
+                except Exception as e:
+                    print(e)
+                    log.error("I failed retrieving eip! make sure you set context.arch")
+                    continue
+            elif context.arch in ["arm", "aarch64"]:
+                ans = self.pc
+            elif context.arch in ["riscv32", "riscv64"]:
+                ans = self.pc
+            else:
+                ...
+            
+            if ans == 0:
+                log.warn("null pointer in ip ! retrying...")
+            else:
+                break        
+        return ans
+
+    @instruction_pointer.setter
+    def instruction_pointer(self, value):
+        if context.arch == "amd64":
+            self.rip = value
+        elif context.arch == "i386":
+            self.eip = value
+        elif context.arch in ["arm", "aarch64"]:
+            self.pc = value
+        elif context.arch in ["riscv32", "riscv64"]:
+            self.pc = value
+        else:
+            ...
+
+    def _find_rip(self):
+        # experimental, but should be better that the native one for libdebug        
+        if self.base_pointer:
+            if self.next_inst.toString() in ["endbr64", "push rbp", "push ebp", "ret"]:
+                return_pointer = self.read(self.stack_pointer, context.bytes)
+            elif self.next_inst.toString() in ["mov rbp, rsp", "mov ebp, esp"]:
+                return_pointer = self.read(self.stack_pointer + context.bytes, context.bytes) # Remove the base pointer # No need to place it back in rbp
+            else:
+                return_pointer = self.read(self.base_pointer + context.bytes, context.bytes)
+
+        else:
+            # At least, this is the case with fork and works better than gdb.
+            return_pointer = self.read(self.stack_pointer, context.bytes)
+        
+        return unpack(return_pointer)       
+
+    @property
+    def __saved_ip(self):
+        if context.arch == "aarch64":
+            return self.x30
+        elif context.arch in ["riscv32", "riscv64"]:
+            return self.ra
+
+        # Doesn't work with qemu [05/07/23]
+        elif self.gdb is not None:
+            stack_frame = self.gdb.newest_frame().older()
+            # Fail if call return on __start symbol
+            if stack_frame is None:
+                return 0
+            return stack_frame.pc()
+
+        elif self.libdebug is not None:
+            return self._find_rip()     
+
+        else:
+            ...
+
+        ## rip = 0x7ffff7fe45b8 in _dl_start_final (./elf/rtld.c:507); saved rip = 0x7ffff7fe32b8
+        #data = self.execute("info frame 0").split("\n")
+        #log.debug(data)
+        #for line in data:
+        #    if " saved " in line and "ip = " in line:
+        #        ip = line.split("saved ")[-1].split("= ")[-1]
+        #        if "<" in ip:
+        #            return 0
+        #        return int(ip, 16)
+
+    @property
+    def return_pointer(self):
+        return self.__saved_ip
+
+   ########################## FILES ##########################
 
     # Quick attempt to find maps
     # TODO handle remote debugging [20/01/25]
@@ -2893,346 +3233,8 @@ class Debugger:
         else:
             return self.exe.symbols
 
-    # taken from GEF to locate the canary
-    @property
-    def _auxiliary_vector(self):
-        if not self._saved_auxiliary_vector:
-            auxiliary_vector = {}
-            auxv_info = self.execute("info auxv")
-            if "failed" in auxv_info:
-                err(auxv_info)
-                return None
-            for line in auxv_info.splitlines():
-                line = line.split('"')[0].strip()  # remove the ending string (if any)
-                line = line.split()  # split the string by whitespace(s)
-                if len(line) < 4:
-                    continue
-                __av_type = line[1]
-                __av_value = line[-1]
-                auxiliary_vector[__av_type] = int(__av_value, base=0)
-            self._saved_auxiliary_vector = auxiliary_vector
-        return self._saved_auxiliary_vector
 
-    # The canary is constant right ? This way you can also set it after a leak and access it from anywhere
-    @property
-    def canary(self):
-        if not self.debugging:
-            log.warn_once(DEBUG_OFF)
-
-        elif self._canary is None:
-            auxval = self._auxiliary_vector
-            canary_location = auxval["AT_RANDOM"]
-            canary = self.read(canary_location, context.bytes)
-            self._canary = b"\x00"+canary[1:]
-        
-        return self._canary
-
-    # We can not search for the canary while gdb is running, so for now I only check if the canary is known. [24/04/24]
-    @canary.setter
-    def canary(self, value):
-        if self.debugging and self._canary is not None and value != self._canary:
-            # Do we want to backup the original value to make sure we don't warn for conflict between the values set by the user ? [24/04/24]
-            log.warn(f"setting canary to: {value}, but debugger thinks canary is {self.canary}")
-        self._canary = value
-     
-    @property
-    def _special_registers(self):
-        if context.arch in ["i386", "amd64"]:
-            return ["eflags", "cs", "ss", "ds", "es", "fs", "gs"]
-        elif context.arch == "aarch64":
-            return ["cpsr", "fpsr", "fpcr", "vg"]
-        elif context.arch == "arm":
-            return ["cpsr"]
-        elif context.arch in ["riscv32", "riscv64"]:
-            return []
-        else:
-            raise Exception(f"what arch is {context.arch}")
-
-    # WARNING reset expects the last two registers to be sp and ip. backup expects the last register to be ip
-    @property
-    def _registers(self):
-        if context.arch == "aarch64":
-            return [f"x{i}" for i in range(31)] + ["lr"] + ["sp", "pc"]
-        elif context.arch == "arm":
-            return [f"r{i}" for i in range(16)] + ["fp", "ip", "lr"] + ["sp", "pc"] # fp, etc... are in the 15 registers, but to allow both names to be used I have to duplicate them
-        elif context.arch == "i386":
-            return ["eax", "ebx", "ecx", "edx", "edi", "esi", "ebp", "esp", "eip"]
-        elif context.arch == "amd64":
-            return ["rax", "rbx", "rcx", "rdx", "rdi", "rsi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "rbp", "rsp", "rip"]
-        elif context.arch in ["riscv32", "riscv64"]:
-            return [f"t{i}" for i in range(7)] + [f"s{i}" for i in range(12)] + [f"a{i}" for i in range(8)] + ["ra", "gp", "tp", "sp"] + ["pc"]
-        else:
-            raise Exception(f"what arch is {context.arch}")
-
-    # Making ax accessible will probably be faster that having to write 
-    @property
-    def _minor_registers(self):
-        if context.arch == "aarch64":
-            return [f"w{x}" for x in range(31)]
-        elif context.arch == "arm":
-            return [] # Arm can not access 16bits or less in a register
-        elif context.arch == "i386":    
-            return ["ax", "al", "ah",
-        "bx", " bh", "bl",
-        "cx", " ch", "cl",
-        "dx", " dh", "dl",
-        "si", "sil",
-        "di", "dil",
-        "sp", "spl",
-        "bp", "bpl"]
-        elif context.arch == "amd64":
-            return ["ax", "al", "ah",
-        "bx", " bh", "bl",
-        "cx", " ch", "cl",
-        "dx", " dh", "dl",
-        "si", "sil",
-        "di", "dil",
-        "sp", "spl",
-        "bp", "bpl"] + ["eax", "ebx", "ecx", "edx", "esi", "edi",
-            "r8d", "r8w", "r8l",
-            "r9d", "r9w", "r9l",
-            "r10d", "r10w", "r10l",
-            "r11d", "r11w", "r11l",            
-            "r12d", "r12w", "r12l",
-            "r13d", "r13w", "r13l",
-            "r14d", "r14w", "r14l",
-            "r15d", "r15w", "r15l"]
-        elif context.arch in ["riscv32", "riscv64"]:
-            return []
-        else:
-            raise Exception(f"what arch is {context.arch}")
-
-    # We should add a new type of registers for aliases so that the user can access them, but we don't duplicate them when doing backups. 
-
-    @property
-    def next_inst(self):
-        inst = next(self.disassemble(self.instruction_pointer, 16)) #15 bytes is the maximum size for an instruction in x64
-        inst.toString = partial(lambda self: f"{self.mnemonic} {self.op_str}".strip(), inst)
-        if context.arch in ["amd64", "i386"]:
-            inst.is_call = inst.mnemonic == "call"
-        elif context.arch == "aarch64":
-            inst.is_call = inst.mnemonic == "bl"
-        elif context.arch in ["riscv32", "riscv64"]:
-            inst.is_call = inst.mnemonic == "jal"
-        else:
-            ...
-        return inst
-
-    # May be useful for Inner_Debugger
-    def disassemble(self, address, size):
-        if self._capstone is None:
-            if context.arch == "amd64":
-                self._capstone = Cs(CS_ARCH_X86, CS_MODE_64)
-            elif context.arch == "i386":
-                self._capstone = Cs(CS_ARCH_X86, CS_MODE_32)
-            elif context.arch == "aarch64":
-                self._capstone = Cs(CS_ARCH_AARCH64, CS_MODE_ARM)
-            elif context.arch == "arm":
-                self._capstone = Cs(CS_ARCH_ARM, CS_MODE_ARM)
-            elif context.arch in ["riscv32", "riscv64"]:
-                self._capstone = Cs(CS_ARCH_RISCV, CS_MODE_RISCVC) #CS_MODE_RISCV32 if context.bits == 32 else CS_MODE_RISCV64)
-            else:
-                raise Exception(f"what arch is {context.arch}")
-
-        return self._capstone.disasm(self.read(address, size), address)
-
-    ########################## Generic references ##########################
-
-    @property
-    def return_value(self):
-        if context.arch == "amd64":
-            return self.rax
-        elif context.arch == "i386":
-            return self.eax
-        elif context.arch == "aarch64":
-            return self.x0 # Not always true
-        elif context.arch == "arm":
-            return self.r0 # Not always true
-        elif context.arch in ["riscv32", "riscv64"]:
-            return self.a0
-        else:
-            ...
-
-    @return_value.setter
-    def return_value(self, value):
-        if context.arch == "amd64":
-            self.rax = value
-        elif context.arch == "i386":
-            self.eax = value
-        elif context.arch == "aarch64":
-            self.x0 = value # Not always true
-        elif context.arch == "arm":
-            self.r0 = value # Not always true
-        elif context.arch in ["riscv32", "riscv64"]:
-            self.a0 = value # Sometimes a1 is also used
-        else:
-            ...
-
-
-    @property
-    def stack_pointer(self):
-        if context.arch == "amd64":
-            return self.rsp
-        elif context.arch == "i386":
-            return self.esp
-        elif context.arch in ["arm", "aarch64"]:
-            return self.sp
-        elif context.arch in ["riscv32", "riscv64"]:
-            return self.sp
-        else:
-            ...
-
-    # issue: setting $sp is not allowed when other stack frames are selected... https://sourceware.org/gdb/onlinedocs/gdb/Registers.html [04/03/23]
-    @stack_pointer.setter
-    def stack_pointer(self, value):
-        # May move this line to push and pop if someone can argue a good reason to.
-        if context.arch == "amd64":
-            self.rsp = value
-        elif context.arch == "i386":
-            self.esp = value
-        elif context.arch in ["arm", "aarch64"]:
-            self.sp = value
-        elif context.arch in ["riscv32", "riscv64"]:
-            self.sp = value
-        else:
-            ...
-        while self.stack_pointer != value:
-            if self.gdb is None:
-                raise Exception("Error setting stack pointer!")
-
-            if DEBUG: self.logger.debug("forcing last frame")
-            self.execute("select-frame 0") # I don't know what frames are for, but if you need to push or pop you just want to work on the current frame i guess ? [04/03/23]
-
-            if context.arch == "amd64":
-                self.rsp = value
-            elif context.arch == "i386":
-                self.esp = value
-            elif context.arch in ["arm", "aarch64"]:
-                self.sp = value
-            elif context.arch in ["riscv32", "riscv64"]:
-                self.sp = value
-            else:
-                ...
-
-    @property
-    def base_pointer(self):
-        if context.arch == "amd64":
-            return self.rbp
-        elif context.arch == "i386":
-            return self.ebp
-        elif context.arch in ["arm", "aarch64"]:
-            return self.fp # TODO check
-        elif context.arch in ["riscv32", "riscv64"]:
-            ...
-        else:
-            ...
-    
-    @base_pointer.setter
-    def base_pointer(self, value):
-        if context.arch == "amd64":
-            self.rbp = value
-        elif context.arch == "i386":
-            self.ebp = value
-        elif context.arch in ["arm", "aarch64"]:
-            self.fp = value
-        elif context.arch in ["riscv32", "riscv64"]:
-            ...
-        else:
-            ...
-
-    # Prevent null pointers
-    @property
-    def instruction_pointer(self):
-        ans = None
-        for attempts in range(2):
-            # what about self.gdb.newest_frame().pc() ? [28/04/23]
-            if context.arch == "amd64":
-                ans = self.rip
-            elif context.arch == "i386":
-                try:
-                    ans = self.eip
-                except Exception as e:
-                    print(e)
-                    log.error("I failed retrieving eip! make sure you set context.arch")
-                    continue
-            elif context.arch in ["arm", "aarch64"]:
-                ans = self.pc
-            elif context.arch in ["riscv32", "riscv64"]:
-                ans = self.pc
-            else:
-                ...
-            
-            if ans == 0:
-                log.warn("null pointer in ip ! retrying...")
-            else:
-                break        
-        return ans
-
-    @instruction_pointer.setter
-    def instruction_pointer(self, value):
-        if context.arch == "amd64":
-            self.rip = value
-        elif context.arch == "i386":
-            self.eip = value
-        elif context.arch in ["arm", "aarch64"]:
-            self.pc = value
-        elif context.arch in ["riscv32", "riscv64"]:
-            self.pc = value
-        else:
-            ...
-
-    def _find_rip(self):
-        # experimental, but should be better that the native one for libdebug        
-        if self.base_pointer:
-            if self.next_inst.toString() in ["endbr64", "push rbp", "push ebp", "ret"]:
-                return_pointer = self.read(self.stack_pointer, context.bytes)
-            elif self.next_inst.toString() in ["mov rbp, rsp", "mov ebp, esp"]:
-                return_pointer = self.read(self.stack_pointer + context.bytes, context.bytes) # Remove the base pointer # No need to place it back in rbp
-            else:
-                return_pointer = self.read(self.base_pointer + context.bytes, context.bytes)
-
-        else:
-            # At least, this is the case with fork and works better than gdb.
-            return_pointer = self.read(self.stack_pointer, context.bytes)
-        
-        return unpack(return_pointer)       
-
-    @property
-    def __saved_ip(self):
-        if context.arch == "aarch64":
-            return self.x30
-        elif context.arch in ["riscv32", "riscv64"]:
-            return self.ra
-
-        # Doesn't work with qemu [05/07/23]
-        elif self.gdb is not None:
-            stack_frame = self.gdb.newest_frame().older()
-            # Fail if call return on __start symbol
-            if stack_frame is None:
-                return 0
-            return stack_frame.pc()
-
-        elif self.libdebug is not None:
-            return self._find_rip()     
-
-        else:
-            ...
-
-        ## rip = 0x7ffff7fe45b8 in _dl_start_final (./elf/rtld.c:507); saved rip = 0x7ffff7fe32b8
-        #data = self.execute("info frame 0").split("\n")
-        #log.debug(data)
-        #for line in data:
-        #    if " saved " in line and "ip = " in line:
-        #        ip = line.split("saved ")[-1].split("= ")[-1]
-        #        if "<" in ip:
-        #            return 0
-        #        return int(ip, 16)
-
-    @property
-    def return_pointer(self):
-        return self.__saved_ip
-
-    ########################## FORKS ##########################
+   ########################## FORKS ##########################
     # TODO find a better name [28/02/23]
     # TODO make inferior and n the same parameter ? [04/03/23]
 
@@ -3632,7 +3634,7 @@ class Debugger:
             self.children[slave.pid] = slave
             slave._parent = self
 
-    ########################## PTRACE EMULATION ##########################
+   ########################## PTRACE EMULATION ##########################
     # If attach and interrupt stop the process I want continue and detach to let it run again, otherwise just set ptrace_can_continue [08/06/23]
     # Should we handle the interruptions in a special way ? Like adding a priority when attaching ? [08/06/23] (But how to handle stop due to a SIGNAL ?)
 
@@ -3787,7 +3789,7 @@ class Debugger:
             os.kill(slave.pid, signal.SIGSTOP)
         self.return_value = 0x0
 
-    ########################## REV UTILS ##########################
+   ########################## REV UTILS ##########################
 
     # TODO if address set, return backup of area overwritten instead of address
     # TODO parameter "overwritable = False", if set to True save the memory region so that you can send other shellcodes without calling mprotect (Maybe set a larger area that simple len(shellcode) then)
@@ -3833,7 +3835,7 @@ class Debugger:
         self.write(address, shellcode, inferior=inferior)
         return backup
 
-    ##########################  GEF shortcuts   #########################
+   ##########################  GEF shortcuts   #########################
     def context(self):
         """
         print memory infos as in gdb
@@ -3878,7 +3880,7 @@ class Debugger:
         else:
             print("telescope requires GEF or pwndbg")
 
-    ########################### Heresies ##########################
+   ########################### Heresies ##########################
     
     def __getattr__(self, name):
     #    #getattr is only called when an attribute is NOT found in the instance's dictionary
