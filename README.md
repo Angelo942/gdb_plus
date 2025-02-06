@@ -16,13 +16,13 @@ GDB+ is a wrapper around gdb powered by pwntools. The goal is automate your inte
 
 ### System requirements
 
-First make sure to have `gdb` installed
+First make sure to have `gdb` and `gdbserver` installed.
 
 ```bash
 sudo apt install gdb gdbserver
 ```
 
-if you want to debug `ARM` and `RISCV` binaries you will also need `qemu` and `gdb-multiarch`
+If you want to debug `ARM` and `RISCV` binaries you will also need `qemu` and `gdb-multiarch`.
 
 ```bash
 sudo apt install gdb-multiarch qemu-user
