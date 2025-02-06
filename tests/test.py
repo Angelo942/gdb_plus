@@ -153,6 +153,37 @@ class Debugger_process(unittest.TestCase):
 			self.assertEqual(data[0], 0x63)
 
 #@unittest.skip
+class Debugger_EXE(unittest.TestCase):
+	def setUp(self):
+		warnings.simplefilter("ignore", ResourceWarning)
+		warnings.simplefilter("ignore", ImportWarning)
+
+	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
+	def test_libs_qemu(self):
+		print("\ntest_libs_qemu: ", end="")
+		with context.local(binary="./risky-business"):
+			with Debugger(context.binary, aslr=False, from_entry=False) as dbg:
+				self.assertTrue(dbg.instruction_pointer not in dbg.exe)
+				self.assertTrue(dbg.instruction_pointer in dbg.ld)
+				self.assertEqual(dbg.exe.address, 0x4000000000)
+				self.assertEqual(dbg.exe.range, 0x3000)
+				self.assertEqual(dbg.ld.address, 0x4001804000)
+				self.assertEqual(dbg.ld.range, 0x23000)
+				self.assertEqual(len(dbg.libs), 2)
+				dbg.until(dbg.elf.entry)
+				self.assertEqual(len(dbg.libs), 3)
+				self.assertEqual(dbg.libc.address, 0x4001850000)
+				self.assertEqual(dbg.libc.range, 0x127000)
+				self.assertTrue(dbg.instruction_pointer in dbg.exe)
+				self.assertTrue(dbg.instruction_pointer not in dbg.libc)
+				self.assertTrue(dbg.instruction_pointer not in dbg.ld)
+				dbg.until("fgets")
+				self.assertTrue(dbg.instruction_pointer not in dbg.exe)
+				self.assertTrue(dbg.instruction_pointer in dbg.libc)
+				self.assertTrue(dbg.instruction_pointer not in dbg.ld)
+
+#@unittest.skip
 class Debugger_actions(unittest.TestCase):
 	def setUp(self):
 		warnings.simplefilter("ignore", ResourceWarning)
