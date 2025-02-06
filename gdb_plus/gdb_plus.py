@@ -235,7 +235,7 @@ class Debugger:
                 except Exception:
                     log.error("You need to install gdb-multiarch to debug binaries under qemu!")
         else:
-            self.p = process(target, env=env, aslr=aslr)
+            self.p = self.__silence(process, target if isinstance(target, list) else self.exe.path, env=env, aslr=aslr)
             self.gdb = self.__attach_gdb(self.p, gdbscript=script)
 
         if type(self.p) is process:
