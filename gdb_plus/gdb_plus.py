@@ -47,7 +47,7 @@ def lock_decorator(func):
 
 class Debugger:
     # NOTE: If possible patch the rpath (spwn and pwninit do it automatically) instead of using env to load the correct libc. This will let you get a shell not having problems trying to preload bash too
-    def __init__(self, target: [int, process, str, ELF, EXE, list, tuple], *, binary:[str, ELF, EXE]=None, env:dict=None, aslr:bool=True, script:str="", from_start:bool=True, debug_from:int=None, timeout:float=0.5, from_entry:bool=True, silent=False):
+    def __init__(self, target: [int, process, str, ELF, EXE, list, tuple], *, binary:[str, ELF, EXE]=None, env:dict=None, aslr:bool=True, script:str="", from_start:bool=True, debug_from:int=None, timeout:float=0.5, from_entry:bool=True, silent=True):
         """
         Args:
             target (int, process, str, ELF, EXE, list, tuple):
@@ -71,7 +71,7 @@ class Debugger:
             timeout (float, optional): Time (s) to wait when using debug_from between two attempts at reattaching to the process. Default to O.5s.
             from_entry (bool, optional): Let the debugger continue until the entry point of the program if we start instead in the loader. 
                 This is useful to make absolutely sure the libc will be always available from the beginning so that for example we can set breakpoints in it. Default to True.   
-            silent (bool, optional): Disable pwntools default logs when starting a process. Useful when bruteforce many processes to not clutter the outputs. Default to False but we consider changing to True.
+            silent (bool, optional): Enable pwntools default logs when starting a process. Default to True.
         """
         
         
