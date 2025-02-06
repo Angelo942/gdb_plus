@@ -46,16 +46,48 @@ def lock_decorator(func):
     return parse
 
 class Debugger:
-    # If possible patch the rpath (spwn and pwninit do it automatically) instead of using env to load the correct libc. This will let you get a shell not having problems trying to preload bash too
-    def __init__(self, target: [int, process, str, ELF, EXE, list, tuple], *, env=None, aslr:bool=True, script:str="", from_start:bool=True, binary:[str, ELF, EXE]=None, debug_from:int=None, timeout:int=0.5, base_elf:int=None, from_entry:bool=True, silent=False):
+    # NOTE: If possible patch the rpath (spwn and pwninit do it automatically) instead of using env to load the correct libc. This will let you get a shell not having problems trying to preload bash too
+    def __init__(self, target: [int, process, str, ELF, EXE, list, tuple], *, binary:[str, ELF, EXE]=None, env:dict=None, aslr:bool=True, script:str="", from_start:bool=True, debug_from:int=None, timeout:float=0.5, from_entry:bool=True, silent=False):
+        """
+        Args:
+            target (int, process, str, ELF, EXE, list, tuple):
+                - **int**: The pid of a process to debug.
+                - **process**: Process to debug
+                - **str**: A path to the file to debug.
+                - **ELF**: File to debug.
+                - **list**: A list of arguments as in process(list)
+
+            binary (str, ELF, EXE, optional): Specify binary or path to the binary being debugged if the information is not included in the context or the target.
+            env (dict, optional): Dictionary of environment variables to use instead of the on from the system. Default to None.
+            aslr (bool, optional): Enable ASLR. Default to True
+            script (str, optional): Optional gdbscript to execute every time the debugger is launched. 
+                Use it only to setup things you always want present, but please don't run commands 
+                and never ever call continue form it.
+            from_start (bool, optional): Start debugging from the first instruction of the binary with gdb.debug or first start it and then attach to it.
+                Usually you would want to always have it to True, and if you want to skip the first part of the code use debug_from instead, but you are free.
+                (Set it to False if you are attaching to a process that has already been running.) Default to True.
+            debug_from (int, optional): Start debugging only from this specific address. Useful to bypass anti debug checks except checks for code tampering.
+                If you need to interact with the process before it will reach the given address look instead at the method .debug_from(address). Default to None.
+            timeout (float, optional): Time (s) to wait when using debug_from between two attempts at reattaching to the process. Default to O.5s.
+            from_entry (bool, optional): Let the debugger continue until the entry point of the program if we start instead in the loader. 
+                This is useful to make absolutely sure the libc will be always available from the beginning so that for example we can set breakpoints in it. Default to True.   
+            silent (bool, optional): Disable pwntools default logs when starting a process. Useful when bruteforce many processes to not clutter the outputs. Default to False but we consider changing to True.
+        """
+        
+        
         if DEBUG: _logger.debug("debugging %s using arch: %s [%dbits]", target if binary is None else binary, context.arch, context.bits)
 
-        self._capstone = None #To decompile assembly for next_inst
-        self._saved_auxiliary_vector = None #only used to locate the canary
-        # Maybe it's good not to rely too much on ELF in case someone wants to use it for different kinds of executables. [08/07/24]
+        # To decompile assembly for next_inst
+        self._capstone = None 
+        
+        # Only used to locate the canary
+        self._saved_auxiliary_vector = None 
+
+        # Control access to the libraries
         self._exe = None
         self._libc = None
         self._ld = None
+
         self._canary = None
         self._args = None
         self._sys_args = None
@@ -69,12 +101,13 @@ class Debugger:
         self._ltrace_breakpoints = []
 
         self.pid = None
-        self._context_params = context.copy() # Be careful to check that you are using the right context arch for the binary before calling gdb
+        self._context_params = context.copy() # NOTE: Be careful to check that you are using the right context arch for the binary before calling gdb
         self.silent = silent
 
         self.gdb = None
         self.libdebug = None
 
+        # Additional informations on the debugging context.
         self._gef = False
         self._pwndbg = False
         self.local_debugging = True # By default I let it to True, then switch it back if it's not the case
@@ -93,7 +126,7 @@ class Debugger:
         self._ptrace_can_continue = Event()
         self._ptrace_has_stopped = Event()  
         self._free_bss = None #Used to allocate data in the bss if you can't use the heap
-        # Do we want to save temporary breakpoints too ? [17/04/23]
+        # NOTE: Do we want to save temporary breakpoints too ? [17/04/23]
         self.breakpoints = defaultdict(list)
         # Let's try to reduce race conditions [19/06/23]
         self._stops_to_enforce = 0
@@ -126,7 +159,10 @@ class Debugger:
         else:
             self.debugging = True
 
-        # If we know the binary we are sure that binary is defined and of type ELF. [23/01/25]
+        # NOTE: If we know the binary we are sure that binary is defined and of type EXE. [23/01/25]
+        # NOTE: Maybe it's good not to rely too much on ELF in case someone wants to use it for different kinds of executables. [08/07/24]
+        # NOTE: Should context be the fail-safe or do we want to make it the default ? [23/01/25]
+        # Ensure that we have a  binary defined with the exception of when the target is a list, pid or remote gdbserver.
         if type(binary) in [str, ELF]:
             binary = EXE(binary, checksec=False)
         elif binary is None:
@@ -137,10 +173,11 @@ class Debugger:
             elif type(target) is process:
                 binary = EXE(target.elf)
             elif type(context.binary) is ELF:
-                binary = EXE(context.binary) # Should this really be the fail-safe or do we want to make it the default ? [23/01/25]
+                binary = EXE(context.binary)
         self._exe = binary
 
-        # Moved here in case we need qemu. Did I miss a case where we don't know the binary yet ? [23/01/25]
+        # NOTE: What happens when the user want's to debug different processes in the same script ? This may break when using a mix of architectures. [05/02/25]
+        # Ensure that a context is defined. Must be set before running gdb to make sure to use the emulator if needed.
         if not context.copy().get("arch", False): # Empty context
             if self.exe is not None:
                 context.binary = self.exe
@@ -151,6 +188,17 @@ class Debugger:
 
         # The idea was to let gdb interrupt only one inferior while letting the other one run, but this doesn't work [29/04/23]
         #script = "set target-async on\nset pagination off\nset non-stop on" + script
+
+        # Connect to the process.
+        # We assume that connecting to a specific pid, gdbserver or process is only done only outside a pwn challenge so we don't have to handle REMOTE and NOPTRACE 
+        # NOTE: This may not be accurate for a remote gdbserver. Someone may have a docker container to debug the challenge. [05/02/25]
+        # TODO: Handle tuple and NOPTRACE
+        # The cases handled are in order:
+        # 1: tuple -> remote gdb server. We assume that we can not communicate or directly access the files we see in memory.
+        # 2: int -> pid of the local process. Here too we can not communicate with the process
+        # 3: process
+        # Those where the cases where we assume the user to be debugging a specific process. Now instead we do consider whether or not the user still wants to launch a process and debug it.
+        # 4: any other target
         if type(target) is tuple:
             if len(target) != 2:
                 raise Exception("What are you trying to do ? tuples (host, port) are only for connections to a gdbserver")
@@ -158,7 +206,6 @@ class Debugger:
             self.gdb = self.__attach_gdb(target, exe=self.exe.path, gdbscript=script)
             self.pid = self.current_inferior.pid
             self.local_debugging = False
-
         # We should check if we crash when elf.native == False to warn the user to install qemu-user, but elf doesn't exist yet... [06/01/25]
         # Do we try only for context.native == False and context.copy == {} ? [06/01/25]
         elif type(target) is int:
@@ -167,17 +214,13 @@ class Debugger:
             assert self.exe is not None, "I need a file to work from a pid" # Not really... Let's keep it like this for now, but continue assuming we don't have a real file
             # We may want to run the script only at the end in case the user really insists on putting a continue in it. [17/11/23]
             self.gdb = self.__attach_gdb(target, gdbscript=script)
-
         elif type(target) is process:
             self.p = target
             self.gdb = self.__attach_gdb(target, gdbscript=script)
-
         elif args.REMOTE:
             pass
-
         elif context.noptrace:
             self.p = process(target, env=env, aslr=aslr)
-        
         elif from_start:
             try:
                 self.p = self.__silence(gdb.debug, target if isinstance(target, list) else self.exe.path, env=env, aslr=aslr, gdbscript=script, api=True)
@@ -185,12 +228,12 @@ class Debugger:
                 if not context.native:
                     log.error(f"Could not debug program for {context.arch}. Did you install qemu-user ?")
             self.gdb = self.p.gdb
+            # If pwntools doesn't find gdb-multiarch it will still start a normal gdb process but the process wouldn't run.
             if not context.native:
                 try: 
                     self.execute("info tasks")
                 except Exception:
                     log.error("You need to install gdb-multiarch to debug binaries under qemu!")
-
         else:
             self.p = process(target, env=env, aslr=aslr)
             self.gdb = self.__attach_gdb(self.p, gdbscript=script)
@@ -205,9 +248,7 @@ class Debugger:
         self.logger.addHandler(ch)
         self.logger.setLevel(_logger.level)
 
-        # pwntools symbols duplicate every entry in the plt and the got. This breaks my version of symbols because they have the same name as the libc [25/03/23]
-        # This may break not stripped statically linked binaries, just wait for the libc to be loaded and those symbols will be overshadowed [25/03/23]
-        # Let's still do it for dynamically linked binaries [04/04/23]
+        # Prevent confusion between exe.symbols pointing to the plt and libc.symbols pointing to the function itself.
         if self.exe is not None and not self.exe.statically_linked:
             for symbol_name in self.exe.plt:
                 del self.exe.symbols[symbol_name]
@@ -216,11 +257,11 @@ class Debugger:
 
             self.__setup_gdb()
 
-            # Start debugging from a specific address. Wait timeout seconds for the program to reach that address. Is blocking so you may need to use context.Thread() in some cases
-            # WARNING don't use 'continue' in your gdbscript when using debug_from ! [17/04/23]
-            # I don't like that this is blocking, so you can't interact while waiting... Can we do it differently ? [17/04/23]
+            # NOTE: Start debugging from a specific address. Wait timeout seconds for the program to reach that address. Is blocking so you may need to use context.Thread() in some cases
+            # NOTE: WARNING don't use 'continue' in your gdbscript when using debug_from ! [17/04/23]
+            # NOTE: I don't like that this is blocking, so you can't interact while waiting... Can we do it differently ? [17/04/23]
             if debug_from is not None:
-                # I can't attach again to the process
+                # NOTE: I can't attach again to the process if we are under an emulator
                 assert context.native, "debug_from isn't supported in qemu"
                 address_debug_from = self._parse_address(debug_from)
                 backup = self.inject_sleep(address_debug_from)
@@ -242,6 +283,7 @@ class Debugger:
                 if not context.native:
                     log.warn_once("Debugging from entry may fail with qemu. In case set Debugger(..., from_entry = False)")
                 self.until(self.exe.entry)
+                # TODO: Think about loading here all the libraries instead of using fixed properties. Or set a callback in gdb directly [06/02/25]
 
     def __handle_breakpoints(self, breakpoints):
         """
@@ -681,6 +723,9 @@ class Debugger:
             log.warn_once(DEBUG_OFF)
             self.debug_from_done.set()
             return
+
+        if not context.native:
+            log.error("debug_from is not supported under QEMU")
 
         address = self._parse_address(location)
 
@@ -2156,6 +2201,10 @@ class Debugger:
     def _parse_address(self, location: [int, str]) -> str:
         """
         parse symbols and relative addresses to return the absolute address
+
+        If the binary is not PIE all addresses are assumed to be absolute.
+        If the binary is PIE we assume all addresses that could belong to the binary to be absolute.
+        The only addresses that are considered relative are the one who are not a valid address of the binary, but are small enough to fit in the binary. 
         """
         if type(location) is int:
             address = location
@@ -2675,7 +2724,7 @@ class Debugger:
         else:
             # MMMMMMM, not perfect for different inferiors
             self._free_bss -= len
-            #I know it's not perfect, but damn I don't want to implement a heap logic for the bss ahahah
+            #I know it's not perfect, but damn I don't want to implement a heap logic for the bss
             #Just use the heap if you can
 
     # We could make size round up to the start of next instruction, but should we ? [23/01/25]
@@ -2802,6 +2851,7 @@ class Debugger:
             raise Exception(f"what arch is {context.arch}")
 
     # We should add a new type of registers for aliases so that the user can access them, but we don't duplicate them when doing backups. 
+    # Would also be useful to access floating points [21/01/25]
 
     @property
     def next_inst(self):
@@ -2812,12 +2862,15 @@ class Debugger:
         elif context.arch == "aarch64":
             inst.is_call = inst.mnemonic == "bl"
         elif context.arch in ["riscv32", "riscv64"]:
-            inst.is_call = inst.mnemonic == "jal"
+            inst.is_call = inst.mnemonic == "jal" # jal is the standard function call, but it could also use jalr, c.jalr to call dynamic code from a register or just extend the range... The problem is that jalr can also be a ret instruction...
+            #if "jalr" # Check that it's not using zero register (return)
+
         else:
             ...
         return inst
 
     # May be useful for Inner_Debugger
+    # BUG capstone v5, Risky Business start function. disassemble(ip, 1000) will stop after 4 instructions
     def disassemble(self, address, size):
         if self._capstone is None:
             if context.arch == "amd64":
