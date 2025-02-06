@@ -695,7 +695,7 @@ class Debbuger_fork(unittest.TestCase):
 			flag = b""
 			for n in x:
 				flag += p32(n)
-			print(xor(flag, 0xd))
+			self.assertEqual(xor(flag, 0xd), b"CSCG{4ND_4LL_0FF_TH1S_W0RK_JU5T_T0_G3T_TH1S_STUUUP1D_FL44G??!!1}")
 
 			dbg.close()
 			child.close()
@@ -946,7 +946,7 @@ class Debugger_libdebug(unittest.TestCase):
 			self.dbg.close()
 			
 	# BROKEN !!!!!
-	@unittest.skip
+	"""@unittest.skip
 	@timeout_decorator.timeout(LONG)
 	def test_inner_debugger(self):	
 		print("\ntest_inner_debugger [libdebug]:")	
@@ -1002,6 +1002,7 @@ class Debugger_libdebug(unittest.TestCase):
 			self.assertEqual(flag, b"CSCG{4ND_4LL_0FF_TH1S_W0RK_JU5T_T0_G3T_TH1S_STUUUP1D_FL44G??!!1}")
 			self.assertFalse(self.dbg.priority)
 			self.dbg.close()
+	"""
 
 #@unittest.skip
 class Debugger_ARM(unittest.TestCase):
