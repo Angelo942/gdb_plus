@@ -46,16 +46,48 @@ def lock_decorator(func):
     return parse
 
 class Debugger:
-    # If possible patch the rpath (spwn and pwninit do it automatically) instead of using env to load the correct libc. This will let you get a shell not having problems trying to preload bash too
-    def __init__(self, target: [int, process, str, list, tuple], env=None, aslr:bool=True, script:str="", from_start:bool=True, binary:[str, ELF]=None, debug_from:int=None, timeout:int=0.5, base_elf:int=None, from_entry:bool=True):
+    # NOTE: If possible patch the rpath (spwn and pwninit do it automatically) instead of using env to load the correct libc. This will let you get a shell not having problems trying to preload bash too
+    def __init__(self, target: [int, process, str, ELF, EXE, list, tuple], *, binary:[str, ELF, EXE]=None, env:dict=None, aslr:bool=True, script:str="", from_start:bool=True, debug_from:int=None, timeout:float=0.5, from_entry:bool=True, silent=True):
+        """
+        Args:
+            target (int, process, str, ELF, EXE, list, tuple):
+                - **int**: The pid of a process to debug.
+                - **process**: Process to debug
+                - **str**: A path to the file to debug.
+                - **ELF**: File to debug.
+                - **list**: A list of arguments as in process(list)
+
+            binary (str, ELF, EXE, optional): Specify binary or path to the binary being debugged if the information is not included in the context or the target.
+            env (dict, optional): Dictionary of environment variables to use instead of the on from the system. Default to None.
+            aslr (bool, optional): Enable ASLR. Default to True
+            script (str, optional): Optional gdbscript to execute every time the debugger is launched. 
+                Use it only to setup things you always want present, but please don't run commands 
+                and never ever call continue form it.
+            from_start (bool, optional): Start debugging from the first instruction of the binary with gdb.debug or first start it and then attach to it.
+                Usually you would want to always have it to True, and if you want to skip the first part of the code use debug_from instead, but you are free.
+                (Set it to False if you are attaching to a process that has already been running.) Default to True.
+            debug_from (int, optional): Start debugging only from this specific address. Useful to bypass anti debug checks except checks for code tampering.
+                If you need to interact with the process before it will reach the given address look instead at the method .debug_from(address). Default to None.
+            timeout (float, optional): Time (s) to wait when using debug_from between two attempts at reattaching to the process. Default to O.5s.
+            from_entry (bool, optional): Let the debugger continue until the entry point of the program if we start instead in the loader. 
+                This is useful to make absolutely sure the libc will be always available from the beginning so that for example we can set breakpoints in it. Default to True.   
+            silent (bool, optional): Enable pwntools default logs when starting a process. Default to True.
+        """
+        
+        
         if DEBUG: _logger.debug("debugging %s using arch: %s [%dbits]", target if binary is None else binary, context.arch, context.bits)
 
-        self._capstone = None #To decompile assembly for next_inst
-        self._saved_auxiliary_vector = None #only used to locate the canary
-        # Maybe it's good not to rely too much on ELF in case someone wants to use it for different kinds of executables. [08/07/24]
-        self._base_libc = None
-        self._base_elf = base_elf
+        # To decompile assembly for next_inst
+        self._capstone = None 
+        
+        # Only used to locate the canary
+        self._saved_auxiliary_vector = None 
+
+        # Control access to the libraries
+        self._exe = None
         self._libc = None
+        self._ld = None
+
         self._canary = None
         self._args = None
         self._sys_args = None
@@ -69,13 +101,16 @@ class Debugger:
         self._ltrace_breakpoints = []
 
         self.pid = None
-        self._context_params = context.copy() # Be careful to check that you are using the right context arch for the binary before calling gdb
+        self._context_params = context.copy() # NOTE: Be careful to check that you are using the right context arch for the binary before calling gdb
+        self.silent = silent
 
         self.gdb = None
         self.libdebug = None
 
+        # Additional informations on the debugging context.
         self._gef = False
         self._pwndbg = False
+        self.local_debugging = True # By default I let it to True, then switch it back if it's not the case
 
         self._backup_p = None
         self.r = None
@@ -91,14 +126,14 @@ class Debugger:
         self._ptrace_can_continue = Event()
         self._ptrace_has_stopped = Event()  
         self._free_bss = None #Used to allocate data in the bss if you can't use the heap
-        # Do we want to save temporary breakpoints too ? [17/04/23]
+        # NOTE: Do we want to save temporary breakpoints too ? [17/04/23]
         self.breakpoints = defaultdict(list)
         # Let's try to reduce race conditions [19/06/23]
         self._stops_to_enforce = 0
         self._breakpoint_handled = Event()
 
         self._handled_signals = {}
-        self.gdbscript = script # For non blocking debug_from
+        self.gdbscript = script if script is not None else "" # For non blocking debug_from
         self.debug_from_done = Event()
 
         # MyEvent allows calls to wait in parallel
@@ -119,78 +154,88 @@ class Debugger:
 
         if args.REMOTE or context.noptrace:
             self.debugging = False
-            self.children = defaultdict(lambda: self)
+            self.local_debugging = False
+            self.children = defaultdict(lambda: self) # Is this necessary ? If it's just for split we could change that function to return self
         else:
             self.debugging = True
 
-        # If we know the binary we are sure that binary is defined and of type ELF. [23/01/25]
-        if type(binary) is str:
-            binary = ELF(binary, checksec=False)
+        # NOTE: If we know the binary we are sure that binary is defined and of type EXE. [23/01/25]
+        # NOTE: Maybe it's good not to rely too much on ELF in case someone wants to use it for different kinds of executables. [08/07/24]
+        # NOTE: Should context be the fail-safe or do we want to make it the default ? [23/01/25]
+        # Ensure that we have a  binary defined with the exception of when the target is a list, pid or remote gdbserver.
+        if type(binary) in [str, ELF]:
+            binary = EXE(binary, checksec=False)
         elif binary is None:
-            if type(target) is str:
-                binary = ELF(target, checksec=False)
-            elif type(target) is ELF:
+            if type(target) is EXE:
                 binary = target
-                target = target.path # gdb.debug doesn't support an ELF
+            if type(target) in [str, ELF]:
+                binary = EXE(target, checksec=False)
             elif type(target) is process:
-                binary = target.elf
-            else:
-                binary = context.binary # Should this really be the fail-safe or do we want to make it the default ? [23/01/25]
-        self.elf = binary
+                binary = EXE(target.elf)
+            elif type(context.binary) is ELF:
+                binary = EXE(context.binary)
+        self._exe = binary
 
-        # Moved here in case we need qemu. Did I miss a case where we don't know the binary yet ? [23/01/25]
+        # NOTE: What happens when the user want's to debug different processes in the same script ? This may break when using a mix of architectures. [05/02/25]
+        # Ensure that a context is defined. Must be set before running gdb to make sure to use the emulator if needed.
         if not context.copy().get("arch", False): # Empty context
-            if self.elf is not None:
-                context.binary = self.elf
+            if self.exe is not None:
+                context.binary = self.exe
                 log.info(f"context not set... Using {context}")
                 self._context_params = context.copy()
             else:
-                log.warn("No context set and no binary given. This may cause problems.")
+                log.warn("No context set and no binary given. We recommend setting context.binary at the beginning of your script.")
 
         # The idea was to let gdb interrupt only one inferior while letting the other one run, but this doesn't work [29/04/23]
         #script = "set target-async on\nset pagination off\nset non-stop on" + script
+
+        # Connect to the process.
+        # We assume that connecting to a specific pid, gdbserver or process is only done only outside a pwn challenge so we don't have to handle REMOTE and NOPTRACE 
+        # NOTE: This may not be accurate for a remote gdbserver. Someone may have a docker container to debug the challenge. [05/02/25]
+        # TODO: Handle tuple and NOPTRACE
+        # The cases handled are in order:
+        # 1: tuple -> remote gdb server. We assume that we can not communicate or directly access the files we see in memory.
+        # 2: int -> pid of the local process. Here too we can not communicate with the process
+        # 3: process
+        # Those where the cases where we assume the user to be debugging a specific process. Now instead we do consider whether or not the user still wants to launch a process and debug it.
+        # 4: any other target
         if type(target) is tuple:
             if len(target) != 2:
                 raise Exception("What are you trying to do ? tuples (host, port) are only for connections to a gdbserver")
             self.p = None
-            self.gdb = self.__attach_gdb(target, exe=self.elf.path, gdbscript=script)
+            self.gdb = self.__attach_gdb(target, exe=self.exe.path, gdbscript=script)
             self.pid = self.current_inferior.pid
-
+            self.local_debugging = False
         # We should check if we crash when elf.native == False to warn the user to install qemu-user, but elf doesn't exist yet... [06/01/25]
         # Do we try only for context.native == False and context.copy == {} ? [06/01/25]
-
         elif type(target) is int:
             self.p = None
             self.pid = target
-            assert binary is not None, "I need a file to work from a pid" # Not really... Let's keep it like this for now, but continue assuming we don't have a real file
+            assert self.exe is not None, "I need a file to work from a pid" # Not really... Let's keep it like this for now, but continue assuming we don't have a real file
             # We may want to run the script only at the end in case the user really insists on putting a continue in it. [17/11/23]
             self.gdb = self.__attach_gdb(target, gdbscript=script)
-
         elif type(target) is process:
             self.p = target
             self.gdb = self.__attach_gdb(target, gdbscript=script)
-
         elif args.REMOTE:
             pass
-
         elif context.noptrace:
             self.p = process(target, env=env, aslr=aslr)
-        
         elif from_start:
             try:
-                self.p = gdb.debug(target, env=env, aslr=aslr, gdbscript=script, api=True)
+                self.p = self.__silence(gdb.debug, target if isinstance(target, list) else self.exe.path, env=env, aslr=aslr, gdbscript=script, api=True)
             except pwn.exception.PwnlibException:
                 if not context.native:
                     log.error(f"Could not debug program for {context.arch}. Did you install qemu-user ?")
             self.gdb = self.p.gdb
+            # If pwntools doesn't find gdb-multiarch it will still start a normal gdb process but the process wouldn't run.
             if not context.native:
                 try: 
                     self.execute("info tasks")
                 except Exception:
                     log.error("You need to install gdb-multiarch to debug binaries under qemu!")
-
         else:
-            self.p = process(target, env=env, aslr=aslr)
+            self.p = self.__silence(process, target if isinstance(target, list) else self.exe.path, env=env, aslr=aslr)
             self.gdb = self.__attach_gdb(self.p, gdbscript=script)
 
         if type(self.p) is process:
@@ -203,27 +248,21 @@ class Debugger:
         self.logger.addHandler(ch)
         self.logger.setLevel(_logger.level)
 
-        # pwntools symbols duplicate every entry in the plt and the got. This breaks my version of symbols because they have the same name as the libc [25/03/23]
-        # This may break not stripped statically linked binaries, just wait for the libc to be loaded and those symbols will be overshadowed [25/03/23]
-        # Let's still do it for dynamically linked binaries [04/04/23]
-        if self.elf and not self.elf.statically_linked:
-            for symbol_name in list(self.elf.symbols.keys()):
-                if (symbol_name.startswith("plt.") or symbol_name.startswith("got.")) and (name := symbol_name[4:]) in self.elf.symbols:
-                    del self.elf.symbols[name]
+        # Prevent confusion between exe.symbols pointing to the plt and libc.symbols pointing to the function itself.
+        if self.exe is not None and not self.exe.statically_linked:
+            for symbol_name in self.exe.plt:
+                if (symbol := self.exe.symbols.get(symbol_name, None)) is not None:
+                    del symbol
         
         if self.debugging:
 
             self.__setup_gdb()
 
-            if self.elf is not None:
-                self.elf.address = self.base_elf # Must be after __setup_gdb to know if we are using GEF or pwndbg
-                self.elf.size = len(self.elf.data)
-
-            # Start debugging from a specific address. Wait timeout seconds for the program to reach that address. Is blocking so you may need to use context.Thread() in some cases
-            # WARNING don't use 'continue' in your gdbscript when using debug_from ! [17/04/23]
-            # I don't like that this is blocking, so you can't interact while waiting... Can we do it differently ? [17/04/23]
+            # NOTE: Start debugging from a specific address. Wait timeout seconds for the program to reach that address. Is blocking so you may need to use context.Thread() in some cases
+            # NOTE: WARNING don't use 'continue' in your gdbscript when using debug_from ! [17/04/23]
+            # NOTE: I don't like that this is blocking, so you can't interact while waiting... Can we do it differently ? [17/04/23]
             if debug_from is not None:
-                # I can't attach again to the process
+                # NOTE: I can't attach again to the process if we are under an emulator
                 assert context.native, "debug_from isn't supported in qemu"
                 address_debug_from = self._parse_address(debug_from)
                 backup = self.inject_sleep(address_debug_from)
@@ -240,11 +279,12 @@ class Debugger:
                     else:
                         log.warn(f"{timeout}s timeout isn't enough to reach the code... Retrying...")
             # This is here to have the libc always available [06/01/25]
-            # self.instruction_pointer != self.elf.entry: May not have a loader and libc, but still be considered dynamically linked
-            elif from_entry and from_start and self.elf is not None and not self.elf.statically_linked and self.instruction_pointer != self.elf.entry:
-                if not self.elf.native:
+            # self.instruction_pointer != self.exe.entry: May not have a loader and libc, but still be considered dynamically linked
+            elif from_entry and self.exe is not None and not self.exe.statically_linked and self.instruction_pointer in self.ld:
+                if not context.native:
                     log.warn_once("Debugging from entry may fail with qemu. In case set Debugger(..., from_entry = False)")
-                self.until(self.elf.entry)
+                self.until(self.exe.entry)
+                # TODO: Think about loading here all the libraries instead of using fixed properties. Or set a callback in gdb directly [06/02/25]
 
     def __handle_breakpoints(self, breakpoints):
         """
@@ -597,7 +637,7 @@ class Debugger:
             if DEBUG: self.logger.debug("migrating to gdb")
             self.libdebug = None
             self._detached  = False
-            _, self.gdb = pwn.gdb.attach(self.pid, gdbscript=script, api=True)
+            self.gdb = self.__attach_gdb(self.pid, gdbscript=script)
             self.__setup_gdb()
             # Catch SIGSTOP
             address = self.instruction_pointer
@@ -633,6 +673,8 @@ class Debugger:
             self.detach(block=True)
             if DEBUG: self.logger.debug("migrating to libdebug")
             self.gdb = None
+            self._gef = False
+            self._pwndbg = False
             self._detached  = False
             self.libdebug = lib_Debugger(multithread=False)
             while not self.libdebug.attach(self.pid, options=False):
@@ -664,7 +706,7 @@ class Debugger:
     def __attach_gdb(self, target, gdbscript=None, exe=None):
         if not context.native:
             log.error("We can not attach to a process under QEMU")
-        _, debugger = gdb.attach(target, gdbscript=gdbscript, exe=exe, api=True)
+        _, debugger = self.__silence(gdb.attach, target, gdbscript=gdbscript, exe=exe, api=True)
         try: 
             debugger.execute("info tasks", to_string=True)
         except Exception:
@@ -682,6 +724,9 @@ class Debugger:
             log.warn_once(DEBUG_OFF)
             self.debug_from_done.set()
             return
+
+        if not context.native:
+            log.error("debug_from is not supported under QEMU")
 
         address = self._parse_address(location)
 
@@ -734,7 +779,7 @@ class Debugger:
         self._host = host
         self._port = port
         if args.REMOTE:
-            self.p = remote(host, port)
+            self.p = self.__silence(remote, host, port)
         return self
 
     setup_remote = remote
@@ -814,11 +859,18 @@ class Debugger:
         #    if DEBUG: self.logger.debug("can't detach because process has already exited")
         # Can't close the process if I just attached to the pid
         if self.p:
-            self.p.close()
+            self.__silence(self.p.close)
         if self.r is not None:
-            self.r.close()
+            self.__silence(self.r.close)
         if self._backup_p is not None:
-            self._backup_p.close()
+            self.__silence(self._backup_p.close)
+
+    def __silence(self, fun, *args, **kwargs):
+        if self.silent:
+            with context.silent:
+                return fun(*args, **kwargs)
+        else:
+            return fun(*args, **kwargs)
 
     # Now we may have problems if the user try calling it...
     # should warn to use execute_action and wait if they are doing something that will let the process run
@@ -1734,7 +1786,7 @@ class Debugger:
     # For some reasons we get int3 some times
     # Now it's even worse. SIGABORT after that...
     def gdb_call(self, function: str, args: list, *, cast = "long"):
-        if not self.elf.statically_linked:
+        if not self.exe.statically_linked:
             try:
                 ans = self.execute(f"call ({cast}) {function} ({', '.join([hex(arg) for arg in args])})")
                 if cast == "void":
@@ -1836,7 +1888,6 @@ class Debugger:
         for register in calling_convention:
             if len(args) == 0:
                 break
-            if DEBUG: self.logger.debug("%s setted to %s", register, args[0])
             setattr(self, register, args.pop(0))
             
         #Should I offset the stack pointer to preserve the stack frame ? No, right ?
@@ -2086,7 +2137,7 @@ class Debugger:
         """
         if calling_convention is None:
             calling_convention = function_calling_convention[context.arch]
-        symtab = self.elf.get_section_by_name(".symtab")
+        symtab = self.exe.get_section_by_name(".symtab")
         if not isinstance(symtab, SymbolTableSection):
             log.warn("Can not find symbols. If you added them yourself to the binary please raise an issue.")
             return self
@@ -2097,7 +2148,7 @@ class Debugger:
                 prog.status(f"{idx+1}/{symtab.num_symbols()}")
                 if symbol.entry["st_info"]["type"] != "STT_FUNC":
                     continue
-                address = self.elf.symbols.get(symbol.name, None)
+                address = self.exe.symbols.get(symbol.name, None)
                 # is in the plt
                 if address is None:
                     continue
@@ -2121,13 +2172,13 @@ class Debugger:
     # Be careful about the interactions between finish and other user breakpoints [31/07/24]
     # In particular consider skipping ptrace and wait functions if ptrace is emulated and we decide to move the breakpoints from the libc to the plt. [01/08/24]
     def set_ltrace(self, *, calling_convention = None, n_args = 3, no_return = False, exclude = []):
-        if self.elf.statically_linked:
+        if self.exe.statically_linked:
             log.warn("The binary does not use libraries!")
             return self
 
         if calling_convention is None:
             calling_convention = function_calling_convention[context.arch]
-        for name, address in self.elf.plt.items():
+        for name, address in self.exe.plt.items():
             if name in exclude:
                 continue
             def callback(dbg, name = name): # Needed to save the correct name
@@ -2151,17 +2202,19 @@ class Debugger:
     def _parse_address(self, location: [int, str]) -> str:
         """
         parse symbols and relative addresses to return the absolute address
+
+        If the binary is not PIE all addresses are assumed to be absolute.
+        If the binary is PIE we assume all addresses that could belong to the binary to be absolute.
+        The only addresses that are considered relative are the one who are not a valid address of the binary, but are small enough to fit in the binary. 
         """
         if type(location) is int:
             address = location
 
-            if not self.elf.pie:
+            if not self.exe.pie:
                 return address
 
-            if self.elf.size > self.elf.address: 
-                log.warn_once("I am unable to distinguish between relative and absolute addresses. I will assume everything is an absolute address")
-            elif location < self.elf.size:
-                address += self.elf.address
+            if not address in self.exe and address < self.exe.range: # NOTE: I'm not sure yet if we should only use only allow relative breakpoints in len(exe.data) or the whole range of pages allocated to the program [05/02/25]
+                address += self.exe.address
 
         elif type(location) is str:
             function = location
@@ -2174,10 +2227,10 @@ class Debugger:
             try:
                 address = self.symbols[function] + offset
             except KeyError as e:
-                if not self.elf.statically_linked and self.libc is None:
+                if not self.exe.statically_linked and self.libc is None:
                     log.error("symbol %s not found in ELF", location)
                     log.error("The libc is not loaded yet. If you want to put a breakpoint there call load_libc() first!")
-                elif not self.elf.statically_linked:
+                elif not self.exe.statically_linked:
                     log.error("symbol %s not found in ELF or libc", location)
                 else:
                     log.error("symbol %s not found in ELF", location)
@@ -2431,7 +2484,7 @@ class Debugger:
         else:
             log.critical("couldn't find a solution")
 
-    ########################## MEMORY ACCESS ##########################
+   ########################## MEMORY ACCESS ##########################
 
     def __read_gdb(self, address: int, size: int, *, inferior = None) -> bytes:
 
@@ -2654,7 +2707,7 @@ class Debugger:
                 ...
         else:
             if self._free_bss is None:
-                self._free_bss = self.elf.bss() # I have to think about how to preserve eventual data already present
+                self._free_bss = self.exe.bss() # I have to think about how to preserve eventual data already present
             self._free_bss += n
             ret = self._free_bss
         
@@ -2672,7 +2725,7 @@ class Debugger:
         else:
             # MMMMMMM, not perfect for different inferiors
             self._free_bss -= len
-            #I know it's not perfect, but damn I don't want to implement a heap logic for the bss ahahah
+            #I know it's not perfect, but damn I don't want to implement a heap logic for the bss
             #Just use the heap if you can
 
     # We could make size round up to the start of next instruction, but should we ? [23/01/25]
@@ -2688,207 +2741,6 @@ class Debugger:
         backup = self.read(address, size)
         self.write(address, nop[context.arch] * (size // len(nop[context.arch])))
         return backup
-
-
-    # Quick attempt to find maps
-    # TODO handle remote debugging [20/01/25]
-    @property
-    def maps(self):
-        maps = {}
-        try:
-            with open(f"/proc/{self.pid}/maps") as fd:
-                maps_raw = fd.read()
-            for line in maps_raw.splitlines():
-                line = line.split()
-                start, end = line[0].split("-")
-                maps[int(start, 16)] = int(end, 16) - int(start, 16)
-        except Exception: # In remote debugging we don't have the /proc file
-            pass
-        return maps
-
-    # I copied it from pwntools to have access to it even if I attach directly to a pid
-    def libs(self):
-        """libs() -> dict
-        Return a dictionary mapping the path of each shared library loaded
-        by the process to the address it is loaded at in the process' address
-        space.
-        """
-        try:
-            with open(f"/proc/{self.pid}/maps") as fd:
-                maps_raw = fd.read()
-        except IOError:
-            maps_raw = ""
-
-        # Enumerate all of the libraries actually loaded right now.
-        maps = {}
-        for line in maps_raw.splitlines():
-            if '/' not in line: continue
-            path = line[line.index('/'):]
-            path = os.path.realpath(path)
-            if path not in maps:
-                maps[path]=0
-
-        for lib in maps:
-            path = os.path.realpath(lib)
-            for line in maps_raw.splitlines():
-                if line.endswith(path):
-                    address = line.split('-')[0]
-                    maps[lib] = int(address, 16)
-                    break
-
-        return maps
-    
-    # _libc == None means that we don't know if we have a libc, but let's use _libc == -1 if we know we don't to stop searching for it
-    @property
-    def libc(self):
-        if self._libc == -1:
-            return None
-        if self.elf is not None and self.elf.statically_linked:
-            self._libc = -1
-            return None
-        if self._libc is None and self.p is not None: # In qemu this would return the libc of qemu, not the program! [06/01/25]
-            with context.silent: # I don't want to print checksec for the libc [23/01/25]
-                libc = self.p.libc
-            # If the program hasn't loaded it's libc yet, p.libc returns the system libc used by QEMU [20/01/25]
-            if libc.arch == context.arch:
-                self._libc = libc
-        return self._libc
-
-    @libc.setter
-    def libc(self, elf_libc: ELF):
-        self._libc = elf_libc
-
-    def _get_base_libc(self):
-        if self.libc is None:
-            log.warn_once("I don't see a libc ! Set dbg.libc = ELF(<path_to_libc>)")
-            return 0
-        maps = self.libs()
-        if len(maps) != 0:
-            return maps[self.libc.path]
-        else:
-            log.warn("I can't access /proc/%d/maps", self.pid)
-            #data = self.execute("info files")
-            #for line in data.split("\n"):
-            #    line = line.strip()
-            #    if "libc" in line and line.startswith("0x"):
-            #        address = int(line.split()[0], 16)
-            #        return address - address % 0x1000
-
-    @property
-    def base_libc(self):
-        if self._base_libc is None:
-            self._base_libc = self._get_base_libc()
-        return self._base_libc
-
-    @base_libc.setter
-    def base_libc(self, address):
-        if self.debugging and address != self.base_libc:
-            log.warn("The base address of the libc is not the one expected! Expected: %s. Received: %s", hex(self.base_libc), hex(address))
-
-        self.libc.address = address
-        self._base_libc = address
-
-    libc_address = base_libc
-
-    # get base address of binary
-    # May be wrong for qemu -> Now with vmmap it should be accurate [25/08/24]
-    def _get_base_elf(self):
-        maps = self.libs()
-        # TODO For remote debugging use info auxv! [25/08/24]
-        name_binary = self.elf.path.split("/")[-1]
-        # Not perfect, but is a first filter
-        # We would want to use the generic "info proc mappings", but under QEMU it tries to access /proc/1/maps...
-        if "/usr/bin/qemu" in "".join(maps.keys()):
-            ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
-            if self._pwndbg:
-                data = ansi_escape.sub('', self.execute("vmmap"))
-            elif self._gef:
-                data = ansi_escape.sub('', self.execute("vmmap")).replace(chr(2), "").replace(chr(1), "")
-            else:
-                try:
-                    with open(f"/proc/{self.pid}/maps", "r") as fd:
-                        data = fd.read().replace("-", " ")
-                        name_binary = name_binary.replace("-", " ")
-                except Exception as e:
-                    log.failure("can't find binary address")
-                    log.warn("please try again with GEF or pwndbg")
-                    return 0
-                
-            for i, line in enumerate(data.splitlines()):
-                if name_binary in line:
-                    address = int(line.strip().split()[0], 16)
-                    break
-            else: 
-                log.failure("can't find binary address")
-                return 0
-
-            # Can not trust libs to find the correct page [06/01/25]
-            # BUG Sometimes with arm we have the same binary at both 0x10000 and 0x20000, vmmap detects the second one, while we should use the first for the offsets... [20/01/25]
-            if context.arch in ["riscv32", "riscv64", "arm"]:
-                offset = 0
-                while self.elf.data[offset:offset+8] == b"\x00" * 8:
-                    offset += 8
-                if self.elf.data[offset:offset+0x8] != self.read(address+offset, 8):
-                    log.warn_once("QEMU messed up the elf base. Trying to find correct address...")
-                    limit = 2 if (self._gef or self._pwndbg) else 0
-                    while i > limit:
-                        i -= 1
-                        address = int(data.splitlines()[i].strip().split()[0], 16)
-                        if self.elf.data[offset:offset+0x8] == self.read(address+offset, 8):
-                            log.success(f"Found address {hex(address)}!")
-                            break
-                    else:
-                        log.failure("can't find binary address")
-                        return 0
-
-            return address
-                    
-
-        if len(maps) != 0:
-            for path, address in maps.items():
-                if name_binary in path:
-                    return address
-            else:
-                log.warn("Make sure the name of the binary is the same as the one being debugged")
-                log.error(f"can not find {name_binary} in {list(maps.keys())}")
-        
-        else:
-            log.warn("I can't access /proc/%d/maps", self.pid)
-            # The following part doesn't work properly [28/02/23]
-            #data = self.execute("info files")
-            #for line in data.split("\n"):
-            #    line = line.strip()
-            #    if line.startswith("Entry point:"):
-            #        address = int(line.split()[-1], 16)
-            #        log.debug(f"Entry point = {hex(address)}")
-            #        return address - address%0x1000 #Not always true...
-                    
-
-    @property
-    def base_elf(self):
-        if self._base_elf is None:
-            self._base_elf = self._get_base_elf()
-        return self._base_elf
-
-    @base_elf.setter
-    def base_elf(self, address):
-        if self.debugging and address != self.base_elf:
-            log.warn("The base address of the binary is not the one expected! Expected: %s. Received: %s", hex(self.base_elf), hex(address))
-
-        self.elf.address = address
-        self._base_elf = address
-
-    elf_address = base_elf
-
-    # TODO handle multiple libraries
-    @property
-    def symbols(self):
-        if self.libc is not None:
-            # WARNING >= 3.9
-            #return self.elf.symbols | self.libc.symbols
-            return {**self.elf.symbols, **self.libc.symbols} # Should work in 3.8
-        else:
-            return self.elf.symbols
 
     # taken from GEF to locate the canary
     @property
@@ -3000,6 +2852,7 @@ class Debugger:
             raise Exception(f"what arch is {context.arch}")
 
     # We should add a new type of registers for aliases so that the user can access them, but we don't duplicate them when doing backups. 
+    # Would also be useful to access floating points [21/01/25]
 
     @property
     def next_inst(self):
@@ -3010,12 +2863,15 @@ class Debugger:
         elif context.arch == "aarch64":
             inst.is_call = inst.mnemonic == "bl"
         elif context.arch in ["riscv32", "riscv64"]:
-            inst.is_call = inst.mnemonic == "jal"
+            inst.is_call = inst.mnemonic == "jal" # jal is the standard function call, but it could also use jalr, c.jalr to call dynamic code from a register or just extend the range... The problem is that jalr can also be a ret instruction...
+            #if "jalr" # Check that it's not using zero register (return)
+
         else:
             ...
         return inst
 
     # May be useful for Inner_Debugger
+    # BUG capstone v5, Risky Business start function. disassemble(ip, 1000) will stop after 4 instructions
     def disassemble(self, address, size):
         if self._capstone is None:
             if context.arch == "amd64":
@@ -3033,7 +2889,7 @@ class Debugger:
 
         return self._capstone.disasm(self.read(address, size), address)
 
-    ########################## Generic references ##########################
+   ########################## Generic references ##########################
 
     @property
     def return_value(self):
@@ -3229,7 +3085,215 @@ class Debugger:
     def return_pointer(self):
         return self.__saved_ip
 
-    ########################## FORKS ##########################
+   ########################## FILES ##########################
+
+    # Quick attempt to find maps
+    # TODO handle remote debugging [20/01/25]
+    @property
+    def maps(self):
+        maps = {}
+        try:
+            with open(f"/proc/{self.pid}/maps") as fd:
+                maps_raw = fd.read()
+            for line in maps_raw.splitlines():
+                if not context.native and "/qemu-" in line:
+                    break
+                line = line.split()
+                start, end = line[0].split("-")
+                maps[int(start, 16)] = int(end, 16) - int(start, 16)
+        except Exception: # In remote debugging we don't have the /proc file
+            pass
+        return maps
+
+    # I copied it from pwntools to have access to it even if I attach directly to a pid
+    # TODO consider making a way to access all the libraries in the form of a dict of EXE [05/02/25]
+    @property
+    def libs(self):
+        """libs() -> dict
+        Return a dictionary mapping the path of each shared library loaded
+        by the process to the address it is loaded at in the process' address
+        space.
+        """
+        try:
+            with open(f"/proc/{self.pid}/maps") as fd:
+                maps_raw = fd.read()
+        except IOError:
+            maps_raw = self.execute("info proc map")
+
+        # Enumerate all of the libraries actually loaded right now.
+        maps = {}
+        for line in maps_raw.splitlines():
+            if '/' not in line: continue
+            path = line[line.index('/'):]
+            if not context.native and "/qemu-" in path: # Everything after the QEMU binary is only libs for QEMU that we don't want. Be careful though if this breaks something [04/02/25]
+                break
+            path = os.path.realpath(path)
+            if path not in maps:
+                maps[path]= []
+
+        for lib in maps:
+            path = os.path.realpath(lib)
+            for line in maps_raw.splitlines():
+                if line.endswith(path):
+                    if len(maps[lib]) == 0:
+                        address = line.split('-')[0]
+                        maps[lib].append(int(address, 16))
+                    address = line.split()[0].split('-')[-1]
+                    maps[lib].append(int(address, 16))
+            maps[lib] = [maps[lib][0], maps[lib][-1]] # Keep only start and end of the file in memory
+
+        return maps
+
+    def _set_range(self, file: EXE):
+        if not self.debugging:
+            file.address = 0
+            file.end_address = 0
+            return
+
+        for path, addresses in self.libs.items():
+            if file.name == path.split("/")[-1]:
+                address = addresses[0]
+                file.end_address = addresses[-1]
+                break
+        else:
+            log.warn(f"can not find {file.name} in the binaries loaded in gdb")
+            return
+
+        # NOTE: Can not trust libs to find the correct page [06/01/25]
+        # BUG Sometimes with arm we have the same binary at both 0x10000 and 0x20000, vmmap detects the second one, while we should use the first for the offsets... [20/01/25]
+        if context.arch in ["riscv32", "riscv64", "arm"]:
+            offset = 0
+            while file.data[offset:offset+8] == b"\x00" * 8:
+                offset += 8
+            if file.data[offset:offset+0x8] != self.read(address+offset, 8):
+                log.warn_once("QEMU messed up the elf base. Trying to find correct address...")
+                for address in self.maps:
+                    if file.data[offset:offset+0x8] == self.read(address+offset, 8):
+                        log.success(f"Found address {hex(address)}!")
+                        break
+                else:
+                    log.failure("can't find binary address. Consider disabling ASLR.")
+                    file.address = 0
+                    return
+        
+        file.address = address
+
+    @property
+    def ld(self):
+        if self._ld == -1:
+            return None
+        elif not self.debugging or (self.exe is not None and self.exe.statically_linked):
+            self._ld = 1
+            return None
+        elif self._ld is None:
+            for path, addresses in self.libs.items():
+                if "ld-" in path.split("/")[-1]:
+                    try:
+                        self._ld = EXE(path, address=addresses[0], end_address=addresses[-1])
+                    except Exception:
+                        if not self.local_debugging:
+                            log.warn(f"can not access {path} from remote server.")
+                    break
+            else:
+                log.warn_once("Can not find loader...")
+                self._ld = -1
+                return None
+        return self._ld
+
+    @ld.setter
+    def ld(self, elf_ld: ELF):
+        self._ld = elf_ld
+    
+    # _libc == None means that we don't know if we have a libc, but let's use _libc == -1 if we know we don't to stop searching for it
+    # What if the user doesn't care about the libc ? Is it fair to have so many warnings when we are accessing it internally ? Maybe we should silence them if the libc is not accessed by the user. [05/02/25]
+    @property
+    def libc(self):
+        if self._libc == -1:
+            return None
+        if self.exe is not None and self.exe.statically_linked:
+            self._libc = -1
+            return None
+        if self._libc is None:
+            if self.debugging:
+                for path, addresses in self.libs.items():
+                    if path.endswith("/libc.so.6"):
+                        try:
+                            self._libc = EXE(path, addresses[0], addresses[-1])
+                        except Exception as e:
+                            if not self.local_debugging:
+                                log.warn(f"You are debugging a remote process and we can not find {path}. Please set manually the libc if you need it.")
+                                self._libc = -1
+                                return None
+                            else:
+                                raise e
+                        break
+                else:
+                    log.warn("libc has not been loaded yet")
+                    return None
+            else:
+                try:
+                    self._libc = self.exe.libc # # Let pwntools find the libc. But unfortunately it fails most times with QEMU
+                    assert self._libc is not None    
+                except Exception as e:
+                    if not context.native:
+                        log.failure(f"can not extract libc from {context.arch} binary. If needed pass it")
+                        self._libc = -1
+                        return None
+                    else:
+                        raise e
+
+        if self.gdb is not None and self._libc.address == 0:
+            self._set_range(self._libc)
+        return self._libc
+
+    @libc.setter
+    def libc(self, elf_libc: ELF):
+        self._libc = elf_libc
+
+    # NOTE: Here for backward compatibility with 7.0 
+    @property
+    def base_libc(self):
+        if self.libc is None:
+            log.error("I don't see a libc ! Set dbg.libc = ELF(<path_to_libc>)")
+        return self.libc.address
+    @base_libc.setter
+    def base_libc(self, address):
+        if self.libc is None:
+            log.error("I don't see a libc ! Set dbg.libc = ELF(<path_to_libc>)")
+        self.libc.address = address
+    libc_address = base_libc
+
+    # If we don't have the binary we may consider iterating over the libraries to find a name that doesn't start with lib or ld- [05/02/25]
+    @property
+    def exe(self):
+        if self.gdb is not None and self._exe is not None and self._exe.address == 0:
+            self._set_range(self._exe)
+
+        return self._exe 
+
+    elf = exe
+
+    # NOTE: Here for backward compatibility with 7.0 
+    @property
+    def base_elf(self):
+        return self.exe.address
+    @base_elf.setter
+    def base_elf(self, address):
+        self.exe.address = address
+    elf_address = base_elf
+    exe_address = base_elf
+
+    # TODO handle multiple libraries
+    @property
+    def symbols(self):
+        if self.libc is not None:
+            # WARNING >= 3.9
+            #return self.exe.symbols | self.libc.symbols
+            return {**self.exe.symbols, **self.libc.symbols} # Should work in 3.8
+        else:
+            return self.exe.symbols
+
+   ########################## FORKS ##########################
     # TODO find a better name [28/02/23]
     # TODO make inferior and n the same parameter ? [04/03/23]
 
@@ -3260,7 +3324,7 @@ class Debugger:
         self.switch_inferior(old_inferior.num)
         if DEBUG: self.logger.debug("detaching from child [%d]", pid)
         self.execute(f"detach inferiors {n}")
-        child = Debugger(pid, binary=self.elf.path, script=script)
+        child = Debugger(pid, binary=self.exe, script=script, from_start=False, silent=self.silent)
         # needed even though by default they both inherit the module's priority since the user may change the priority of a specific debugger. [17/11/23]
         child.logger.setLevel(self.logger.level)
         # TODO copy all syscall handlers in the parent ? [31/07/23]
@@ -3629,7 +3693,7 @@ class Debugger:
             self.children[slave.pid] = slave
             slave._parent = self
 
-    ########################## PTRACE EMULATION ##########################
+   ########################## PTRACE EMULATION ##########################
     # If attach and interrupt stop the process I want continue and detach to let it run again, otherwise just set ptrace_can_continue [08/06/23]
     # Should we handle the interruptions in a special way ? Like adding a priority when attaching ? [08/06/23] (But how to handle stop due to a SIGNAL ?)
 
@@ -3784,7 +3848,7 @@ class Debugger:
             os.kill(slave.pid, signal.SIGSTOP)
         self.return_value = 0x0
 
-    ########################## REV UTILS ##########################
+   ########################## REV UTILS ##########################
 
     # TODO if address set, return backup of area overwritten instead of address
     # TODO parameter "overwritable = False", if set to True save the memory region so that you can send other shellcodes without calling mprotect (Maybe set a larger area that simple len(shellcode) then)
@@ -3830,7 +3894,7 @@ class Debugger:
         self.write(address, shellcode, inferior=inferior)
         return backup
 
-    ##########################  GEF shortcuts   #########################
+   ##########################  GEF shortcuts   #########################
     def context(self):
         """
         print memory infos as in gdb
@@ -3864,16 +3928,22 @@ class Debugger:
         """
         reference: int -> print the offset of each pointer from the reference pointer 
         """
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+            return
+
         if self._gef:
             print(self.execute(f"telescope {hex(address) if address is not None else ''} -l {length} {'-r ' + hex(reference) if reference is not None else ''}"))
+        elif self._pwndbg:
+            print(self.execute(f"telescope {hex(address) if address is not None else ''} {length}"))
         else:
-            print("GEF not detected")
+            print("telescope requires GEF or pwndbg")
 
-    ########################### Heresies ##########################
+   ########################### Heresies ##########################
     
     def __getattr__(self, name):
     #    #getattr is only called when an attribute is NOT found in the instance's dictionary
-        if name in ["p", "elf"]: #If __getattr__ is called with p it means I haven't finished initializing the class so I shouldn't call self._registers in __setattr__
+        if name in ["p", "_exe"]: #If __getattr__ is called with p it means I haven't finished initializing the class so I shouldn't call self._registers in __setattr__
             return False
         if name in self._special_registers + self._registers + self._minor_registers:
             if self.gdb is not None:
@@ -3881,13 +3951,13 @@ class Debugger:
                 if res is not None:
                     return res
                 try:
-                    # .bytes is not supported yet in ubuntu 22
-                    #res = unpack(self.gdb.parse_and_eval(f"${name}").bytes, "all")
-                    res = int(self.gdb.parse_and_eval(f"${name}")) % 2**context.bits
+                    reg = self.gdb.parse_and_eval(f"${name}")
                 except:
                     log.warn("error reading register. Retrying...")
-                    #res = unpack(self.gdb.parse_and_eval(f"${name}").bytes, "all")
-                    res = int(self.gdb.parse_and_eval(f"${name}")) % 2**context.bits
+                    reg = self.gdb.parse_and_eval(f"${name}")
+                # .bytes is not supported yet in ubuntu 22
+                #res = unpack(reg.bytes, "all")
+                res = int(reg) & ((1 << reg.type.sizeof * 8) - 1)
                 self._cached_registers[name] = res
             elif self.libdebug is not None:
                 # BUG libdebug can not parse lower registers [19/11/23]
@@ -3904,18 +3974,24 @@ class Debugger:
             # Get better errors when can't resolve properties
             self.__getattribute__(name)
 
+    # Consider checking if the value is an instance of ELF and in case look for the base address. This is useful when we need other libraries than libc. [11:45] 
     def __setattr__(self, name, value):
-        if self.elf and name in self._special_registers + self._registers + self._minor_registers:
+        if self._exe and name in self._special_registers + self._registers + self._minor_registers:
             if self.gdb is not None:
                 if name.lower() in ["eip", "rip", "pc"]:
                     # GDB has a bug when setting rip ! [09/06/23]
                     self.jump(value)
-                else:
-                    # a single reference to a gdb.Value of a register can be used to assign the value (no need for modulo). `self.gdb.parse_and_eval(f"${name}").assign(value)`. It would be nice to have only a list of references to all registers and use them, but while they can be used to assign values, you can not read values updated during the execution. [13/08/24]
+                else:  
+                    if DEBUG: self.logger.debug(" setting %s to %d", name, value)
+                    # NOTE: a single reference to a gdb.Value of a register can be used to assign the value (no need for modulo). `self.gdb.parse_and_eval(f"${name}").assign(value)`. It would be nice to have only a list of references to all registers and use them, but while they can be used to assign values, you can not read values updated during the execution. [13/08/24]
+                    # We keep the % to convert types such as pwn.Constant to ints 
+                    # We did test that it doesn't create problems with negative values on 32 bit registers in 64 bit programs
                     self.execute(f"set ${name.lower()} = {value % 2**context.bits}")
-                self._cached_registers[name] = value
+                # NOTE: Currently setting a register will cause a clear_cache [06/02/25]
+                # TODO: Change clear_cache to leave it when we are the one setting a register
+                # self._cached_registers[name] = value % 2**context.bits # I can not guarantee that this will be correct
             elif self.libdebug is not None:
-                setattr(self.libdebug, name, value % 2**context.bits)
+                setattr(self.libdebug, name, value % 2**context.bits) # I don't remember if libdebug accepts negative values
             else:
                 ...
         else:

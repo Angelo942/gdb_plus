@@ -16,13 +16,13 @@ GDB+ is a wrapper around gdb powered by pwntools. The goal is automate your inte
 
 ### System requirements
 
-First make sure to have `gdb` installed
+First make sure to have `gdb` and `gdbserver` installed.
 
 ```bash
 sudo apt install gdb gdbserver
 ```
 
-if you want to debug `ARM` and `RISCV` binaries you will also need `qemu` and `gdb-multiarch`
+If you want to debug `ARM` and `RISCV` binaries you will also need `qemu` and `gdb-multiarch`.
 
 ```bash
 sudo apt install gdb-multiarch qemu-user
@@ -266,13 +266,6 @@ canary = dbg.canary
 **Note**  
 While you can access the registers only when the process is at a stop, remember that you can read and write on the memory at any time
 
-Pwntools let you access the address where each library is loaded with `p.libs()[<path_to_library>]`
-We have two wrapper for the main ones:
-* `dbg.elf_address`
-* `dbg.libc_address`
-
-These are similar to dbg.elf.address and dbg.libc.address, but when set by an exploit, if the address is already known to gdb, will warn you if you got the wrong leak.
-
 We can also use capstone to know what is the next instruction that will be executed
 ```py
 print(dbg.next_inst.toString()) # "mov rax, r12"
@@ -425,3 +418,4 @@ If your binary requires system libraries, look at the (instructions)[https://doc
 * hide internal breakpoints also from gdb
 * implement strace
 * allow access to float registers or aliases
+* improve access to program libraries

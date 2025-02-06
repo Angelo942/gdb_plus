@@ -1,3 +1,8 @@
+GDB+ 7.1.1
+* Check libc.address and elf.address correctly aligned.
+* allow Debugger(silent=True) to hide pwntools default logs
+* Execute from_entry only if inside the loader
+
 GDB+ 7.1.0 QEMU support
 * Find libc used by process under QEMU
 * Warn users for missing qemu or gdb-multiarch
