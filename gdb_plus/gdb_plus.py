@@ -3113,10 +3113,7 @@ class Debugger:
                 offset += 8
             if file.data[offset:offset+0x8] != self.read(address+offset, 8):
                 log.warn_once("QEMU messed up the elf base. Trying to find correct address...")
-                limit = 2 if (self._gef or self._pwndbg) else 0
-                while i > limit:
-                    i -= 1
-                    address = int(data.splitlines()[i].strip().split()[0], 16)
+                for address in self.maps:
                     if file.data[offset:offset+0x8] == self.read(address+offset, 8):
                         log.success(f"Found address {hex(address)}!")
                         break
