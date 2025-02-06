@@ -1849,7 +1849,6 @@ class Debugger:
         for register in calling_convention:
             if len(args) == 0:
                 break
-            if DEBUG: self.logger.debug("%s setted to %s", register, args[0])
             setattr(self, register, args.pop(0))
             
         #Should I offset the stack pointer to preserve the stack frame ? No, right ?
@@ -3942,9 +3941,14 @@ class Debugger:
                 if name.lower() in ["eip", "rip", "pc"]:
                     # GDB has a bug when setting rip ! [09/06/23]
                     self.jump(value)
-                else:
-                    # a single reference to a gdb.Value of a register can be used to assign the value (no need for modulo). `self.gdb.parse_and_eval(f"${name}").assign(value)`. It would be nice to have only a list of references to all registers and use them, but while they can be used to assign values, you can not read values updated during the execution. [13/08/24]
-                    self.execute(f"set ${name.lower()} = {value}")
+                else:  
+                    if DEBUG: self.logger.debug(" setting %s to %d", name, value)
+                    # NOTE: a single reference to a gdb.Value of a register can be used to assign the value (no need for modulo). `self.gdb.parse_and_eval(f"${name}").assign(value)`. It would be nice to have only a list of references to all registers and use them, but while they can be used to assign values, you can not read values updated during the execution. [13/08/24]
+                    # We keep the % to convert types such as pwn.Constant to ints 
+                    # We did test that it doesn't create problems with negative values on 32 bit registers in 64 bit programs
+                    self.execute(f"set ${name.lower()} = {value % 2**context.bits}")
+                # NOTE: Currently setting a register will cause a clear_cache [06/02/25]
+                # TODO: Change clear_cache to leave it when we are the one setting a register
                 # self._cached_registers[name] = value % 2**context.bits # I can not guarantee that this will be correct
             elif self.libdebug is not None:
                 setattr(self.libdebug, name, value % 2**context.bits) # I don't remember if libdebug accepts negative values
