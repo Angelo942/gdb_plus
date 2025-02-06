@@ -251,7 +251,8 @@ class Debugger:
         # Prevent confusion between exe.symbols pointing to the plt and libc.symbols pointing to the function itself.
         if self.exe is not None and not self.exe.statically_linked:
             for symbol_name in self.exe.plt:
-                del self.exe.symbols[symbol_name]
+                if (symbol := self.exe.symbols.get(symbol_name, None)) is not None:
+                    del symbol
         
         if self.debugging:
 
