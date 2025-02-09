@@ -1875,6 +1875,7 @@ class Debugger:
         """
         if not self.debugging:
             log.warn_once(DEBUG_OFF)
+            return
 
         address = self._parse_address(function)
         if calling_convention is None: calling_convention = function_calling_convention[context.arch]
@@ -2767,6 +2768,7 @@ class Debugger:
     def canary(self):
         if not self.debugging:
             log.warn_once(DEBUG_OFF)
+            return 0
 
         elif self._canary is None:
             auxval = self._auxiliary_vector
