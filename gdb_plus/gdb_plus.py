@@ -171,9 +171,9 @@ class Debugger:
             if type(target) in [str, ELF]:
                 binary = EXE(target, checksec=False)
             elif type(target) is process:
-                binary = EXE(target.elf)
+                binary = EXE(target.elf, checksec=False)
             elif type(context.binary) is ELF:
-                binary = EXE(context.binary)
+                binary = EXE(context.binary, checksec=False)
         self._exe = binary
 
         # NOTE: What happens when the user want's to debug different processes in the same script ? This may break when using a mix of architectures. [05/02/25]
@@ -3191,7 +3191,7 @@ class Debugger:
             for path, addresses in self.libs.items():
                 if "ld-" in path.split("/")[-1]:
                     try:
-                        self._ld = EXE(path, address=addresses[0], end_address=addresses[-1])
+                        self._ld = EXE(path, address=addresses[0], end_address=addresses[-1], checksec=False)
                     except Exception:
                         if not self.local_debugging:
                             log.warn(f"can not access {path} from remote server.")
@@ -3220,7 +3220,7 @@ class Debugger:
                 for path, addresses in self.libs.items():
                     if path.endswith("/libc.so.6"):
                         try:
-                            self._libc = EXE(path, addresses[0], addresses[-1])
+                            self._libc = EXE(path, addresses[0], addresses[-1], checksec=False)
                         except Exception as e:
                             if not self.local_debugging:
                                 log.warn(f"You are debugging a remote process and we can not find {path}. Please set manually the libc if you need it.")
