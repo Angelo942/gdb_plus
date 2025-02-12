@@ -1237,7 +1237,7 @@ class Debugger:
             if not loop and address == self.instruction_pointer:
                 log.warn(f"I'm already at {self.reverse_lookup(address)}")
                 log.warn_once("Be careful that the default behaviour changed. Use loop=True if you want to continue anyway")
-                return
+                return done
                 
             self.b(address, temporary=True, user_defined=False, hw=hw)
             if DEBUG: self.logger.debug("continuing until %s", self.reverse_lookup(address))
