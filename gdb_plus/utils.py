@@ -61,10 +61,10 @@ class Arguments:
                 pointer = self.dbg.stack_pointer + (index + 2) * context.bytes
             else:
                 pointer = self.dbg.base_pointer + (index + 2) * context.bytes
-            return self.dbg.read(pointer, context.bytes)
+            return unpack(self.dbg.read(pointer, context.bytes))
         elif context.arch in ["arm", "aarch64"]:
             pointer = self.dbg.stack_pointer + index * context.bytes
-            return self.dbg.read(pointer, context.bytes)
+            return unpack(self.dbg.read(pointer, context.bytes))
 
 
     # How do we handle pushes ? Do I only write arguments when at the beginning of the function and give up on using this property to load arguments before a call ?
