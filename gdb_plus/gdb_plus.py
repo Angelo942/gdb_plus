@@ -220,7 +220,7 @@ class Debugger:
         elif args.REMOTE:
             pass
         elif context.noptrace:
-            self.p = process(target, env=env, aslr=aslr)
+            self.p = self.__silence(process, target if isinstance(target, list) else self.exe.path, env=env, aslr=aslr)
         elif from_start:
             try:
                 self.p = self.__silence(gdb.debug, target if isinstance(target, list) else self.exe.path, env=env, aslr=aslr, gdbscript=script, api=True)
