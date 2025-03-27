@@ -182,6 +182,15 @@ class Debugger_EXE(unittest.TestCase):
 				self.assertTrue(dbg.instruction_pointer not in dbg.exe)
 				self.assertTrue(dbg.instruction_pointer in dbg.libc)
 				self.assertTrue(dbg.instruction_pointer not in dbg.ld)
+	
+	#@unittest.skip
+	@timeout_decorator.timeout(QUICK)
+	def test_additional_libraries(self):
+		print("\ntest_additional_libraries: ", end="")
+		with context.local(binary="./deflation"):
+			with Debugger(context.binary, aslr=False, from_entry=True) as dbg:
+				dbg.access_library("libz")
+				self.assertEqual(dbg.libz.address, 0x7ffff7f77000)
 
 #@unittest.skip
 class Debugger_actions(unittest.TestCase):

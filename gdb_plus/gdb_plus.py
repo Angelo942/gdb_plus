@@ -152,6 +152,10 @@ class Debugger:
         self._event_breakpoints = {}
         self._syscall_return = False
 
+        # TODO Discover automatically libraries as they are loaded
+        # TODO Handle libc and ld the same way as other libraries
+        self._libraries = {} # Dictionary of libraries of the program. Key: name, Item: EXE object of the library
+
         if args.REMOTE or context.noptrace:
             self.debugging = False
             self.local_debugging = False
@@ -3180,6 +3184,36 @@ class Debugger:
         
         file.address = address
 
+    # How does this interact with remote debugging ? [26/03/25]
+    # Let's introduce local_path hoping it's enough and call it a day for now. [26/03/25]
+    def access_library(self, name, local_path=None):
+        """
+        Create the EXE object for a particular library
+        """
+        if name in self._libraries:
+            log.warn(f"{name} is already accessible as dbg.{name}")
+            return self._libraries[name]
+        
+        found_path = None
+        if local_path is None:
+            for path in self.libs:
+                library_name = path.split("/")[-1]
+                if name in library_name:
+                    assert found_path is None, f"Name is not specific enough! Could mean both {found_path} and {path}"
+                    found_path = path
+            if found_path is None:
+                print(f"{name} can not be find between:")
+                for path in self.libs:
+                    print(f" - {path}")
+                raise Exception(f"library {name} not found.")
+        else:
+            found_path = local_path
+        
+        library = EXE(found_path)
+        self._set_range(library)
+        self._libraries[name] = library
+        return library
+
     @property
     def ld(self):
         if self._ld == -1:
@@ -3965,6 +3999,8 @@ class Debugger:
                 # BUG libdebug can not parse lower registers [19/11/23]
                 res = getattr(self.libdebug, name)
             return res
+        elif name in self._libraries:
+            return self._libraries[name]
         elif self.p and hasattr(self.p, name):
             return getattr(self.p, name)
         # May want to also expose in case you want to access something like inferiors() 
