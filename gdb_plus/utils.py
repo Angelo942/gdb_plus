@@ -285,6 +285,47 @@ class MyLock:
             # What about if we want to interrupt a continue until ? [21/06/23]
             if self.counter == 0:
                 self.event.set()
+
+def enum_libs(file):
+    """
+    Find which libraries will be used by an executable without having to run it. 
+    """
+    if file.statically_linked:
+        return []
+
+    # Get the .dynamic section (holds dynamic table entries)
+    dynamic_section = file.get_section_by_name('.dynamic')
+    if dynamic_section is None:
+        print("No .dynamic section found. Is this a statically linked binary?")
+        exit(1)
+    data = dynamic_section.data()
+
+    # Get the .dynstr section (holds dynamic strings)
+    dynstr_section = file.get_section_by_name('.dynstr')
+    if dynstr_section is None:
+        print("No .dynstr section found!")
+        exit(1)
+    dynstr_data = dynstr_section.data()
+
+    libs = []
+
+    # Iterate over the dynamic table entries
+    for i in range(0, len(data), context.bytes * 2):
+        packed_tag, packed_val = data[i:i+context.bytes], data[i+context.bytes:i+context.bytes*2]
+        if len(packed_val) < context.bytes:
+            break
+        tag, val = unpack(packed_tag), unpack(packed_val)
+        # DT_NULL (tag 0) marks the end of the table
+        if tag == 0:
+            break
+        # DT_NEEDED (tag 1) entries indicate required libraries
+        if tag == 1:
+            # 'val' is the offset into the .dynstr section for the library name
+            end = dynstr_data.find(b'\x00', val)
+            lib_name = dynstr_data[val:end].decode('utf-8')
+            libs.append(lib_name)
+
+    return libs
         
 SIGNALS = {
        "SIGHUP":           1, 

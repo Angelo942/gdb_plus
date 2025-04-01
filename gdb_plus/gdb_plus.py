@@ -85,8 +85,9 @@ class Debugger:
 
         # Control access to the libraries
         self._exe = None
-        self._libc = None
         self._ld = None
+        self._symbols = None
+        self._libraries = {}
 
         self._canary = None
         self._args = None
@@ -152,10 +153,6 @@ class Debugger:
         self._event_breakpoints = {}
         self._syscall_return = False
 
-        # TODO Discover automatically libraries as they are loaded
-        # TODO Handle libc and ld the same way as other libraries
-        self._libraries = {} # Dictionary of libraries of the program. Key: name, Item: EXE object of the library
-
         if args.REMOTE or context.noptrace:
             self.debugging = False
             self.local_debugging = False
@@ -179,6 +176,13 @@ class Debugger:
             elif type(context.binary) is ELF:
                 binary = EXE(context.binary, checksec=False)
         self._exe = binary
+
+        # TODO test with programs using dlopen
+        if self._exe is not None and not self._exe.statically_linked:
+            libraries = enum_libs(self._exe)
+            for library_name in libraries:
+                name = library_name.split(".")[0]
+                self._libraries[name] = None
 
         # NOTE: What happens when the user want's to debug different processes in the same script ? This may break when using a mix of architectures. [05/02/25]
         # Ensure that a context is defined. Must be set before running gdb to make sure to use the emulator if needed.
@@ -288,7 +292,12 @@ class Debugger:
                 if not context.native:
                     log.warn_once("Debugging from entry may fail with qemu. In case set Debugger(..., from_entry = False)")
                 self.until(self.exe.entry)
-                # TODO: Think about loading here all the libraries instead of using fixed properties. Or set a callback in gdb directly [06/02/25]
+                # If the library is loaded by the program with dlopen access_library will fail.
+                for library in self._libraries:
+                    try:
+                        self.access_library(library)
+                    except Exception:
+                        pass
 
     def __handle_breakpoints(self, breakpoints):
         """
@@ -3190,7 +3199,7 @@ class Debugger:
         """
         Create the EXE object for a particular library
         """
-        if name in self._libraries:
+        if self._libraries.get(name, None) is not None:
             log.warn(f"{name} is already accessible as dbg.{name}")
             return self._libraries[name]
         
@@ -3202,17 +3211,28 @@ class Debugger:
                     assert found_path is None, f"Name is not specific enough! Could mean both {found_path} and {path}"
                     found_path = path
             if found_path is None:
-                print(f"{name} can not be find between:")
+                print(f"{name} can not be found between:")
                 for path in self.libs:
                     print(f" - {path}")
+                print("The library may not have been loaded yet")
                 raise Exception(f"library {name} not found.")
         else:
             found_path = local_path
         
-        library = EXE(found_path)
+        library = EXE(found_path, checksec=False)
         self._set_range(library)
         self._libraries[name] = library
         return library
+
+    @property
+    def libraries(self):
+        for name, file in self._libraries.items():
+            if file is None:
+                try:
+                    self.access_library(name)
+                except:
+                    pass
+        return self._libraries
 
     @property
     def ld(self):
@@ -3239,52 +3259,6 @@ class Debugger:
     @ld.setter
     def ld(self, elf_ld: ELF):
         self._ld = elf_ld
-    
-    # _libc == None means that we don't know if we have a libc, but let's use _libc == -1 if we know we don't to stop searching for it
-    # What if the user doesn't care about the libc ? Is it fair to have so many warnings when we are accessing it internally ? Maybe we should silence them if the libc is not accessed by the user. [05/02/25]
-    @property
-    def libc(self):
-        if self._libc == -1:
-            return None
-        if self.exe is not None and self.exe.statically_linked:
-            self._libc = -1
-            return None
-        if self._libc is None:
-            if self.debugging:
-                for path, addresses in self.libs.items():
-                    if path.endswith("/libc.so.6"):
-                        try:
-                            self._libc = EXE(path, addresses[0], addresses[-1], checksec=False)
-                        except Exception as e:
-                            if not self.local_debugging:
-                                log.warn(f"You are debugging a remote process and we can not find {path}. Please set manually the libc if you need it.")
-                                self._libc = -1
-                                return None
-                            else:
-                                raise e
-                        break
-                else:
-                    log.warn("libc has not been loaded yet")
-                    return None
-            else:
-                try:
-                    self._libc = self.exe.libc # # Let pwntools find the libc. But unfortunately it fails most times with QEMU
-                    assert self._libc is not None    
-                except Exception as e:
-                    if not context.native:
-                        log.failure(f"can not extract libc from {context.arch} binary. If needed pass it")
-                        self._libc = -1
-                        return None
-                    else:
-                        raise e
-
-        if self.gdb is not None and self._libc.address == 0:
-            self._set_range(self._libc)
-        return self._libc
-
-    @libc.setter
-    def libc(self, elf_libc: ELF):
-        self._libc = elf_libc
 
     # NOTE: Here for backward compatibility with 7.0 
     @property
@@ -4000,7 +3974,10 @@ class Debugger:
                 res = getattr(self.libdebug, name)
             return res
         elif name in self._libraries:
-            return self._libraries[name]
+            library = self._libraries[name] # libraries instead of _libraries would let the debugger load the library, but I want to raise errors and prevent logging the other libraries not found.
+            if library is None:
+                library = self.access_library(name)
+            return library
         elif self.p and hasattr(self.p, name):
             return getattr(self.p, name)
         # May want to also expose in case you want to access something like inferiors() 
