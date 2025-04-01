@@ -3,6 +3,7 @@ GDB+ 7.1.1
 * allow Debugger(silent=True) to hide pwntools default logs
 * Execute from_entry only if inside the loader
 * Make all libraries accessible the same way as the libc
+* dbg.symbols regroups all symbols across all libraries
 
 GDB+ 7.1.0 QEMU support
 * Find libc used by process under QEMU

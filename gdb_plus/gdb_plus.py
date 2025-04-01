@@ -3293,15 +3293,30 @@ class Debugger:
     elf_address = base_elf
     exe_address = base_elf
 
-    # TODO handle multiple libraries
+    # pwntools is a bit loose on what is included in the symbols. In particular all library functions used by the executable are also included with the address of the plt. We have to remove those.
+    # When merging all symbols we can not guarantee which plt and got we are referring to, so I prefer to simply discard those symbols.
+    # Previously I would delete those symbols from the ELF itself, but just to be clean let's make our own copy until we see that the performances are too bad.
+    # Once every library has been loaded we can just cache all symbols. I don't cache intermediate steps because I assume they are all loaded around the same time. Assumption not valid when using dlopen. 
     @property
     def symbols(self):
-        if self.libc is not None:
-            # WARNING >= 3.9
-            #return self.exe.symbols | self.libc.symbols
-            return {**self.exe.symbols, **self.libc.symbols} # Should work in 3.8
-        else:
-            return self.exe.symbols
+        symbols = {}
+        if self._symbols is None:
+            for name, address in self.exe.symbols.items():
+                if name not in self.exe.plt and name not in self.exe.got and name[:4] not in ["got.", "plt."]:
+                    symbols[name] = address
+            all_libraries_present = True
+            for _, library in self._libraries.items():
+                if library is not None:
+                    for name, address in library.symbols.items():
+                        if name not in library.plt and name not in library.got and name[:4] not in ["got.", "plt."]:
+                            symbols[name] = address
+                else:
+                    all_libraries_present = False
+            if all_libraries_present:
+                self._symbols = symbols
+            else:
+                return symbols
+        return self._symbols
 
    ########################## FORKS ##########################
     # TODO find a better name [28/02/23]
