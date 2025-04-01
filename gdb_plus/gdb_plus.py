@@ -3219,7 +3219,7 @@ class Debugger:
         if self._ld == -1:
             return None
         elif not self.debugging or (self.exe is not None and self.exe.statically_linked):
-            self._ld = 1
+            self._ld = -1
             return None
         elif self._ld is None:
             for path, addresses in self.libs.items():
