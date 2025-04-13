@@ -3193,9 +3193,12 @@ class Debugger:
             if file.data[offset:offset+0x8] != self.read(address+offset, 8):
                 log.warn_once("QEMU messed up the elf base. Trying to find correct address...")
                 for address in self.maps:
-                    if file.data[offset:offset+0x8] == self.read(address+offset, 8):
-                        log.success(f"Found address {hex(address)}!")
-                        break
+                    try:
+                        if file.data[offset:offset+0x8] == self.read(address+offset, 8):
+                            log.success(f"Found address {hex(address)}!")
+                            break
+                    except: # Some pages are not readable in QEMU...
+                        continue
                 else:
                     log.failure("can't find binary address. Consider disabling ASLR.")
                     file.address = 0
