@@ -3120,15 +3120,25 @@ class Debugger:
             pass
         return maps
 
-    # I copied it from pwntools to have access to it even if I attach directly to a pid
-    # TODO consider making a way to access all the libraries in the form of a dict of EXE [05/02/25]
+    # I copied it from pwntools to have access to it even if I attach directly to a pid 
+    # We still need pwntools when we are not debugging the process. It is needed for example to access the libc while pwning a remote challenge. 
+    # I assume that you don't care about the address when you are not debugging the program
+    # The main advantage now though is just the speed of not having to run a new process every time we call the function if we are already debugging it.
     @property
     def libs(self):
         """libs() -> dict
         Return a dictionary mapping the path of each shared library loaded
         by the process to the address it is loaded at in the process' address
         space.
+
+        The function still works when the program is not being debugged, but only for internal reasons. Please don't rely on it's output in those cases.
         """
+        if not self.debugging:
+            maps = self.exe.libs
+            for key in maps:
+                maps[key] = [maps[key], maps[key]]
+            return maps
+
         try:
             with open(f"/proc/{self.pid}/maps") as fd:
                 maps_raw = fd.read()
@@ -3195,6 +3205,8 @@ class Debugger:
 
     # How does this interact with remote debugging ? [26/03/25]
     # Let's introduce local_path hoping it's enough and call it a day for now. [26/03/25]
+    # We can not expect the user to load manually the libc, but must make it accessible when using REMOTE, so we have to find it by debugging the program anyway. [13/04/25]
+    # It would be nice to find the path to the library without having to debug the program. [13/04/25]
     def access_library(self, name, local_path=None):
         """
         Create the EXE object for a particular library
@@ -3203,6 +3215,11 @@ class Debugger:
             log.warn(f"{name} is already accessible as dbg.{name}")
             return self._libraries[name]
         
+        # # If we are working under QEMU and not debugging the process pwntools implementations of elf.libs may fail. If you see this problem we will need to run a debugger ourselves.
+        # if local_path is None and not self.debugging and not context.local: # May want to find specific architectures that cause trouble 
+        #     with Debugger(self.exe, from_entry=True) as dbg: # Reach entry to load all libraries
+        #         return dbg.access_library(name)    
+
         found_path = None
         if local_path is None:
             for path in self.libs:
