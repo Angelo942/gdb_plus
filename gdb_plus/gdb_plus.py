@@ -3219,6 +3219,7 @@ class Debugger:
             return self._libraries[name]
         
         # # If we are working under QEMU and not debugging the process pwntools implementations of elf.libs may fail. If you see this problem we will need to run a debugger ourselves.
+        # # The idea of using fake_terminal.py is terrible. Somehow it is 3 times slower, so it's not worth it just to prevent having a terminal popping up.
         # if local_path is None and not self.debugging and not context.local: # May want to find specific architectures that cause trouble 
         #     with Debugger(self.exe, from_entry=True) as dbg: # Reach entry to load all libraries
         #         return dbg.access_library(name)    
@@ -3317,6 +3318,7 @@ class Debugger:
     # When merging all symbols we can not guarantee which plt and got we are referring to, so I prefer to simply discard those symbols.
     # Previously I would delete those symbols from the ELF itself, but just to be clean let's make our own copy until we see that the performances are too bad.
     # Once every library has been loaded we can just cache all symbols. I don't cache intermediate steps because I assume they are all loaded around the same time. Assumption not valid when using dlopen. 
+    # What do we do about global variables such as stdin and stdout that may overshadow each other ? So far I'm taking them of to be sure.
     @property
     def symbols(self):
         symbols = {}
@@ -3328,7 +3330,16 @@ class Debugger:
             for _, library in self._libraries.items():
                 if library is not None:
                     for name, address in library.symbols.items():
-                        if name not in library.plt and name not in library.got and name[:4] not in ["got.", "plt."]:
+                        if name[:4] in ["got.", "plt."]:
+                            continue
+                        # The libc also has a got and plt, so we can't blindly remove all the symbols in those tables.
+                        # The criteria I use is that pwntools adds the symbols from the plt if they are not in the binary so they can be detected because the address of the symbol is the same as the plt.
+                        if name in library.plt and address == library.plt[name]:
+                            continue
+                        # We still remove the global variables to prevent name collisions between different files.
+                        if name in library.got and name not in library.plt:
+                            continue
+                        else:
                             symbols[name] = address
                 else:
                     all_libraries_present = False
@@ -3987,9 +3998,11 @@ class Debugger:
    ########################### Heresies ##########################
     
     def __getattr__(self, name):
-    #    #getattr is only called when an attribute is NOT found in the instance's dictionary
+        # getattr is only called when an attribute is NOT found in the instance's dictionary
+        # In the case of ./script.py REMOTE, if .remote() is not called we also return False because p hasn't been defined yet. Maybe that can be confusing ? [16/04/25]
         if name in ["p", "_exe"]: #If __getattr__ is called with p it means I haven't finished initializing the class so I shouldn't call self._registers in __setattr__
             return False
+        # Do we want to return a default value instead of crashing if we are not debugging a process ? Can make pwn scripts smoother, but could also hide bugs. [16/04/25]
         if name in self._special_registers + self._registers + self._minor_registers:
             if self.gdb is not None:
                 res = self._cached_registers.get(name, None)
