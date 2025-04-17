@@ -228,7 +228,7 @@ class EXE(ELF):
     @ELF.address.setter
     def address(self, address):
         if self.address != 0 and self.address != address:
-            log.warn("The base address of %s is not the one expected! Expected: %s. Received: %s", self.name, hex(self.base_libc), hex(address))
+            log.warn("The base address of %s is not the one expected! Expected: %s. Received: %s", self.name, hex(self.address), hex(address))
 
         if address % 0x1000:
             log.warn("The address %s is not a multiple of the page size 0x1000. Are you sure this is your base address ?", hex(address))
