@@ -59,7 +59,7 @@ class Debugger:
 
             binary (str, ELF, EXE, optional): Specify binary or path to the binary being debugged if the information is not included in the context or the target.
             env (dict, optional): Dictionary of environment variables to use instead of the on from the system. Default to None.
-            aslr (bool, optional): Enable ASLR. Default to True
+            aslr (bool, optional): Enable ASLR. Default to True.
             script (str, optional): Optional gdbscript to execute every time the debugger is launched. 
                 Use it only to setup things you always want present, but please don't run commands 
                 and never ever call continue form it.
@@ -159,6 +159,9 @@ class Debugger:
             self.children = defaultdict(lambda: self) # Is this necessary ? If it's just for split we could change that function to return self
         else:
             self.debugging = True
+        
+        if args.ASLR:
+            aslr = True
 
         # NOTE: If we know the binary we are sure that binary is defined and of type EXE. [23/01/25]
         # NOTE: Maybe it's good not to rely too much on ELF in case someone wants to use it for different kinds of executables. [08/07/24]
@@ -858,6 +861,7 @@ class Debugger:
             ...
 
     # TODO set option to kill child processes ? [05/08/24]
+    # TODO make sure it works when inside a read [16/04/25]
     def close(self):
         """
         Close process and debugger.
