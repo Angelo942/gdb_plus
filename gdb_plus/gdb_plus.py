@@ -3143,10 +3143,14 @@ class Debugger:
                 maps[key] = [maps[key], maps[key]]
             return maps
 
-        try:
-            with open(f"/proc/{self.pid}/maps") as fd:
-                maps_raw = fd.read()
-        except IOError:
+        if self.local_debugging and context.native:
+            # I don't think the try is needed anymore.
+            try:
+                with open(f"/proc/{self.pid}/maps") as fd:
+                    maps_raw = fd.read()
+            except IOError:
+                maps_raw = self.execute("info proc map")
+        else:
             maps_raw = self.execute("info proc map")
 
         # Enumerate all of the libraries actually loaded right now.
@@ -3165,7 +3169,11 @@ class Debugger:
             for line in maps_raw.splitlines():
                 if line.endswith(path):
                     if len(maps[lib]) == 0:
-                        address = line.split('-')[0]
+                        # /proc/pid/maps uses "start-end", while info proc map uses "start    end"
+                        for part in line.replace("-", " ").split(" "):
+                            if part:
+                                address = part
+                                break
                         maps[lib].append(int(address, 16))
                     address = line.split()[0].split('-')[-1]
                     maps[lib].append(int(address, 16))
