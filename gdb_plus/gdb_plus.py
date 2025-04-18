@@ -1436,6 +1436,7 @@ class Debugger:
 
     # Maybe should be the one returning if the process did stop due to the interrupt or not [13/06/23]
     # Breakpoint callbacks should be handled before the interruption to simplify the logic and I guess that if we reach a breakpoint and still send a SIGINT the signal will arrive later 
+    # how do I interrupt in case of remote debugging ?
     @lock_decorator
     def interrupt(self, strict=True):
         # claim priority asap
@@ -1458,7 +1459,10 @@ class Debugger:
         if DEBUG: self.logger.debug("interrupting [pid:%d]", self.pid)
         # SIGSTOP is too common in gdb
         if DEBUG: self.logger.debug("sending SIGINT")
-        os.kill(self.pid, signal.SIGINT)
+        if self.local_debugging:
+            os.kill(self.pid, signal.SIGINT)
+        else:
+            self.execute("interrupt")
         self._priority_wait(comment="interrupt", priority = priority)
         # For now it will be someone else problem the fact that we sent the SIGINT when we arrived on a breakpoint or something similar. [21/07/23] Think about how to catch it without breaking the other threads that are waiting
         # TODO check that we did indeed took over the control [17/10/23] (BUG interrupt while reading doesn't work)
