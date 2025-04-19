@@ -3147,7 +3147,7 @@ class Debugger:
                 maps[key] = [maps[key], maps[key]]
             return maps
 
-        if self.local_debugging and context.native:
+        if self.local_debugging:
             # I don't think the try is needed anymore.
             try:
                 with open(f"/proc/{self.pid}/maps") as fd:
