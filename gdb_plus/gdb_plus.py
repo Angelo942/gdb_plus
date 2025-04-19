@@ -914,6 +914,7 @@ class Debugger:
         return the state of all registers.
         """
         if not self.debugging:
+            log.warn_once(DEBUG_OFF)
             return
 
         values = []
@@ -926,6 +927,7 @@ class Debugger:
         Reset the state of all registers from a given backup
         """
         if not self.debugging:
+            log.warn_once(DEBUG_OFF)
             return
 
         for name, value in zip(self._special_registers + self._registers, backup):
@@ -938,6 +940,7 @@ class Debugger:
         Try to avoid it and instead split each process in a different Debugger.
         """
         if not self.debugging:
+            log.warn_once(DEBUG_OFF)
             return
 
         self._cached_registers = {}
@@ -961,6 +964,7 @@ class Debugger:
     @property
     def current_inferior(self):
         if not self.debugging:
+            log.warn_once(DEBUG_OFF)
             return
 
         if self.gdb is not None:
@@ -981,7 +985,8 @@ class Debugger:
         a, b = dbg.args[:2] # Not valid!
         """
         if not self.debugging:
-            return
+            log.warn_once(DEBUG_OFF)
+            return Fake_arguments()
 
         if self._args is None:
             self._args = Arguments(self)
@@ -997,7 +1002,8 @@ class Debugger:
         a, b = dbg.args[:2] # Not valid!
         """
         if not self.debugging:
-            return
+            log.warn_once(DEBUG_OFF)
+            return Fake_arguments()
 
         if self._sys_args is None:
             self._sys_args = Arguments_syscall(self)
@@ -2517,6 +2523,10 @@ class Debugger:
         return self.inferiors[inferior.num].read_memory(address, size).tobytes()
 
     def read(self, address: int, size: int, *, inferior = None, pid = None) -> bytes:
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+            return b"\x00" * size
+
         if inferior is not None:
             pid = inferior.pid
         if pid is None:
@@ -2555,6 +2565,10 @@ class Debugger:
 
     # Do we want to handle here that if address is none we allocate ourself a pointer ? [17/11/23]
     def write(self, address: int, byte_array: bytes, *, inferior = None, pid = None):
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+            return 
+            
         if inferior is not None:
             pid = inferior.pid
         if pid is None:
@@ -4020,7 +4034,10 @@ class Debugger:
             return False
         # Do we want to return a default value instead of crashing if we are not debugging a process ? Can make pwn scripts smoother, but could also hide bugs. [16/04/25]
         if name in self._special_registers + self._registers + self._minor_registers:
-            if self.gdb is not None:
+            if not self.debugging:
+                log.warn_once(DEBUG_OFF)
+                res = 0
+            elif self.gdb is not None:
                 res = self._cached_registers.get(name, None)
                 if res is not None:
                     return res
@@ -4056,7 +4073,10 @@ class Debugger:
     # Consider checking if the value is an instance of ELF and in case look for the base address. This is useful when we need other libraries than libc. [11:45] 
     def __setattr__(self, name, value):
         if self._exe and name in self._special_registers + self._registers + self._minor_registers:
-            if self.gdb is not None:
+            if not self.debugging:
+                log.warn_once(DEBUG_OFF)
+                return
+            elif self.gdb is not None:
                 if name.lower() in ["eip", "rip", "pc"]:
                     # GDB has a bug when setting rip ! [09/06/23]
                     self.jump(value)

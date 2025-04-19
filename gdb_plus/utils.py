@@ -34,6 +34,18 @@ class user_regs_struct:
     def __str__(self):
         return "\n".join([f"{register} = {hex(getattr(self, register))}" for register in self.registers])
 
+class Fake_arguments:
+    def __init__(self):
+        pass
+
+    def __getitem__(self, index: [int, slice]):
+        #assert type(index) is int, "I can't handle slices to access multiple arguments"
+        if type(index) is slice:
+            return [self[i] for i in range(0 if index.start is None else index.start, -1 if index.stop is None else index.stop, 1 if index.step is None else index.step)]
+        return 0
+
+    def __setitem__(self, index, value):
+        pass
 
 # Only works to read and set the arguments of the CURRENT function
 class Arguments:
