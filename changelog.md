@@ -2,6 +2,7 @@ GDB+ 7.2.0 Improve libraries support
 * Make all libraries accessible the same way as the libc
 * dbg.symbols regroups all symbols across all libraries
 * Allow argument `ASLR` to overrule Debugger(aslr=False)
+* Correct base address of libraries under QEMU
 
 GDB+ 7.1.1
 * Check assignemnts of libc.address and elf.address are correctly aligned.

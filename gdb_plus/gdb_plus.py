@@ -3217,12 +3217,12 @@ class Debugger:
         # NOTE: Can not trust libs to find the correct page [06/01/25]
         # BUG Sometimes with arm we have the same binary at both 0x10000 and 0x20000, vmmap detects the second one, while we should use the first for the offsets... [20/01/25]
         if context.arch in ["riscv32", "riscv64", "arm"]:
-            offset = 0
+            offset = file.size // 100 - (file.size // 100 % 8) # Random place to avoid the ELF part that could be common between multiple libraries
             while file.data[offset:offset+8] == b"\x00" * 8:
                 offset += 8
             if file.data[offset:offset+0x8] != self.read(address+offset, 8):
-                log.warn_once("QEMU messed up the elf base. Trying to find correct address...")
-                for address in self.maps:
+                log.warn_once(f"QEMU messed up the {file.name} base. Trying to find correct address...")
+                for address in list(self.maps) + list(map(lambda x: x - 0x10000, self.maps)): # I test both address and address - 0x1000 which is the typical error in QEMU
                     try:
                         if file.data[offset:offset+0x8] == self.read(address+offset, 8):
                             log.success(f"Found address {hex(address)}!")
@@ -3230,10 +3230,17 @@ class Debugger:
                     except: # Some pages are not readable in QEMU...
                         continue
                 else:
-                    log.failure("can't find binary address. Consider disabling ASLR.")
+                    log.failure(f"can't find {file.name} address. Consider disabling ASLR.")
                     file.address = 0
                     return
         
+            try:
+                if file.data[offset:offset+0x8] == self.read(address+offset-0x10000, 8):
+                    log.warn(f"[{file.name}] We are not sure between {hex(address)} and {hex(address - 0x10000)}. We are assuming the second one")
+                    address -= 0x10000
+            except:
+                pass
+
         file.address = address
 
     # How does this interact with remote debugging ? [26/03/25]
