@@ -2,7 +2,7 @@ import pwn
 import os
 from time import sleep
 from functools import partial
-from capstone import Cs, CS_ARCH_X86, CS_ARCH_ARM, CS_ARCH_RISCV, CS_MODE_32, CS_MODE_64, CS_MODE_ARM, CS_MODE_RISCV32, CS_MODE_RISCV64, CS_MODE_RISCVC
+from capstone import Cs, CS_ARCH_X86, CS_ARCH_ARM, CS_ARCH_RISCV, CS_MODE_32, CS_MODE_64, CS_MODE_ARM, CS_MODE_RISCV32, CS_MODE_RISCV64, CS_MODE_RISCVC, CS_ARCH_MIPS, CS_MODE_MIPS32, CS_MODE_BIG_ENDIAN
 # Migrate to capstone v6, but keep support for v5
 try:
     from capstone import CS_ARCH_AARCH64
@@ -1935,6 +1935,8 @@ class Debugger:
             self.x30 = return_address
         elif context.arch in ["riscv32", "riscv64"]:
             self.ra = return_address
+        elif context.arch == "mips":
+            self.ra = return_address
 
         self.jump(address)
         
@@ -2831,6 +2833,8 @@ class Debugger:
             return ["cpsr"]
         elif context.arch in ["riscv32", "riscv64"]:
             return []
+        elif context.arch == "mips":
+            return ["hi", "lo", "at"]
         else:
             raise Exception(f"what arch is {context.arch}")
 
@@ -2847,6 +2851,8 @@ class Debugger:
             return ["rax", "rbx", "rcx", "rdx", "rdi", "rsi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "rbp", "rsp", "rip"]
         elif context.arch in ["riscv32", "riscv64"]:
             return [f"t{i}" for i in range(7)] + [f"s{i}" for i in range(12)] + [f"a{i}" for i in range(8)] + ["ra", "gp", "tp", "sp"] + ["pc"]
+        elif context.arch == "mips":
+            return [f"v{i}" for i in range(2)] + [f"a{i}" for i in range(4)] + [f"t{i}" for i in range(10)] + [f"s{i}" for i in range(8)] + [f"k{i}" for i in range(2)] + ["ra", "gp", "fp", "sp"] + ["pc"]
         else:
             raise Exception(f"what arch is {context.arch}")
 
@@ -2885,6 +2891,8 @@ class Debugger:
             "r15d", "r15w", "r15l"]
         elif context.arch in ["riscv32", "riscv64"]:
             return []
+        elif context.arch == "mips":
+            return []
         else:
             raise Exception(f"what arch is {context.arch}")
 
@@ -2902,7 +2910,8 @@ class Debugger:
         elif context.arch in ["riscv32", "riscv64"]:
             inst.is_call = inst.mnemonic == "jal" # jal is the standard function call, but it could also use jalr, c.jalr to call dynamic code from a register or just extend the range... The problem is that jalr can also be a ret instruction...
             #if "jalr" # Check that it's not using zero register (return)
-
+        elif context.arch == "mips":
+            inst.is_call = inst.mnemonic in ["jal", "jalr", "bal"]
         else:
             ...
         return inst
@@ -2921,6 +2930,8 @@ class Debugger:
                 self._capstone = Cs(CS_ARCH_ARM, CS_MODE_ARM)
             elif context.arch in ["riscv32", "riscv64"]:
                 self._capstone = Cs(CS_ARCH_RISCV, CS_MODE_RISCVC) #CS_MODE_RISCV32 if context.bits == 32 else CS_MODE_RISCV64)
+            elif context.arch == "mips":
+                self._capstone = Cs(CS_ARCH_MIPS, CS_MODE_MIPS32 + CS_MODE_BIG_ENDIAN)
             else:
                 raise Exception(f"what arch is {context.arch}")
 
@@ -2940,6 +2951,8 @@ class Debugger:
             return self.r0 # Not always true
         elif context.arch in ["riscv32", "riscv64"]:
             return self.a0
+        elif context.arch == "mips":
+            return self.v0
         else:
             ...
 
@@ -2955,6 +2968,8 @@ class Debugger:
             self.r0 = value # Not always true
         elif context.arch in ["riscv32", "riscv64"]:
             self.a0 = value # Sometimes a1 is also used
+        elif context.arch == "mips":
+            self.v0 = value
         else:
             ...
 
@@ -2968,6 +2983,8 @@ class Debugger:
         elif context.arch in ["arm", "aarch64"]:
             return self.sp
         elif context.arch in ["riscv32", "riscv64"]:
+            return self.sp
+        elif context.arch == "mips":
             return self.sp
         else:
             ...
@@ -2983,6 +3000,8 @@ class Debugger:
         elif context.arch in ["arm", "aarch64"]:
             self.sp = value
         elif context.arch in ["riscv32", "riscv64"]:
+            self.sp = value
+        elif context.arch == "mips":
             self.sp = value
         else:
             ...
@@ -3001,6 +3020,8 @@ class Debugger:
                 self.sp = value
             elif context.arch in ["riscv32", "riscv64"]:
                 self.sp = value
+            elif context.arch == "mips":
+                self.sp = value
             else:
                 ...
 
@@ -3014,6 +3035,8 @@ class Debugger:
             return self.fp # TODO check
         elif context.arch in ["riscv32", "riscv64"]:
             ...
+        elif context.arch == "mips":
+            return self.fp
         else:
             ...
     
@@ -3027,6 +3050,8 @@ class Debugger:
             self.fp = value
         elif context.arch in ["riscv32", "riscv64"]:
             ...
+        elif context.arch == "mips":
+            self.fp = value
         else:
             ...
 
@@ -3049,6 +3074,8 @@ class Debugger:
                 ans = self.pc
             elif context.arch in ["riscv32", "riscv64"]:
                 ans = self.pc
+            elif context.arch == "mips":
+                ans = self.pc
             else:
                 ...
             
@@ -3067,6 +3094,8 @@ class Debugger:
         elif context.arch in ["arm", "aarch64"]:
             self.pc = value
         elif context.arch in ["riscv32", "riscv64"]:
+            self.pc = value
+        elif context.arch == "mips":
             self.pc = value
         else:
             ...
@@ -3092,6 +3121,8 @@ class Debugger:
         if context.arch == "aarch64":
             return self.x30
         elif context.arch in ["riscv32", "riscv64"]:
+            return self.ra
+        elif context.arch == "mips":
             return self.ra
 
         # Doesn't work with qemu [05/07/23]
@@ -3216,7 +3247,7 @@ class Debugger:
 
         # NOTE: Can not trust libs to find the correct page [06/01/25]
         # BUG Sometimes with arm we have the same binary at both 0x10000 and 0x20000, vmmap detects the second one, while we should use the first for the offsets... [20/01/25]
-        if context.arch in ["riscv32", "riscv64", "arm"]:
+        if context.arch in ["riscv32", "riscv64", "arm", "mips"]:
             offset = file.size // 100 - (file.size // 100 % 8) # Random place to avoid the ELF part that could be common between multiple libraries
             while file.data[offset:offset+8] == b"\x00" * 8:
                 offset += 8
@@ -3301,7 +3332,7 @@ class Debugger:
             return None
         elif self._ld is None:
             for path, addresses in self.libs.items():
-                if "ld-" in path.split("/")[-1]:
+                if path.split("/")[-1].startswith("ld"): # handle mips ld.so.1
                     try:
                         self._ld = EXE(path, address=addresses[0], end_address=addresses[-1], checksec=False)
                     except Exception:

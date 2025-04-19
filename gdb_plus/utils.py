@@ -398,6 +398,7 @@ shellcode_syscall = {
     "arm": b'\x00\x00\x00\xef',
     "riscv32": b's\x00\x00\x00',
     "riscv64": b's\x00\x00\x00',
+    "mips": b'\x0c\x00\x00\x00',
 }
 # First register is where to save the syscall num
 syscall_calling_convention = {
@@ -407,6 +408,7 @@ syscall_calling_convention = {
     "arm": ["r7"]+[f"r{i}"for i in range(7)],
     "riscv32": ["a7"]+[f"a{i}"for i in range(6)],
     "riscv64": ["a7"]+[f"a{i}"for i in range(6)],
+    "mips": ["v0"] + [f"a{i}" for i in range(4)],
 }
 function_calling_convention = {
     "amd64": ["rdi", "rsi", "rdx", "rcx", "r8", "r9"],
@@ -415,6 +417,7 @@ function_calling_convention = {
     "arm": [f"r{i}"for i in range(4)],
     "riscv32": [f"a{i}"for i in range(8)],
     "riscv64": [f"a{i}"for i in range(8)],
+    "mips": [f"a{i}" for i in range(4)],
 }
 return_instruction = {
     "amd64": b"\xc3",
@@ -423,6 +426,7 @@ return_instruction = {
     "arm": b'\x1e\xff\x2f\xe1',
     "riscv32": b'g\x80\x00\x00',
     "riscv64": b'g\x80\x00\x00',
+    "mips": b'\x08\x00\xe0\x03',
 }
 nop = {
     "amd64": b"\x90",
@@ -431,4 +435,5 @@ nop = {
     "arm": b'\x00\xf0\x20\xe3',
     "riscv32": b'\x13\x00\x00\x00',
     "riscv64": b'\x13\x00\x00\x00',
+    "mips": b'\x00\x00\x00\x00',
 }
