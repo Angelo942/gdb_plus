@@ -1,5 +1,6 @@
 GDB+ 7.3.0 **MIPS**
 * Introduce basic mips support
+* Support xmm registers
 
 GDB+ 7.2.0 Improve libraries support
 * Make all libraries accessible the same way as the libc

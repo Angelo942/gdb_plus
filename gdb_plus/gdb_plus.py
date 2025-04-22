@@ -2607,6 +2607,14 @@ class Debugger:
     def read_long(self, address: int) -> int:
         return self.read_longs(address, 1)[0]
 
+    def read_long_longs(self, address: int, n: int) -> list:
+        address = self._parse_address(address)
+        data = self.read(address, n*16)
+        return [unpack(data[i*16:(i+1)*16]) for i in range(n)]
+
+    def read_long_long(self, address: int) -> int:
+        return self.read_long_longs(address, 1)[0]
+
     def read_pointers(self, address: int, n: int) -> list:
         return self.read_longs(address, n) if context.bits == 64 else self.read_ints(address, n)
     
@@ -2650,6 +2658,18 @@ class Debugger:
 
     def write_long(self, address: int, value: int, *, heap = True) -> int:
         return self.write_longs(address, [value], heap = heap)
+
+    def write_long_longs(self, address: int, values: list, *, heap = True) -> int:
+        data = b"".join([pack(x, 128) for x in values])
+        if address is None:
+            address = self.alloc(len(data), heap=heap)
+        else:
+            address = self._parse_address(address)
+        self.write(address, data)
+        return address
+
+    def write_long_long(self, address: int, value: int, *, heap = True) -> int:
+        return self.write_long_longs(address, [value], heap = heap)
 
     def write_pointers(self, address: int, values: list, *, heap = True) -> list:
         return self.write_longs(address, values, heap = heap) if context.bits == 64 else self.write_ints(address, values, heap = heap)
@@ -2898,6 +2918,12 @@ class Debugger:
 
     # We should add a new type of registers for aliases so that the user can access them, but we don't duplicate them when doing backups. 
     # Would also be useful to access floating points [21/01/25]
+    @property
+    def _long_registers(self):
+        if context.arch == "amd64":
+            return [f"xmm{i}" for i in range(32)]
+        else:
+            return []
 
     @property
     def next_inst(self):
@@ -4092,6 +4118,14 @@ class Debugger:
                 # BUG libdebug can not parse lower registers [19/11/23]
                 res = getattr(self.libdebug, name)
             return res
+        elif name in self._long_registers:
+            if not self.debugging:
+                log.warn_once(DEBUG_OFF)
+                return 0
+            elif self.gdb is not None:
+                return int(self.execute(f"p ${name}.uint128").split(" = ")[-1])
+            else:
+                raise Exception("not supported")
         elif name in self._libraries:
             library = self._libraries[name] # libraries instead of _libraries would let the debugger load the library, but I want to raise errors and prevent logging the other libraries not found.
             if library is None:
@@ -4131,6 +4165,15 @@ class Debugger:
                 setattr(self.libdebug, name, value % 2**context.bits) # I don't remember if libdebug accepts negative values
             else:
                 ...
+        elif self._exe and name in self._long_registers:
+            if not self.debugging:
+                log.warn_once(DEBUG_OFF)
+                return
+            elif self.gdb is not None:
+                if DEBUG: self.logger.debug(" setting %s to %d", name, value)
+                self.execute(f"set {name}.uint128={value}")
+            else:
+                raise Exception("Not supported")
         else:
             super().__setattr__(name, value)
 
