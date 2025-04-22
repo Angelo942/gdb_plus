@@ -291,7 +291,9 @@ class Debugger:
                         log.warn(f"{timeout}s timeout isn't enough to reach the code... Retrying...")
             # This is here to have the libc always available [06/01/25]
             # self.instruction_pointer != self.exe.entry: May not have a loader and libc, but still be considered dynamically linked
-            elif from_entry and self.exe is not None and not self.exe.statically_linked and self.instruction_pointer in self.ld:
+            if from_entry and self.exe is not None and not self.exe.statically_linked and self.ld is None:
+                log.warn(f"{self.exe.name} is not marked as statically linked, but I can not find a loader!")
+            elif from_entry and self.exe is not None and self.ld is not None and self.instruction_pointer in self.ld:
                 if not context.native:
                     log.warn_once("Debugging from entry may fail with qemu. In case set Debugger(..., from_entry = False)")
                 self.until(self.exe.entry)
@@ -4129,7 +4131,11 @@ class Debugger:
         elif name in self._libraries:
             library = self._libraries[name] # libraries instead of _libraries would let the debugger load the library, but I want to raise errors and prevent logging the other libraries not found.
             if library is None:
-                library = self.access_library(name)
+                try:
+                    library = self.access_library(name)
+                except:
+                    # Allow the case where the library is not loaded yet
+                    library = None
             return library
         elif self.p and hasattr(self.p, name):
             return getattr(self.p, name)
