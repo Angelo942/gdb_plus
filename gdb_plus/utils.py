@@ -111,7 +111,7 @@ class Arguments_syscall:
 
     def __getitem__(self, index: [int, slice]):
         if type(index) is slice:
-            return [self[i] for i, el in zip(range(0 if index.start is None else index.start, -1 if index.stop is None else index.stop, 1 if index.step is None else index.step), value)]
+            return [self[i] for i in range(0 if index.start is None else index.start, -1 if index.stop is None else index.stop, 1 if index.step is None else index.step)]
         calling_convention = syscall_calling_convention[context.arch][1:] # The first one would have been the sys_num
         if index < len(calling_convention):
             register = calling_convention[index]
