@@ -403,6 +403,20 @@ If your binary requires system libraries, look at the (instructions)[https://doc
 * set context.arch == ... at the beginning of your script to make sure you are debugging your binary and not QEMU itself
 * pwndbg may be better than GEF when using qemu.
 
+# Potential Problems 
+## Ptrace
+Attaching to a process with GDB as a normal user may fail with:
+
+```sh
+ptrace: Operation not permitted
+```
+
+This is due to kernel hardening in linux. It can be disabled with:
+
+```sh
+echo 0 > /proc/sys/kernel/yama/ptrace_scope
+```
+
 # TODO
 * Distinguish between process running and dead
 * Improve ptrace emulation
