@@ -2593,26 +2593,37 @@ class Debugger:
 
     # Names should be singular or plurals ? I wanted singular for read and plural for write but it should be consistent [02/06/23]
     # I assume little endianness [02/06/23]
-    def read_ints(self, address: int, n: int) -> list:
+    def _read_numbers(self, address: int, n: int, byte_size: int) -> list:
         address = self._parse_address(address)
-        data = self.read(address, n*4)
-        return [u32(data[i*4:(i+1)*4]) for i in range(n)]
+        data = self.read(address, n*byte_size)
+        return [unpack(data[i*byte_size:(i+1)*byte_size], byte_size * 8) for i in range(n)]
+
+    def read_bytes(self, address: int, n: int) -> list:
+        return self._read_numbers(address, n, 1)
+
+    def read_byte(self, address: int) -> int:
+        return self.read_bytes(address, 1)[0]
+
+    def read_shorts(self, address: int, n: int) -> list:
+        return self._read_numbers(address, n, 2)
+    
+    def read_short(self, address: int) -> int:
+        return self.read_shorts(address, 1)[0]
+
+    def read_ints(self, address: int, n: int) -> list:
+        return self._read_numbers(address, n, 4)
     
     def read_int(self, address: int) -> int:
         return self.read_ints(address, 1)[0]
 
     def read_longs(self, address: int, n: int) -> list:
-        address = self._parse_address(address)
-        data = self.read(address, n*8)
-        return [u64(data[i*8:(i+1)*8]) for i in range(n)]
+        return self._read_numbers(address, n, 8)
 
     def read_long(self, address: int) -> int:
         return self.read_longs(address, 1)[0]
 
     def read_long_longs(self, address: int, n: int) -> list:
-        address = self._parse_address(address)
-        data = self.read(address, n*16)
-        return [unpack(data[i*16:(i+1)*16]) for i in range(n)]
+        return self._read_numbers(address, n, 16)
 
     def read_long_long(self, address: int) -> int:
         return self.read_long_longs(address, 1)[0]
@@ -2637,38 +2648,43 @@ class Debugger:
     def read_string(self, address: int) -> bytes:
         return self.read_strings(address, 1)[0]
 
-    def write_ints(self, address: int, values: list, *, heap = True) -> int:
-        data = b"".join([p32(x) for x in values])
+    #def write_bit(self, address: int, )
+
+    def _write_numbers(self, address: int, values: list, byte_size: int, *, heap = True) -> int:
+        data = b"".join([pack(x, byte_size * 8) for x in values])
         if address is None:
             address = self.alloc(len(data), heap=heap)
         else:
             address = self._parse_address(address)
         self.write(address, data)
-        return address
+        return address     
+
+    def write_bytes(self, address: int, values: list, *, heap = True) -> int:
+        return self._write_numbers(address, values, 1, heap = heap)
+
+    def write_byte(self, address: int, value: list, *, heap = True) -> int:
+        return self.write_bytes(address, [value])
+        
+    def write_shorts(self, address: int, values: list, *, heap = True) -> int:
+        return self._write_numbers(address, values, 2, heap = heap)
+
+    def write_shorts(self, address: int, value: list, *, heap = True) -> int:
+        return self.write_shorts(address, [value])
+
+    def write_ints(self, address: int, values: list, *, heap = True) -> int:
+        return self._write_numbers(address, values, 4, heap = heap)
 
     def write_int(self, address: int, value: int, *, heap = True) -> int:
         return self.write_ints(address, [value], heap = heap)
 
     def write_longs(self, address: int, values: list, *, heap = True) -> int:
-        data = b"".join([p64(x) for x in values])
-        if address is None:
-            address = self.alloc(len(data), heap=heap)
-        else:
-            address = self._parse_address(address)
-        self.write(address, data)
-        return address
+        return self._write_numbers(address, values, 8, heap = heap)
 
     def write_long(self, address: int, value: int, *, heap = True) -> int:
         return self.write_longs(address, [value], heap = heap)
 
     def write_long_longs(self, address: int, values: list, *, heap = True) -> int:
-        data = b"".join([pack(x, 128) for x in values])
-        if address is None:
-            address = self.alloc(len(data), heap=heap)
-        else:
-            address = self._parse_address(address)
-        self.write(address, data)
-        return address
+        return self._write_numbers(address, values, 16, heap = heap)
 
     def write_long_long(self, address: int, value: int, *, heap = True) -> int:
         return self.write_long_longs(address, [value], heap = heap)
