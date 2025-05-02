@@ -3439,7 +3439,7 @@ class Debugger:
                 if name not in self.exe.plt and name not in self.exe.got and name[:4] not in ["got.", "plt."]:
                     symbols[name] = address
             all_libraries_present = True
-            for _, library in self._libraries.items():
+            for _, library in self.libraries.items():
                 if library is not None:
                     for name, address in library.symbols.items():
                         if name[:4] in ["got.", "plt."]:
