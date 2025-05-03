@@ -3385,11 +3385,13 @@ class Debugger:
                     assert found_path is None, f"Name is not specific enough! Could mean both {found_path} and {path}"
                     found_path = path
             if found_path is None:
-                print(f"{name} can not be found between:")
-                for path in self.libs:
-                    print(f" - {path}")
-                print("The library may not have been loaded yet")
-                raise Exception(f"library {name} not found.")
+                msg = "\n".join([
+                    f"{name} cannot be found between:",
+                    *[f" - {path}" for path in self.libs],
+                    "The library may not have been loaded yet"
+                ])
+                log.warn(msg)
+                return None
         else:
             found_path = local_path
         
@@ -3402,10 +3404,8 @@ class Debugger:
     def libraries(self):
         for name, file in self._libraries.items():
             if file is None:
-                try:
+                with context.silent:
                     self.access_library(name)
-                except:
-                    pass
         return self._libraries
 
     @property
@@ -3538,7 +3538,8 @@ class Debugger:
         child.logger.setLevel(self.logger.level)
         # TODO copy all syscall handlers in the parent ? [31/07/23]
         # Copy libc since child can't take it from process [04/06/23]
-        child.libc = self.libc
+        # Maybe not needed anymore, but better do it with all libraries anyway [01/05/25]
+        child._libraries = self._libraries
         # Set parent for ptrace [08/06/23]
         child._parent = self
         if DEBUG: _logger.debug("new debugger opened")
@@ -4184,14 +4185,8 @@ class Debugger:
             else:
                 raise Exception("not supported")
         elif name in self._libraries:
-            library = self._libraries[name] # libraries instead of _libraries would let the debugger load the library, but I want to raise errors and prevent logging the other libraries not found.
-            if library is None:
-                try:
-                    library = self.access_library(name)
-                except:
-                    # Allow the case where the library is not loaded yet
-                    library = None
-            return library
+            with context.silent:
+                return self.libraries[name]
         elif self.p and hasattr(self.p, name):
             return getattr(self.p, name)
         # May want to also expose in case you want to access something like inferiors() 
@@ -4237,6 +4232,8 @@ class Debugger:
                 self.execute(f"set {name}.uint128={value}")
             else:
                 raise Exception("Not supported")
+        elif name in self._libraries:
+            self._libraries[name] = value # Allow to overwrite libraries (In case of remote path)
         else:
             super().__setattr__(name, value)
 
