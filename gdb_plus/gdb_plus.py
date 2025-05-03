@@ -105,6 +105,7 @@ class Debugger:
         self._context_params = context.copy() # NOTE: Be careful to check that you are using the right context arch for the binary before calling gdb
         self.silent = silent
 
+        self.p = None
         self.gdb = None
         self.libdebug = None
 
@@ -229,7 +230,7 @@ class Debugger:
             self.p = target
             self.gdb = self.__attach_gdb(target, gdbscript=script)
         elif args.REMOTE:
-            pass
+            self.p = None
         elif context.noptrace:
             self.p = self.__silence(process, target if isinstance(target, list) else self.exe.path, env=env, aslr=aslr)
         elif from_start:
@@ -265,6 +266,7 @@ class Debugger:
                 if (symbol := self.exe.symbols.get(symbol_name, None)) is not None:
                     del symbol
         
+        self._initialized = True
         if self.debugging:
 
             self.__setup_gdb()
@@ -4149,9 +4151,9 @@ class Debugger:
     def __getattr__(self, name):
         # getattr is only called when an attribute is NOT found in the instance's dictionary
         # In the case of ./script.py REMOTE, if .remote() is not called we also return False because p hasn't been defined yet. Maybe that can be confusing ? [16/04/25]
-        if name in ["p", "_exe"]: #If __getattr__ is called with p it means I haven't finished initializing the class so I shouldn't call self._registers in __setattr__
+        if name == "_initialized": #If __getattr__ is called with p it means I haven't finished initializing the class so I shouldn't call self._registers in __setattr__
             return False
-        # Do we want to return a default value instead of crashing if we are not debugging a process ? Can make pwn scripts smoother, but could also hide bugs. [16/04/25]
+
         if name in self._special_registers + self._registers + self._minor_registers:
             if not self.debugging:
                 log.warn_once(DEBUG_OFF)
@@ -4203,7 +4205,9 @@ class Debugger:
 
     # Consider checking if the value is an instance of ELF and in case look for the base address. This is useful when we need other libraries than libc. [11:45] 
     def __setattr__(self, name, value):
-        if self._exe and name in self._special_registers + self._registers + self._minor_registers:
+        if not self._initialized:
+            super().__setattr__(name, value)
+        elif name in self._special_registers + self._registers + self._minor_registers:
             if not self.debugging:
                 log.warn_once(DEBUG_OFF)
                 return
@@ -4224,7 +4228,7 @@ class Debugger:
                 setattr(self.libdebug, name, value % 2**context.bits) # I don't remember if libdebug accepts negative values
             else:
                 ...
-        elif self._exe and name in self._long_registers:
+        elif name in self._long_registers:
             if not self.debugging:
                 log.warn_once(DEBUG_OFF)
                 return
