@@ -117,7 +117,7 @@ class Debugger:
         self.r = None
         self._host = None
         self._port = 0
-        self._kill_threads = False
+        self._kill_threads = Event()
 
         # Ptrace_cont
         self._out_of_breakpoint = Event()
@@ -364,7 +364,7 @@ class Debugger:
     @lock_decorator
     def __stop_handler_gdb(self):
         """
-        Actions that the debugger performs every time the process is interrupted
+        Actions that the debugger performs every time the process is interrupted except when exiting
         Handle temporary breakpoints and callbacks
         """
         # Current inferior will change to the inferior who stopped last
@@ -544,17 +544,24 @@ class Debugger:
             self.__handle_breakpoints(breakpoints)
             #context.Thread(target=self.__handle_breakpoints, args=(breakpoints,)).start()
 
+    # 02/05/25
+    # By default this callback is executed every time a process exits, but that includes both our program finishing, and inferior finishing and us detaching from a process
+    # We want all of them to set gdb.stopped both to let know the debugger the process stopped, or to kill the loop thread when we detach
+    # You may not want to do it when you detach from a child process that is already at a stop though so we should disable the callback before splitting 
+    # If the main process exits then we should close the debugger
     def __exit_handler(self, event):
         # Should I kill all children ? []
         # Waiiiiit, this is called even if we detach from the child in split()! [25/07/23] 
         # Yes, fuck [14/08/23]
         # Okay, we disable this handler before splitting processes, but we could also check that the pid of the event.inferior is not the one of the main debugger (would require to warn user that he can't detach main process) [08/07/24]
-        if DEBUG: self.logger.debug("setting stop because process [%d] exited", event.inferior.pid)
-        self._myStopped.pid = self.current_inferior.pid
-        self.__clear_stop("exited")
-        self._myStopped.set()
-        self._closed.set()
-        self._ptrace_has_stopped.set()
+        if event.inferior.pid == self.pid:
+            if DEBUG: self.logger.debug("setting stop because process exited")
+            self.__set_stop(f"process exited", exit=True)
+            self._closed.set()
+            self._ptrace_has_stopped.set()
+        else:
+            if DEBUG: self.logger.debug("%s has been disconnected", event.inferior.pid)
+            self.__set_stop(f"inferior exited", exit=True)
 
     # TODO look into peda someday
     def __test_debugger(self):
@@ -585,7 +592,9 @@ class Debugger:
                 self.gdb.wait() # Move the wait here to se look only when needed [09/07/24]
                 if DEBUG: self.logger.debug("GDB stopped somewhere.")
                 # I ended up setting the stopped event when I close the debugger to stop the wait.
-                if self._kill_threads:
+                # The idea was that close() would cause a stop event, but this is not true if we stopped already, so we need to timeout the wait instead
+                if self._kill_threads.is_set() or self._closed.is_set():
+                    if DEBUG: self.logger.debug("exiting loop handler")
                     break
                 with context.local(**self._context_params):
                     context.Thread(target=self.__stop_handler_gdb, name=f"[{self.pid}] stop_handler_gdb").start()
@@ -613,7 +622,9 @@ class Debugger:
 
         # Manually set by split_child
         self.split = Queue()
+
         self._closed.clear()
+        self._kill_threads.clear()
 
         self._myStopped.pid = self.pid
         self.__test_debugger()
@@ -633,7 +644,7 @@ class Debugger:
         self.libdebug.handle_exit = self.__exit_handler
         
         self._closed.clear()
-
+        self._kill_threads.clear()
 
     # È già successo che wait ritorni -1 e crashi libdebug [08/05/23]
     # Legacy callbacks won't be transferred over... It's really time to get rid of them [21/05/23]
@@ -841,6 +852,8 @@ class Debugger:
             # They will be lost
             self._event_breakpoints = {}
             self._event_table = {}
+            self._kill_threads.set()
+            self.gdb.stopped.set()
 
             try:
                 if block:
@@ -869,9 +882,7 @@ class Debugger:
         Close process and debugger.
         Doesn't kill child processes.
         """
-        self._kill_threads = True
-        #if self.gdb is not None:
-        #    self.gdb.stopped.set() # Is this really needed ? Currently seems to break the interrupt inside detach by not detecting the interruption [05/01/25]
+
         self.detach()
         # Yah, I should do it here, but I close the terminal in detach, so let's handle it there.
         #except:
@@ -883,6 +894,11 @@ class Debugger:
             self.__silence(self.r.close)
         if self._backup_p is not None:
             self.__silence(self._backup_p.close)
+        
+        if self.gdb is not None:
+            # Is this really needed ? Currently seems to break the interrupt inside detach by not detecting the interruption [05/01/25]
+            # Yes it is needed to make sure that the loop_stop_handler exits [01/05/25] We can try to move it after detach though
+            self.gdb.stopped.set() 
 
     def __silence(self, fun, *args, **kwargs):
         if self.silent:
@@ -1361,17 +1377,19 @@ class Debugger:
     #        log.debug(f"[{pid}] stopped has been hidden_cleared by {name}")
     #        self._myStopped.hidden_clear()
 
-    def __set_stop(self, comment = ""):
+    def __set_stop(self, comment = "", exit=False):
         if self.gdb is not None:
             pid = self.current_inferior.pid
         elif self.libdebug is not None:
             pid = self.pid # Handle thread
         else:
-            ...        
-        if comment:
-            if DEBUG: self.logger.debug("[%d] setting stopped in 0x%x for %s", pid, self.instruction_pointer, comment) # no reverse lookup ? [13/08/23]
-        else:
-            if DEBUG: self.logger.debug("[%d] setting stopped in 0x%x", pid, self.instruction_pointer)
+            ...     
+        # We need a special case because when exiting self.instruction_pointer is not available  
+        if not exit:
+            if comment:
+                if DEBUG: self.logger.debug("[%d] setting stopped in 0x%x for %s", pid, self.instruction_pointer, comment) # no reverse lookup ? [13/08/23]
+            else:
+                if DEBUG: self.logger.debug("[%d] setting stopped in 0x%x", pid, self.instruction_pointer)
         # handle case where no action are performed after the end of a callback with high priority 
         self._myStopped.pid = pid
         self.__clear_stop(comment)
