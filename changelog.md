@@ -1,5 +1,15 @@
+GDB+ 7.3.0 **MIPS**
+* Introduce basic mips support
+* Support xmm registers
+
+GDB+ 7.2.0 Improve libraries support
+* Make all libraries accessible the same way as the libc
+* dbg.symbols regroups all symbols across all libraries
+* Allow argument `ASLR` to overrule Debugger(aslr=False)
+* Correct base address of libraries under QEMU
+
 GDB+ 7.1.1
-* Check libc.address and elf.address correctly aligned.
+* Check assignemnts of libc.address and elf.address are correctly aligned.
 * allow Debugger(silent=True) to hide pwntools default logs
 * Execute from_entry only if inside the loader
 

@@ -34,6 +34,18 @@ class user_regs_struct:
     def __str__(self):
         return "\n".join([f"{register} = {hex(getattr(self, register))}" for register in self.registers])
 
+class Fake_arguments:
+    def __init__(self):
+        pass
+
+    def __getitem__(self, index: [int, slice]):
+        #assert type(index) is int, "I can't handle slices to access multiple arguments"
+        if type(index) is slice:
+            return [self[i] for i in range(0 if index.start is None else index.start, -1 if index.stop is None else index.stop, 1 if index.step is None else index.step)]
+        return 0
+
+    def __setitem__(self, index, value):
+        pass
 
 # Only works to read and set the arguments of the CURRENT function
 class Arguments:
@@ -61,10 +73,10 @@ class Arguments:
                 pointer = self.dbg.stack_pointer + (index + 2) * context.bytes
             else:
                 pointer = self.dbg.base_pointer + (index + 2) * context.bytes
-            return self.dbg.read(pointer, context.bytes)
+            return unpack(self.dbg.read(pointer, context.bytes))
         elif context.arch in ["arm", "aarch64"]:
             pointer = self.dbg.stack_pointer + index * context.bytes
-            return self.dbg.read(pointer, context.bytes)
+            return unpack(self.dbg.read(pointer, context.bytes))
 
 
     # How do we handle pushes ? Do I only write arguments when at the beginning of the function and give up on using this property to load arguments before a call ?
@@ -99,7 +111,7 @@ class Arguments_syscall:
 
     def __getitem__(self, index: [int, slice]):
         if type(index) is slice:
-            return [self[i] for i, el in zip(range(0 if index.start is None else index.start, -1 if index.stop is None else index.stop, 1 if index.step is None else index.step), value)]
+            return [self[i] for i in range(0 if index.start is None else index.start, -1 if index.stop is None else index.stop, 1 if index.step is None else index.step)]
         calling_convention = syscall_calling_convention[context.arch][1:] # The first one would have been the sys_num
         if index < len(calling_convention):
             register = calling_convention[index]
@@ -228,7 +240,7 @@ class EXE(ELF):
     @ELF.address.setter
     def address(self, address):
         if self.address != 0 and self.address != address:
-            log.warn("The base address of %s is not the one expected! Expected: %s. Received: %s", self.name, hex(self.base_libc), hex(address))
+            log.warn("The base address of %s is not the one expected! Expected: %s. Received: %s", self.name, hex(self.address), hex(address))
 
         if address % 0x1000:
             log.warn("The address %s is not a multiple of the page size 0x1000. Are you sure this is your base address ?", hex(address))
@@ -285,6 +297,47 @@ class MyLock:
             # What about if we want to interrupt a continue until ? [21/06/23]
             if self.counter == 0:
                 self.event.set()
+
+def enum_libs(file):
+    """
+    Find which libraries will be used by an executable without having to run it. 
+    """
+    if file.statically_linked:
+        return []
+
+    # Get the .dynamic section (holds dynamic table entries)
+    dynamic_section = file.get_section_by_name('.dynamic')
+    if dynamic_section is None:
+        print("No .dynamic section found. Is this a statically linked binary?")
+        exit(1)
+    data = dynamic_section.data()
+
+    # Get the .dynstr section (holds dynamic strings)
+    dynstr_section = file.get_section_by_name('.dynstr')
+    if dynstr_section is None:
+        print("No .dynstr section found!")
+        exit(1)
+    dynstr_data = dynstr_section.data()
+
+    libs = []
+
+    # Iterate over the dynamic table entries
+    for i in range(0, len(data), context.bytes * 2):
+        packed_tag, packed_val = data[i:i+context.bytes], data[i+context.bytes:i+context.bytes*2]
+        if len(packed_val) < context.bytes:
+            break
+        tag, val = unpack(packed_tag), unpack(packed_val)
+        # DT_NULL (tag 0) marks the end of the table
+        if tag == 0:
+            break
+        # DT_NEEDED (tag 1) entries indicate required libraries
+        if tag == 1:
+            # 'val' is the offset into the .dynstr section for the library name
+            end = dynstr_data.find(b'\x00', val)
+            lib_name = dynstr_data[val:end].decode('utf-8')
+            libs.append(lib_name)
+
+    return libs
         
 SIGNALS = {
        "SIGHUP":           1, 
@@ -345,6 +398,7 @@ shellcode_syscall = {
     "arm": b'\x00\x00\x00\xef',
     "riscv32": b's\x00\x00\x00',
     "riscv64": b's\x00\x00\x00',
+    "mips": b'\x0c\x00\x00\x00',
 }
 # First register is where to save the syscall num
 syscall_calling_convention = {
@@ -354,6 +408,7 @@ syscall_calling_convention = {
     "arm": ["r7"]+[f"r{i}"for i in range(7)],
     "riscv32": ["a7"]+[f"a{i}"for i in range(6)],
     "riscv64": ["a7"]+[f"a{i}"for i in range(6)],
+    "mips": ["v0"] + [f"a{i}" for i in range(4)],
 }
 function_calling_convention = {
     "amd64": ["rdi", "rsi", "rdx", "rcx", "r8", "r9"],
@@ -362,6 +417,7 @@ function_calling_convention = {
     "arm": [f"r{i}"for i in range(4)],
     "riscv32": [f"a{i}"for i in range(8)],
     "riscv64": [f"a{i}"for i in range(8)],
+    "mips": [f"a{i}" for i in range(4)],
 }
 return_instruction = {
     "amd64": b"\xc3",
@@ -370,6 +426,7 @@ return_instruction = {
     "arm": b'\x1e\xff\x2f\xe1',
     "riscv32": b'g\x80\x00\x00',
     "riscv64": b'g\x80\x00\x00',
+    "mips": b'\x08\x00\xe0\x03',
 }
 nop = {
     "amd64": b"\x90",
@@ -378,4 +435,5 @@ nop = {
     "arm": b'\x00\xf0\x20\xe3',
     "riscv32": b'\x13\x00\x00\x00',
     "riscv64": b'\x13\x00\x00\x00',
+    "mips": b'\x00\x00\x00\x00',
 }

@@ -418,4 +418,4 @@ If your binary requires system libraries, look at the (instructions)[https://doc
 * hide internal breakpoints also from gdb
 * implement strace
 * allow access to float registers or aliases
-* improve access to program libraries
+* write a decent documentation
