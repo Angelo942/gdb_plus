@@ -1032,11 +1032,19 @@ class Debugger:
     # Taken from GEF to handle slave interruption
     @property
     def _stop_reason(self) -> str:
+        # We need a loop because we noticed if you continue manually from gdb and then call interrupt, the interrupt will continue before the process really stopped. 
+        # If it's a general problem with gdb is better to keep it here, if it comes out only in interrupt let's move it to there
+        # Right now I don't like that if the program is running, info program fails and we get NOT RUNNING instead. It's confusing.
+        counter = 0
+        while counter < 5:
+            if self.running:
+                sleep(0.1)
+            counter += 1
         if self.gdb is not None:
             try:
-                res = self.gdb.execute("info program", to_string=True).splitlines()
+                res = self.execute("info program").splitlines()
             except:
-                return "NOT RUNNING"
+                return "RUNNING"
             if not res:
                 return "NOT RUNNING"
 
@@ -1147,9 +1155,12 @@ class Debugger:
             priority = self._raise_priority("avoid race condition in continue")
             self.step(force=True)
             if self._stop_reason != "SINGLE STEP":
-                if "BREAKPOINT" not in self._stop_reason:
+                if "BREAKPOINT" in self._stop_reason:
+                    if DEBUG: self.logger.debug("step in continue already reached the breakpoint")
+                elif self._stop_reason == "SIGINT":
+                    if DEBUG: self.logger.debug("syscall interrupted by user") # step doesn't return if we are on a read, so calling interrupt() would leave us here with a SIGINT
+                else:
                     log.warn(f"unknown interruption! {self._stop_reason}")
-                if DEBUG: self.logger.debug("step in continue already reached the breakpoint")
                 self._lower_priority("avoid race condition in continue")
                 done.set()
                 return
@@ -1324,12 +1335,16 @@ class Debugger:
         self._myStopped.priority_wait(comment, priority)
             
     # problems when I haven't executed anything
+    # Inside a callback checking running doesn't make sense since in that instant the program is interrupted, but we define it as running for interrupt() to still stop the program when we finish the callback. 
     @property
     def running(self):
         with context.silent:
             if self.gdb is not None:
                 try:
-                    getattr(self, self._registers[0])
+                    # We need a command that succeeds when the process exits, but fails when inside a callback [02/05/25]
+                    # accessing a register fails after we exit
+                    # info ... succeeds even inside a callback
+                    self.execute("info program")
                     return False
                 except:
                     return True
@@ -1464,7 +1479,10 @@ class Debugger:
     # Breakpoint callbacks should be handled before the interruption to simplify the logic and I guess that if we reach a breakpoint and still send a SIGINT the signal will arrive later 
     # how do I interrupt in case of remote debugging ?
     @lock_decorator
-    def interrupt(self, strict=True):
+    def interrupt(self, *, strict=False):
+        """
+        In a callback it makes no sense to check if the process is running since for that instant it will be on halt. We therefore use strict to force the interrupt call.
+        """
         # claim priority asap
         priority = self._raise_priority("interrupt")
         
@@ -1474,7 +1492,7 @@ class Debugger:
             log.warn_once(DEBUG_OFF)
             return
 
-        if not self.running:
+        if not strict and not self.running:
             self._lower_priority("release interrupt")
             # Must go after the lower_priority() to let other threads see it [19/06/23]
             # Do I really need a set stop ?? [26/07/23]
@@ -1492,6 +1510,8 @@ class Debugger:
         self._priority_wait(comment="interrupt", priority = priority)
         # For now it will be someone else problem the fact that we sent the SIGINT when we arrived on a breakpoint or something similar. [21/07/23] Think about how to catch it without breaking the other threads that are waiting
         # TODO check that we did indeed took over the control [17/10/23] (BUG interrupt while reading doesn't work)
+        
+        res = INTERRUPT_SENT
         if self._stop_reason != "SIGINT":
             # Catch del SIGINT
             if DEBUG: self.logger.debug("We hit a breakpoint before the SIGINT... I will continue stepping to catch them.")
@@ -1512,9 +1532,10 @@ class Debugger:
                 log.warn("What the fuck happened with the SIGINT ? I never found it...")
             for bp, callback in zip(self.breakpoints[address], saved_callbacks):
                 bp.callback = callback
-            return INTERRUPT_SENT | INTERRUPT_HIT_BREAKPOINT
-
-        return INTERRUPT_SENT
+            res |= INTERRUPT_HIT_BREAKPOINT
+        # Inform eventual continue that we interrupted the program
+        self.__set_stop("interrupted")
+        return res
 
     manual = interrupt
 
@@ -3568,8 +3589,6 @@ class Debugger:
             self.gdb.events.new_inferior.disconnect(self.fork_handler)
                 
         else:
-            if interrupt:
-                log.warn_once("currently split_on_fork can not interrupt the parent on the precise instruction where it forks. Use a breakpoint if you need precision")
             self.execute("set detach-on-fork off")
 
             # The interrupt may give me problems with continue_until
@@ -3580,7 +3599,7 @@ class Debugger:
                 def split(inferior):
                     # claim priority asap
                     self._raise_priority("split")
-                    stopped = self.interrupt()
+                    stopped = self.interrupt(strict=True)
                     log.info(f"splitting child: {inferior.pid}")
                     # Am I the reason why the process stopped ?
                     self.children[pid] = self._split_child(inferior=inferior, script=script)
