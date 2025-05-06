@@ -2,7 +2,7 @@ import pwn
 import os
 from time import sleep
 from functools import partial
-from capstone import Cs, CS_ARCH_X86, CS_ARCH_ARM, CS_ARCH_RISCV, CS_MODE_32, CS_MODE_64, CS_MODE_ARM, CS_MODE_RISCV32, CS_MODE_RISCV64, CS_MODE_RISCVC, CS_ARCH_MIPS, CS_MODE_MIPS32, CS_MODE_BIG_ENDIAN
+from capstone import Cs, CS_ARCH_X86, CS_ARCH_ARM, CS_ARCH_RISCV, CS_MODE_32, CS_MODE_64, CS_MODE_ARM, CS_MODE_RISCV32, CS_MODE_RISCV64, CS_MODE_RISCVC, CS_ARCH_MIPS, CS_MODE_MIPS32, CS_MODE_MIPS64, CS_MODE_BIG_ENDIAN
 # Migrate to capstone v6, but keep support for v5
 try:
     from capstone import CS_ARCH_AARCH64
@@ -251,7 +251,7 @@ class Debugger:
             self.gdb = self.__attach_gdb(self.p, gdbscript=script)
 
         if type(self.p) is process:
-            self.pid = self.p.pid
+            self.pid = self.p.pid # Under qemu this is the pid of qemu, but it is good enough to read /proc/pid/maps
 
         if self.pid is not None:
             self.logger = logging.getLogger(f"Debugger-{self.pid}")
@@ -1978,7 +1978,7 @@ class Debugger:
             self.x30 = return_address
         elif context.arch in ["riscv32", "riscv64"]:
             self.ra = return_address
-        elif context.arch == "mips":
+        elif context.arch in ["mips", "mips64"]:
             self.ra = return_address
 
         self.jump(address)
@@ -2912,7 +2912,7 @@ class Debugger:
             return ["cpsr"]
         elif context.arch in ["riscv32", "riscv64"]:
             return []
-        elif context.arch == "mips":
+        elif context.arch in ["mips", "mips64"]:
             return ["hi", "lo", "at"]
         else:
             raise Exception(f"what arch is {context.arch}")
@@ -2930,7 +2930,7 @@ class Debugger:
             return ["rax", "rbx", "rcx", "rdx", "rdi", "rsi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15", "rbp", "rsp", "rip"]
         elif context.arch in ["riscv32", "riscv64"]:
             return [f"t{i}" for i in range(7)] + [f"s{i}" for i in range(12)] + [f"a{i}" for i in range(8)] + ["ra", "gp", "tp", "sp"] + ["pc"]
-        elif context.arch == "mips":
+        elif context.arch in ["mips", "mips64"]:
             return [f"v{i}" for i in range(2)] + [f"a{i}" for i in range(4)] + [f"t{i}" for i in range(10)] + [f"s{i}" for i in range(8)] + [f"k{i}" for i in range(2)] + ["ra", "gp", "fp", "sp"] + ["pc"]
         else:
             raise Exception(f"what arch is {context.arch}")
@@ -2970,7 +2970,7 @@ class Debugger:
             "r15d", "r15w", "r15l"]
         elif context.arch in ["riscv32", "riscv64"]:
             return []
-        elif context.arch == "mips":
+        elif context.arch in ["mips", "mips64"]:
             return []
         else:
             raise Exception(f"what arch is {context.arch}")
@@ -2995,7 +2995,7 @@ class Debugger:
         elif context.arch in ["riscv32", "riscv64"]:
             inst.is_call = inst.mnemonic == "jal" # jal is the standard function call, but it could also use jalr, c.jalr to call dynamic code from a register or just extend the range... The problem is that jalr can also be a ret instruction...
             #if "jalr" # Check that it's not using zero register (return)
-        elif context.arch == "mips":
+        elif context.arch in ["mips", "mips64"]:
             inst.is_call = inst.mnemonic in ["jal", "jalr", "bal"]
         else:
             ...
@@ -3017,6 +3017,8 @@ class Debugger:
                 self._capstone = Cs(CS_ARCH_RISCV, CS_MODE_RISCVC) #CS_MODE_RISCV32 if context.bits == 32 else CS_MODE_RISCV64)
             elif context.arch == "mips":
                 self._capstone = Cs(CS_ARCH_MIPS, CS_MODE_MIPS32 + CS_MODE_BIG_ENDIAN)
+            elif context.arch == "mips64":
+                self._capstone = Cs(CS_ARCH_MIPS, CS_MODE_MIPS64 + CS_MODE_BIG_ENDIAN)
             else:
                 raise Exception(f"what arch is {context.arch}")
 
@@ -3036,7 +3038,7 @@ class Debugger:
             return self.r0 # Not always true
         elif context.arch in ["riscv32", "riscv64"]:
             return self.a0
-        elif context.arch == "mips":
+        elif context.arch in ["mips", "mips64"]:
             return self.v0
         else:
             ...
@@ -3053,7 +3055,7 @@ class Debugger:
             self.r0 = value # Not always true
         elif context.arch in ["riscv32", "riscv64"]:
             self.a0 = value # Sometimes a1 is also used
-        elif context.arch == "mips":
+        elif context.arch in ["mips", "mips64"]:
             self.v0 = value
         else:
             ...
@@ -3069,7 +3071,7 @@ class Debugger:
             return self.sp
         elif context.arch in ["riscv32", "riscv64"]:
             return self.sp
-        elif context.arch == "mips":
+        elif context.arch in ["mips", "mips64"]:
             return self.sp
         else:
             ...
@@ -3086,7 +3088,7 @@ class Debugger:
             self.sp = value
         elif context.arch in ["riscv32", "riscv64"]:
             self.sp = value
-        elif context.arch == "mips":
+        elif context.arch in ["mips", "mips64"]:
             self.sp = value
         else:
             ...
@@ -3105,7 +3107,7 @@ class Debugger:
                 self.sp = value
             elif context.arch in ["riscv32", "riscv64"]:
                 self.sp = value
-            elif context.arch == "mips":
+            elif context.arch in ["mips", "mips64"]:
                 self.sp = value
             else:
                 ...
@@ -3120,7 +3122,7 @@ class Debugger:
             return self.fp # TODO check
         elif context.arch in ["riscv32", "riscv64"]:
             ...
-        elif context.arch == "mips":
+        elif context.arch in ["mips", "mips64"]:
             return self.fp
         else:
             ...
@@ -3135,7 +3137,7 @@ class Debugger:
             self.fp = value
         elif context.arch in ["riscv32", "riscv64"]:
             ...
-        elif context.arch == "mips":
+        elif context.arch in ["mips", "mips64"]:
             self.fp = value
         else:
             ...
@@ -3159,7 +3161,7 @@ class Debugger:
                 ans = self.pc
             elif context.arch in ["riscv32", "riscv64"]:
                 ans = self.pc
-            elif context.arch == "mips":
+            elif context.arch in ["mips", "mips64"]:
                 ans = self.pc
             else:
                 ...
@@ -3180,7 +3182,7 @@ class Debugger:
             self.pc = value
         elif context.arch in ["riscv32", "riscv64"]:
             self.pc = value
-        elif context.arch == "mips":
+        elif context.arch in ["mips", "mips64"]:
             self.pc = value
         else:
             ...
@@ -3207,7 +3209,7 @@ class Debugger:
             return self.x30
         elif context.arch in ["riscv32", "riscv64"]:
             return self.ra
-        elif context.arch == "mips":
+        elif context.arch in ["mips", "mips64"]:
             return self.ra
 
         # Doesn't work with qemu [05/07/23]
@@ -3332,7 +3334,7 @@ class Debugger:
 
         # NOTE: Can not trust libs to find the correct page [06/01/25]
         # BUG Sometimes with arm we have the same binary at both 0x10000 and 0x20000, vmmap detects the second one, while we should use the first for the offsets... [20/01/25]
-        if context.arch in ["riscv32", "riscv64", "arm", "mips"]:
+        if context.arch in ["riscv32", "riscv64", "arm", "mips", "mips64"]:
             offset = file.size // 100 - (file.size // 100 % 8) # Random place to avoid the ELF part that could be common between multiple libraries
             while file.data[offset:offset+8] == b"\x00" * 8:
                 offset += 8
