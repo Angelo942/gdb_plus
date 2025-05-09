@@ -334,6 +334,18 @@ def enum_libs(file):
     if file.statically_linked:
         return []
 
+    loader = None
+    for seg in file.iter_segments():
+        if seg.header.p_type == "PT_INTERP":
+            # this helper gives you the null-terminated interpreter path
+            loader = seg.get_interp_name().rstrip('\x00')
+            break
+    if loader is None:
+        log.warn("can not find loader!")
+        return []
+
+    libs = [Path(loader).name]
+
     # Get the .dynamic section (holds dynamic table entries)
     dynamic_section = file.get_section_by_name('.dynamic')
     if dynamic_section is None:
@@ -347,8 +359,6 @@ def enum_libs(file):
         print("No .dynstr section found!")
         exit(1)
     dynstr_data = dynstr_section.data()
-
-    libs = []
 
     # Iterate over the dynamic table entries
     for i in range(0, len(data), context.bytes * 2):

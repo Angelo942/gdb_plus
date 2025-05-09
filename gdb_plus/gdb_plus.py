@@ -20,7 +20,6 @@ import re
 from functools import cache, cached_property
 from elftools.elf.sections import SymbolTableSection
 
-
 # Logs to debug the library can be enabled by setting DEBUG = True in gdb_plus.utils
 _logger = logging.getLogger("gdb_plus")
 ch = logging.StreamHandler()
@@ -55,7 +54,7 @@ def context_decorator(func):
 
 class Debugger:
     # NOTE: If possible patch the rpath (spwn and pwninit do it automatically) instead of using env to load the correct libc. This will let you get a shell not having problems trying to preload bash too
-    def __init__(self, target: [int, process, str, ELF, EXE, list, tuple], *, binary:[str, ELF, EXE]=None, env:dict=None, aslr:bool=True, script:str="", from_start:bool=True, debug_from:int=None, timeout:float=0.5, from_entry:bool=True, silent=True):
+    def __init__(self, target: [int, process, str, ELF, EXE, list, tuple], *, binary:[str, ELF, EXE]=None, env:dict=None, aslr:bool=True, script:str="", from_start:bool=True, debug_from:int=None, timeout:float=0.5, from_entry:bool=True, silent=True, qemu_gdbserver=None, download=False):
         """
         Args:
             target (int, process, str, ELF, EXE, list, tuple):
@@ -112,10 +111,13 @@ class Debugger:
         self.pid = None
         self._context_params = context.copy() # NOTE: Be careful to check that you are using the right context arch for the binary before calling gdb
         self.silent = silent
+        self.download_libraries = download
 
         self.p = None
         self.gdb = None
         self.libdebug = None
+
+        self.gdbserver_qemu = qemu_gdbserver # Debug remote qemu itself to access process maps
 
         # Additional informations on the debugging context.
         self._gef = False
@@ -176,6 +178,8 @@ class Debugger:
         # NOTE: Maybe it's good not to rely too much on ELF in case someone wants to use it for different kinds of executables. [08/07/24]
         # NOTE: Should context be the fail-safe or do we want to make it the default ? [23/01/25]
         # Ensure that we have a  binary defined with the exception of when the target is a list, pid or remote gdbserver.
+        # We would like a way to download the binary from the gdbserver if we connect with a tuple. Detect the program with info program cmdline and then download [06/05/25]
+        # The executable is not only needed for our context, but gdb does need it. It can usually recover it from the gdbserver, but not if we are using QEMU. [07/05/25]
         if type(binary) in [str, ELF]:
             binary = EXE(binary, checksec=False)
         elif binary is None:
@@ -188,13 +192,6 @@ class Debugger:
             # elif type(context.binary) is ELF: # It may be a problem when you set context.binary for your challenge, but then need to debug qemu itself and don't have a binary to pass
             #     binary = EXE(context.binary, checksec=False)
         self._exe = binary
-
-        # TODO test with programs using dlopen
-        if self._exe is not None and not self._exe.statically_linked:
-            libraries = enum_libs(self._exe)
-            for library_name in libraries:
-                name = library_name.split(".")[0]
-                self._libraries[name] = None
 
         # NOTE: What happens when the user want's to debug different processes in the same script ? This may break when using a mix of architectures. [05/02/25]
         # Ensure that a context is defined. Must be set before running gdb to make sure to use the emulator if needed.
@@ -231,7 +228,6 @@ class Debugger:
         elif type(target) is int:
             self.p = None
             self.pid = target
-            assert self.exe is not None, "I need a file to work from a pid" # Not really... Let's keep it like this for now, but continue assuming we don't have a real file
             # We may want to run the script only at the end in case the user really insists on putting a continue in it. [17/11/23]
             self.gdb = self.__attach_gdb(target, gdbscript=script)
         elif type(target) is process:
@@ -268,12 +264,41 @@ class Debugger:
         self.logger.addHandler(ch)
         self.logger.setLevel(_logger.level)
 
-        # Prevent confusion between exe.symbols pointing to the plt and libc.symbols pointing to the function itself.
-        if self.exe is not None and not self.exe.statically_linked:
-            for symbol_name in self.exe.plt:
-                if (symbol := self.exe.symbols.get(symbol_name, None)) is not None:
+        def find_executable():
+            for line in self.execute("info proc").splitlines():
+                if line.startswith("exe = "):
+                    file_name = line.split("'")[1]
+                    return Path(file_name)
+            else:
+                log.warn("can not find executable") # Should be an error, but I don't want to break the debugger
+                return None
+
+        # I wanted to move it inside __attach_gdb, but we don't have self.gdb defined yet to call download so I prefer to keep it here instead of assigning self.gdb inside the attach function [09/05/25]
+        if self._exe is None:
+            if self.pid is None:
+                log.warn("No file specified! What are we debugging ?")
+            exe_path = find_executable()
+            if exe_path is not None: # This should never fail
+                local_path = self.local_path(exe_path)
+                if local_path is not None: # This is already raising a warning if it fails
+                    self._exe = EXE(local_path, checksec=False)
+                    if DEBUG: self.logger.debug("found executable: %s -> %s", exe_path, local_path)
+                else:
+                    log.warn(f"can not find copy of {exe_path}")
+            
+        # TODO test with programs using dlopen
+        if self._exe is not None and not self._exe.statically_linked:
+            # This returns the names, but has no information on the path (compared to libs that has the exact path)
+            # The problem with dbg.lib_name is that some names have version numbers such as libc-2.28.so
+            # I will store the full name in libraries to make sure that we don't have conflicts when downloading multiple versions from different programs, but allow to access with a partial name
+            libraries = enum_libs(self._exe)
+            for library_name in libraries:
+                self._libraries[library_name] = None
+                
+            for symbol_name in self._exe.plt:
+                if (symbol := self._exe.symbols.get(symbol_name, None)) is not None:
                     del symbol
-        
+
         self._initialized = True
         if self.debugging:
 
@@ -306,13 +331,67 @@ class Debugger:
             elif from_entry and self.exe is not None and self.ld is not None and self.instruction_pointer in self.ld:
                 if not context.native:
                     log.warn_once("Debugging from entry may fail with qemu. In case set Debugger(..., from_entry = False)")
-                self.until(self.exe.entry)
+                try:
+                    address = self.exe.entry
+                except Exception:
+                    log.warn("Failed finding elf base address. Disabling from_entry...")
+                    return
+                self.until(address)
                 # If the library is loaded by the program with dlopen access_library will fail.
                 for library in self._libraries:
-                    try:
-                        self.access_library(library)
-                    except Exception:
-                        pass
+                    self.access_library(library)
+                    
+    def local_path(self, path: [str, Path]) -> [Path, None]:
+        """
+        Given a path that can be on the remote server or the local machine returns the path to the local copy of that file. 
+        DONT USE if you are sure the path given is already the one of a local copy of the binary.
+        """
+        if DEBUG: self.logger.debug(f"searching for {path}")
+        path = Path(path)
+        gdb_files_path = Path("./gdb_files")
+        gdb_file_path = gdb_files_path / path.name
+        gdb_file_path_exists = gdb_file_path.is_dir() and gdb_file_path.exists()
+        
+        # By default if we have a gdb_files directory we assume that the libraries are here
+        # This avoids problems when pwning the remote server 
+        if gdb_file_path_exists:
+            return gdb_file_path
+
+        if not self.debugging or self.local_debugging and path.exists():
+            return path
+        
+        # This is only when debugging a remote gdbserver
+
+        if self.download_libraries:
+            gdb_files_path.mkdir(exist_ok=True)
+            self.download(path, gdb_file_path)
+            return gdb_file_path
+        else:
+            if path.exists():
+                log.warn_once("The library {path} used may not be the exact same as the one on the remote server. If you want to download the one on the server set Debugger(..., download=True)", path)
+                return path
+            elif Path(path.name).exists():
+                # We allow the case where the executable is in the same directory as the solve script. Although it may not be clean it's easier for the user. I just hope to not hide too much a problem.
+                return Path(path.name)
+            else:
+                log.warn_once("Can not find %s. Please set Debugger(..., download=True) if you want to copy if from the remote server.", path)
+                return None
+
+    def download(self, source: [str, Path], destination: [str, Path]):
+        assert not self.local_debugging, "why are you trying to download files that are already on your system ?"
+        assert self.gdb is not None
+        if self.gdbserver_qemu is not None:
+            stopped = self.gdbserver_qemu.interrupt()
+            self.gdbserver_qemu.download(source, destination)
+            if stopped:
+                self.gdbserver_qemu.c(wait=False)
+        else:
+            try:
+                self.execute(f"remote get {source} {destination}")
+            except Exception as e:
+                if not context.native:
+                    log.error("Can not download files from qemu's gdbstup. Please debug qemu itself and pass it in Debugger(..., qemu_gdbserver=...)")
+
 
     def __handle_breakpoints(self, breakpoints):
         """
@@ -2231,7 +2310,7 @@ class Debugger:
             self.execute(f"catch {name}")
             # In old versions of gdb (bug found in ubuntu 20.4) breakpoints() only return the breakpoints, not the catchpoints. 27/04/24
             #num = self.gdb.breakpoints()[-1].number
-            num = int(self.execute(f"info breakpoints").split("\n")[-2].split()[0])
+            num = int(self.execute(f"info breakpoints").splitlines()[-2].split()[0])
             self._event_table[name] = num
             self._event_breakpoints[num] = callback
 
@@ -3303,7 +3382,7 @@ class Debugger:
             ...
 
         ## rip = 0x7ffff7fe45b8 in _dl_start_final (./elf/rtld.c:507); saved rip = 0x7ffff7fe32b8
-        #data = self.execute("info frame 0").split("\n")
+        #data = self.execute("info frame 0").splitlines()
         #log.debug(data)
         #for line in data:
         #    if " saved " in line and "ip = " in line:
@@ -3318,23 +3397,52 @@ class Debugger:
 
    ########################## FILES ##########################
 
+    # We may want to cache it in gdbserver_qemu
+    def __raw_maps(self):
+        if not self.debugging:
+            return ""
+
+        if self.local_debugging:
+            with open(f"/proc/{self.pid}/maps") as fd:
+                maps_raw = fd.read()
+        elif self.pid is not None:
+            maps_raw = self.execute("info proc map")
+        elif self.gdbserver_qemu is not None:
+            was_running = self.gdbserver_qemu.interrupt()
+            maps_raw = self.gdbserver_qemu.execute("info proc map")
+            if was_running:
+                self.gdbserver_qemu.c(wait=False)
+        else:
+            # I assume that the user has already been warned when initializing the debugger [07/05/25]
+            # log.warn_once("can not access maps under QEMU.")
+            return ""
+        return maps_raw
+        
+
     # Quick attempt to find maps
-    # TODO handle remote debugging [20/01/25]
+    # How to handle QEMU ? 
     @property
     @context_decorator
     def maps(self):
         maps = {}
-        try:
-            with open(f"/proc/{self.pid}/maps") as fd:
-                maps_raw = fd.read()
-            for line in maps_raw.splitlines():
-                if not context.native and "/qemu-" in line:
-                    break
-                line = line.split()
-                start, end = line[0].split("-")
-                maps[int(start, 16)] = int(end, 16) - int(start, 16)
-        except Exception: # In remote debugging we don't have the /proc file
-            pass
+        for line in self.__raw_maps().splitlines():
+            if not context.native and "/qemu-" in line:
+                break
+            start = end = None
+            # /proc/pid/maps uses "start-end", while info proc map uses "start    end"
+            for part in line.replace("-", " ").split(" "):
+                if part:
+                    if start is None:
+                        start = part
+                    elif end is None:
+                        end = part
+                        break
+            if start is not None and end is not None:
+                try:
+                    maps[int(start, 16)] = int(end, 16) - int(start, 16)
+                except ValueError:
+                    # I don't want to bother parsing properly the first n lines of comments and headers
+                    pass
         return maps
 
     # I copied it from pwntools to have access to it even if I attach directly to a pid 
@@ -3348,24 +3456,22 @@ class Debugger:
         Return a dictionary mapping the path of each shared library loaded
         by the process to the address it is loaded at in the process' address
         space.
-
-        The function still works when the program is not being debugged, but only for internal reasons. Please don't rely on it's output in those cases.
         """
         if not self.debugging:
-            maps = self.exe.libs
-            for key in maps:
-                maps[key] = [maps[key], maps[key]]
-            return maps
+            # We can do this if we really need it [09/05/25]
+            # Opening a debugger is not great, but it should happen only if you try to access the libc while pwning remotely a challenge on a foreign architecture. Not often, but we can first try to access downloaded files.
+            if context.native:
+                maps = self._exe.libs
+                for key in maps:
+                    maps[key] = [maps[key], maps[key]]
+                return maps
+            elif self._exe is not None:
+                with Debugger(self._exe, aslr=False, from_entry=True) as dbg:
+                        return dbg.libs
+            else:
+                return {}
 
-        if self.local_debugging:
-            # I don't think the try is needed anymore.
-            try:
-                with open(f"/proc/{self.pid}/maps") as fd:
-                    maps_raw = fd.read()
-            except IOError:
-                maps_raw = self.execute("info proc map")
-        else:
-            maps_raw = self.execute("info proc map")
+        maps_raw = self.__raw_maps()
 
         # Enumerate all of the libraries actually loaded right now.
         maps = {}
@@ -3374,24 +3480,22 @@ class Debugger:
             path = line[line.index('/'):]
             if not context.native and "/qemu-" in path: # Everything after the QEMU binary is only libs for QEMU that we don't want. Be careful though if this breaks something [04/02/25]
                 break
-            path = os.path.realpath(path)
+        
+            start = end = None
+            # /proc/pid/maps uses "start-end", while info proc map uses "start    end"
+            for part in line.replace("-", " ").split(" "):
+                if part:
+                    if start is None:
+                        start = part
+                    elif end is None:
+                        end = part
+                        break
             if path not in maps:
-                maps[path]= []
-
-        for lib in maps:
-            path = os.path.realpath(lib)
-            for line in maps_raw.splitlines():
-                if line.endswith(path):
-                    if len(maps[lib]) == 0:
-                        # /proc/pid/maps uses "start-end", while info proc map uses "start    end"
-                        for part in line.replace("-", " ").split(" "):
-                            if part:
-                                address = part
-                                break
-                        maps[lib].append(int(address, 16))
-                    address = line.split()[0].split('-')[-1]
-                    maps[lib].append(int(address, 16))
-            maps[lib] = [maps[lib][0], maps[lib][-1]] # Keep only start and end of the file in memory
+                maps[path] = [int(start, 16)]
+            maps[path].append(int(end, 16))
+        
+        for path in maps:
+            maps[path] = [maps[path][0], maps[path][-1]] # Keep only start and end of the file in memory
 
         return maps
 
@@ -3403,7 +3507,7 @@ class Debugger:
             return
 
         for path, addresses in self.libs.items():
-            if file.name == path.split("/")[-1]:
+            if file.name == Path(path).name:
                 address = addresses[0]
                 file.end_address = addresses[-1]
                 break
@@ -3444,26 +3548,29 @@ class Debugger:
     # Let's introduce local_path hoping it's enough and call it a day for now. [26/03/25]
     # We can not expect the user to load manually the libc, but must make it accessible when using REMOTE, so we have to find it by debugging the program anyway. [13/04/25]
     # It would be nice to find the path to the library without having to debug the program. [13/04/25]
-    def access_library(self, name, local_path=None):
+    def access_library(self, name: [str, Path], local_path=None):
         """
-        Create the EXE object for a particular library
+        Create the EXE object for a particular library. The entry will always be with the name of the library, but if you pass a full path we can find it faster.
+        The path can be the path on the remote server.
         """
         if self._libraries.get(name, None) is not None:
-            log.warn(f"{name} is already accessible as dbg.{name}")
+            log.info(f"{name} is already accessible as dbg.{name}")
             return self._libraries[name]
-        
-        # # If we are working under QEMU and not debugging the process pwntools implementations of elf.libs may fail. If you see this problem we will need to run a debugger ourselves.
-        # # The idea of using fake_terminal.py is terrible. Somehow it is 3 times slower, so it's not worth it just to prevent having a terminal popping up.
-        # if local_path is None and not self.debugging and not context.local: # May want to find specific architectures that cause trouble 
-        #     with Debugger(self.exe, from_entry=True) as dbg: # Reach entry to load all libraries
-        #         return dbg.access_library(name)    
 
-        found_path = None
-        if local_path is None:
+        if local_path is not None:
+            path = local_path
+
+        # If we already downloaded the library look for it. (Maybe we have to worry about name collisions but it's so rare it's not gonna come up in the next few years) [09/05/25] 
+        elif (path := self.local_path(name)) is not None:
+                print(f"found {path}")
+
+        else:
+            found_path = None
             for path in self.libs:
-                library_name = path.split("/")[-1]
-                if name in library_name:
-                    assert found_path is None, f"Name is not specific enough! Could mean both {found_path} and {path}"
+                library_name = Path(path).name
+                if str(name) in library_name:
+                    if found_path is not None:
+                        log.warn(f"Name is not specific enough! Could mean both {found_path} and {path}")
                     found_path = path
             if found_path is None:
                 msg = "\n".join([
@@ -3473,10 +3580,11 @@ class Debugger:
                 ])
                 log.warn(msg)
                 return None
-        else:
-            found_path = local_path
-        
-        library = EXE(found_path, checksec=False)
+
+            # Download library if debugging remote process
+            path = self.local_path(found_path)
+
+        library = EXE(path, checksec=False)
         self._set_range(library)
         self._libraries[name] = library
         return library
@@ -3489,31 +3597,27 @@ class Debugger:
                     self.access_library(name)
         return self._libraries
 
-    @property
-    def ld(self):
-        if self._ld == -1:
-            return None
-        elif not self.debugging or (self.exe is not None and self.exe.statically_linked):
-            self._ld = -1
-            return None
-        elif self._ld is None:
-            for path, addresses in self.libs.items():
-                if path.split("/")[-1].startswith("ld"): # handle mips ld.so.1
-                    try:
-                        self._ld = EXE(path, address=addresses[0], end_address=addresses[-1], checksec=False)
-                    except Exception:
-                        if not self.local_debugging:
-                            log.warn(f"can not access {path} from remote server.")
-                    break
-            else:
-                log.warn_once("Can not find loader...")
-                self._ld = -1
-                return None
-        return self._ld
+    # @property
+    # def ld(self):
+    #     if self._ld == -1:
+    #         return None
+    #     elif not self.debugging or (self._exe is not None and self._exe.statically_linked):
+    #         self._ld = -1
+    #         return None
+    #     elif self._ld is None:
+    #         path = self._library_fullname("ld")
+    #         if path is not None:
+    #             self._ld = EXE(local_path, checksec=False)
+    #             self._set_range(self._ld)
+    #         else:
+    #             log.warn_once("Can not find loader...")
+    #             self._ld = -1
+    #             return None
+    #     return self._ld
 
-    @ld.setter
-    def ld(self, elf_ld: ELF):
-        self._ld = elf_ld
+    # @ld.setter
+    # def ld(self, elf_ld: ELF):
+    #     self._ld = elf_ld
 
     # NOTE: Here for backward compatibility with 7.0 
     @property
@@ -4232,6 +4336,25 @@ class Debugger:
             print("telescope requires GEF or pwndbg")
 
    ########################### Heresies ##########################
+
+    # Given a name such as libc we want to find the exact library the program is using such as libc.so.6
+    # The problem is that we may have libraries like libcrypto that also start with "libc"
+    # The other problem is that - + and . are not allowed to find the library through dbg.<lib_name>
+    # I will not worry about the +, but expect users to split their names before the library version, so before - 
+    def _library_fullname(self, name: str) -> [str, None]:
+
+        if name in self._libraries:
+            return name
+        
+        best_guess = None
+        for library_name in self._libraries:
+            short_name = Path(library_name).stem.split("-")[0]
+            if name == short_name:
+                return library_name
+            elif name in short_name:
+                best_guess = library_name
+        
+        return best_guess
     
     def __getattr__(self, name):
         # getattr is only called when an attribute is NOT found in the instance's dictionary
@@ -4268,9 +4391,12 @@ class Debugger:
                 return int(self.execute(f"p ${name}.uint128").split(" = ")[-1])
             else:
                 raise Exception("not supported")
-        elif name in self._libraries:
+        elif (library_name := self._library_fullname(name)) is not None:
             with context.silent:
-                return self.libraries[name]
+                library = self.libraries[library_name]
+            if library is None and not self.debugging:
+                log.error(f"I don't know the path to the {name} you want to use! Please set dbg.{name} = ELF(\"/path/to/lib\")")
+            return library
         elif self.p and hasattr(self.p, name):
             return getattr(self.p, name)
         # May want to also expose in case you want to access something like inferiors() 
@@ -4317,8 +4443,8 @@ class Debugger:
                 self.execute(f"set {name}.uint128={value}")
             else:
                 raise Exception("Not supported")
-        elif name in self._libraries:
-            self._libraries[name] = value # Allow to overwrite libraries (In case of remote path)
+        elif (library_name := self._library_fullname(name)) is not None:
+            self._libraries[library_name] = value # Allow to overwrite libraries (In case of remote path)
         else:
             super().__setattr__(name, value)
 
