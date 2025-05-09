@@ -196,8 +196,8 @@ class Debugger:
         # NOTE: What happens when the user want's to debug different processes in the same script ? This may break when using a mix of architectures. [05/02/25]
         # Ensure that a context is defined. Must be set before running gdb to make sure to use the emulator if needed.
         if not context.copy().get("arch", False): # Empty context
-            if self.exe is not None:
-                context.binary = self.exe
+            if self._exe is not None:
+                context.binary = self._exe
                 log.info(f"context not set... Using {context}")
                 self._context_params = context.copy()
             else:
@@ -220,26 +220,40 @@ class Debugger:
             if len(target) != 2:
                 raise Exception("What are you trying to do ? tuples (host, port) are only for connections to a gdbserver")
             self.p = None
-            self.gdb = self.__attach_gdb(target, exe=self.exe.path, gdbscript=script)
-            self.pid = self.current_inferior.pid
             self.local_debugging = False
+            try:
+                self.gdb = self.__attach_gdb(target, exe=self._exe, gdbscript=script)
+            except Exception as e:
+                if self._exe is None:
+                    log.error("Your version of pwntools requires to set what binary you are debugging!")
+                else:
+                    raise e
+            try:
+                pid = self.current_inferior.pid
+                print(self.current_inferior)
+                assert pid not in [1, 42000]
+                self.pid = pid
+            except:
+                if self.gdbserver_qemu is None:
+                    log.warn("If you want to debug a remote program under QEMU please also debug QEMU itself and pass the debugger as gdbserver_qemu=...")
+                    log.warn("I will not be able to access informations about the memory layout and libraries used.")
         # We should check if we crash when elf.native == False to warn the user to install qemu-user, but elf doesn't exist yet... [06/01/25]
         # Do we try only for context.native == False and context.copy == {} ? [06/01/25]
         elif type(target) is int:
             self.p = None
             self.pid = target
             # We may want to run the script only at the end in case the user really insists on putting a continue in it. [17/11/23]
-            self.gdb = self.__attach_gdb(target, gdbscript=script)
+            self.gdb = self.__attach_gdb(target, exe=self._exe, gdbscript=script)
         elif type(target) is process:
             self.p = target
-            self.gdb = self.__attach_gdb(target, gdbscript=script)
+            self.gdb = self.__attach_gdb(target, exe=self._exe, gdbscript=script)
         elif args.REMOTE:
             self.p = None
         elif context.noptrace:
-            self.p = self.__silence(process, target if isinstance(target, list) else self.exe.path, env=env, aslr=aslr)
+            self.p = self.__silence(process, target if isinstance(target, list) else self._exe.path, env=env, aslr=aslr)
         elif from_start:
             try:
-                self.p = self.__silence(gdb.debug, target if isinstance(target, list) else self.exe.path, env=env, aslr=aslr, gdbscript=script, api=True)
+                self.p = self.__silence(gdb.debug, target if isinstance(target, list) else self._exe.path, env=env, aslr=aslr, gdbscript=script, api=True)
             except pwn.exception.PwnlibException:
                 if not context.native:
                     log.error(f"Could not debug program for {context.arch}. Did you install qemu-user ?")
@@ -251,8 +265,8 @@ class Debugger:
                 except Exception:
                     log.error("You need to install gdb-multiarch to debug binaries under qemu!")
         else:
-            self.p = self.__silence(process, target if isinstance(target, list) else self.exe.path, env=env, aslr=aslr)
-            self.gdb = self.__attach_gdb(self.p, gdbscript=script)
+            self.p = self.__silence(process, target if isinstance(target, list) else self._exe.path, env=env, aslr=aslr)
+            self.gdb = self.__attach_gdb(self.p, exe=self._exe, gdbscript=script)
 
         if type(self.p) is process:
             self.pid = self.p.pid # Under qemu this is the pid of qemu, but it is good enough to read /proc/pid/maps
@@ -316,7 +330,7 @@ class Debugger:
                     self.detach()
                     sleep(timeout)
                     # what happens if there is a continue in script ? It should break the script, but usually it's the last instruction so who cares ? Just warn them in the docs [06/04/23]
-                    self.gdb = self.__attach_gdb(self.pid, gdbscript=script) # P is gdbserver...
+                    self.gdb = self.__attach_gdb(self.pid, exe=self._exe, gdbscript=script) # P is gdbserver...
                     self.__setup_gdb()
                     if self.instruction_pointer - address_debug_from in range(0, len(backup)): # I'm in the sleep shellcode
                         self.write(address_debug_from, backup)
@@ -325,10 +339,10 @@ class Debugger:
                     else:
                         log.warn(f"{timeout}s timeout isn't enough to reach the code... Retrying...")
             # This is here to have the libc always available [06/01/25]
-            # self.instruction_pointer != self.exe.entry: May not have a loader and libc, but still be considered dynamically linked
-            if from_entry and self.exe is not None and not self.exe.statically_linked and self.ld is None:
-                log.warn(f"{self.exe.name} is not marked as statically linked, but I can not find a loader!")
-            elif from_entry and self.exe is not None and self.ld is not None and self.instruction_pointer in self.ld:
+            # self.instruction_pointer != self._exe.entry: May not have a loader and libc, but still be considered dynamically linked
+            if from_entry and self._exe is not None and not self._exe.statically_linked and self.ld is None:
+                log.warn(f"{self._exe.name} is not marked as statically linked, but I can not find a loader!")
+            elif from_entry and self._exe is not None and self.ld is not None and self.instruction_pointer in self.ld:
                 if not context.native:
                     log.warn_once("Debugging from entry may fail with qemu. In case set Debugger(..., from_entry = False)")
                 try:
@@ -754,7 +768,7 @@ class Debugger:
             if DEBUG: self.logger.debug("migrating to gdb")
             self.libdebug = None
             self._detached  = False
-            self.gdb = self.__attach_gdb(self.pid, gdbscript=script)
+            self.gdb = self.__attach_gdb(self.pid, exe=self._exe, gdbscript=script)
             self.__setup_gdb()
             # Catch SIGSTOP
             address = self.instruction_pointer
@@ -822,13 +836,19 @@ class Debugger:
     # Here to have only one check that we can indeed attach to the process
     @context_decorator
     def __attach_gdb(self, target, gdbscript=None, exe=None):
-        if not context.native:
+        if isinstance(exe, ELF):
+            exe = exe.path
+        if not context.native and self.local_debugging:
             log.error("We can not attach to a process under QEMU")
         _, debugger = self.__silence(gdb.attach, target, gdbscript=gdbscript, exe=exe, api=True)
         try: 
             debugger.execute("info tasks", to_string=True)
-        except Exception:
-            log.error("Can not attach to process! Did you set ptrace scope to 0 ? (/etc/sysctl.d/10-ptrace.conf)")
+        except Exception as e:
+            print(e)
+            if isinstance(target, tuple):
+                log.error("Can not connect to gdbserver. Are you sure it is running ?")
+            else:
+                log.error("Can not attach to process! Did you set ptrace scope to 0 ? (/etc/sysctl.d/10-ptrace.conf)")
         return debugger
 
     @context_decorator
@@ -862,7 +882,7 @@ class Debugger:
                 # Maybe the process is being traced and I can't attach to it yet
                 try:
                     # what happens if there is a continue in script ? It should break the script, but usually it's the last instruction so who cares ? Just warn them in the docs [06/04/23]
-                    self.gdb = self.__attach_gdb(self.p.pid, gdbscript=self.gdbscript) # P is gdbserver...
+                    self.gdb = self.__attach_gdb(self.p.pid, exe=self._exe, gdbscript=self.gdbscript) # P is gdbserver...
                 except Exception as e:
                     if DEBUG: self.logger.debug("can't attach in debug_from because of %s... Retrying...", e)
                     continue
@@ -1980,7 +2000,7 @@ class Debugger:
     # For some reasons we get int3 some times
     # Now it's even worse. SIGABORT after that...
     def gdb_call(self, function: str, args: list, *, cast = "long"):
-        if not self.exe.statically_linked:
+        if not self._exe.statically_linked:
             try:
                 ans = self.execute(f"call ({cast}) {function} ({', '.join([hex(arg) for arg in args])})")
                 if cast == "void":
@@ -2339,7 +2359,7 @@ class Debugger:
         """
         if calling_convention is None:
             calling_convention = function_calling_convention[context.arch]
-        symtab = self.exe.get_section_by_name(".symtab")
+        symtab = self._exe.get_section_by_name(".symtab")
         if not isinstance(symtab, SymbolTableSection):
             log.warn("Can not find symbols. If you added them yourself to the binary please raise an issue.")
             return self
@@ -2375,7 +2395,7 @@ class Debugger:
     # In particular consider skipping ptrace and wait functions if ptrace is emulated and we decide to move the breakpoints from the libc to the plt. [01/08/24]
     @context_decorator
     def set_ltrace(self, *, calling_convention = None, n_args = 3, no_return = False, exclude = []):
-        if self.exe.statically_linked:
+        if self._exe.statically_linked:
             log.warn("The binary does not use libraries!")
             return self
 
@@ -2413,7 +2433,7 @@ class Debugger:
         if type(location) is int:
             address = location
 
-            if not self.exe.pie:
+            if not self._exe.pie:
                 return address
 
             if not address in self.exe and address < self.exe.range: # NOTE: I'm not sure yet if we should only use only allow relative breakpoints in len(exe.data) or the whole range of pages allocated to the program [05/02/25]
@@ -2430,10 +2450,10 @@ class Debugger:
             try:
                 address = self.symbols[function] + offset
             except KeyError as e:
-                if not self.exe.statically_linked and self.libc is None:
+                if not self._exe.statically_linked and self.libc is None:
                     log.error("symbol %s not found in ELF", location)
                     log.error("The libc is not loaded yet. If you want to put a breakpoint there call load_libc() first!")
-                elif not self.exe.statically_linked:
+                elif not self._exe.statically_linked:
                     log.error("symbol %s not found in ELF or libc", location)
                 else:
                     log.error("symbol %s not found in ELF", location)
@@ -3449,6 +3469,8 @@ class Debugger:
     # We still need pwntools when we are not debugging the process. It is needed for example to access the libc while pwning a remote challenge. 
     # I assume that you don't care about the address when you are not debugging the program
     # The main advantage now though is just the speed of not having to run a new process every time we call the function if we are already debugging it.
+    # If we are working under QEMU and not debugging the process pwntools implementations of elf.libs may fail. If you see this problem we will need to run a debugger ourselves.
+    # The idea of using fake_terminal.py is terrible. Somehow it is 3 times slower, so it's not worth it just to prevent having a terminal popping up.
     @property
     @context_decorator
     def libs(self):
@@ -3718,7 +3740,7 @@ class Debugger:
         self.switch_inferior(old_inferior.num)
         if DEBUG: self.logger.debug("detaching from child [%d]", pid)
         self.execute(f"detach inferiors {n}")
-        child = Debugger(pid, binary=self.exe, script=script, from_start=False, silent=self.silent)
+        child = Debugger(pid, binary=self._exe, script=script, from_start=False, silent=self.silent)
         # needed even though by default they both inherit the module's priority since the user may change the priority of a specific debugger. [17/11/23]
         child.logger.setLevel(self.logger.level)
         # TODO copy all syscall handlers in the parent ? [31/07/23]

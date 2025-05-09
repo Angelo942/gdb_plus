@@ -1,5 +1,6 @@
 GDB+ 8.0.0 **Remote QEMU**
 * Improve interrupt
+* Improve remote connections to qemu
 * Download libraries from remote server
 * Support multiple debuggers with different contexts
 * Support mips64
