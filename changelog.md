@@ -1,3 +1,5 @@
+GDB+ 8.0.0 **Remote QEMU**
+* Support multiple debuggers with different contexts
 GDB+ 7.3.0 **MIPS**
 * Introduce basic mips support
 * Support xmm registers

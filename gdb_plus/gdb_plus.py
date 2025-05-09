@@ -45,6 +45,14 @@ def lock_decorator(func):
             return result
     return parse
 
+def context_decorator(func):
+    def add_context(self, *args, **kwargs):
+        if not self._initialized:
+            return func(self, *args, **kwargs)
+        with context.local(**self._context_params):
+            return func(self, *args, **kwargs)
+    return add_context
+
 class Debugger:
     # NOTE: If possible patch the rpath (spwn and pwninit do it automatically) instead of using env to load the correct libc. This will let you get a shell not having problems trying to preload bash too
     def __init__(self, target: [int, process, str, ELF, EXE, list, tuple], *, binary:[str, ELF, EXE]=None, env:dict=None, aslr:bool=True, script:str="", from_start:bool=True, debug_from:int=None, timeout:float=0.5, from_entry:bool=True, silent=True):
@@ -177,8 +185,8 @@ class Debugger:
                 binary = EXE(target, checksec=False)
             elif type(target) is process:
                 binary = EXE(target.elf, checksec=False)
-            elif type(context.binary) is ELF:
-                binary = EXE(context.binary, checksec=False)
+            # elif type(context.binary) is ELF: # It may be a problem when you set context.binary for your challenge, but then need to debug qemu itself and don't have a binary to pass
+            #     binary = EXE(context.binary, checksec=False)
         self._exe = binary
 
         # TODO test with programs using dlopen
@@ -364,6 +372,7 @@ class Debugger:
     # Stop handlers run in a normal thread, so they don't have access to the correct context. We could copy it as an object variable, but do we really need it here ? [29/12/23]
     # Yes, to access self.ip! [29/12/23]
     @lock_decorator
+    @context_decorator
     def __stop_handler_gdb(self):
         """
         Actions that the debugger performs every time the process is interrupted except when exiting
@@ -469,82 +478,80 @@ class Debugger:
         # Doesn't handle the case where we use ni and hit the breakpoint though... [17/04/23] TODO!
         # Doesn't even handle the case where I step, but I'm waiting in continue until
         # Damn, gdb detects the breakpoint even if we don't run over the INT3... so this doesn't work. We never have reason SINGLE STEP with a breakpoint. We need another indication [10/05/23]
-        with context.local(**self._context_params): # Not needed because we are already in a thread with context.local, but just to not miss any context.Thread I put the context.local in all of them [08/07/24]
-            context.Thread(target=self.__handle_breakpoints, args = (breakpoints,), name=f"[{self.pid}] handle breakpoint {hex(ip)}").start()
+        context.Thread(target=self.__handle_breakpoints, args = (breakpoints,), name=f"[{self.pid}] handle breakpoint {hex(ip)}").start()
 
     # INT3 while enumerating ptrace doesn't set ptrace_has_stopped [24/12/23]
     # The handler is not called at all! Is it because libdebug thinks it's an internal interruption ?
     # No, without emulate_ptrace() we get to the "why did I stop"...
     # But if I only set ptrace_emulated = True then everything works...
     @lock_decorator
+    @context_decorator
     def __stop_handler_libdebug(self):
         """
         Actions that the debugger performs every time the process is interrupted
         Handle temporary breakpoints and callbacks
         """
-        with context.local(**self._context_params):
+        # If we detach there will be a step to shutdown waitpid, but libdebug will have detached before we can execute the handler, so let's just skip it.
+        if self._detached:
+            if DEBUG: self.logger.debug("libdebug stopped waitpid")
+            return
 
-            # If we detach there will be a step to shutdown waitpid, but libdebug will have detached before we can execute the handler, so let's just skip it.
-            if self._detached:
-                if DEBUG: self.logger.debug("libdebug stopped waitpid")
-                return
+        # Current inferior will change to the inferior who stopped last
+        ip = self.instruction_pointer
+        breakpoints = self.breakpoints[ip]
 
-            # Current inferior will change to the inferior who stopped last
-            ip = self.instruction_pointer
-            breakpoints = self.breakpoints[ip]
-
-            if DEBUG: self.logger.debug("[%d] stopped at address: 0x%x with status: 0x%x", self.libdebug.cur_tid, ip, self.libdebug.stop_status)
-            
-            if self._stop_reason in SIGNALS and SIGNALS[self._stop_reason] in self._handled_signals:
-                should_stop = self._handled_signals[SIGNALS[self._stop_reason]](self)
-                if should_stop == False:
-                    self.__hidden_continue()
+        if DEBUG: self.logger.debug("[%d] stopped at address: 0x%x with status: 0x%x", self.libdebug.cur_tid, ip, self.libdebug.stop_status)
+        
+        if self._stop_reason in SIGNALS and SIGNALS[self._stop_reason] in self._handled_signals:
+            should_stop = self._handled_signals[SIGNALS[self._stop_reason]](self)
+            if should_stop == False:
+                self.__hidden_continue()
+            else:
+                if self._ptrace_emulated:
+                    if DEBUG: self.logger.debug("stop will be handle by waitpid")
+                    self._ptrace_has_stopped.set()
                 else:
-                    if self._ptrace_emulated:
-                        if DEBUG: self.logger.debug("stop will be handle by waitpid")
-                        self._ptrace_has_stopped.set()
-                    else:
-                        self.__set_stop(f"signal {self._stop_reason} handled")
-                return  
-            # I hope I won't touch a breakpoint at the same time
-            # Usually if I hit a breakpoint it should stop again. At least with step we have the step and then the sigchld 
-            # Will be a problem while stepping, but amen
-            elif self.libdebug.stop_status == 0x117f:
-                log.warn("the child stopped and libdebug caught it. Let's continue waiting for Mario to change the options...")
-                # We have problems with the wait after the step...
-                #self.libdebug.cont(blocking=False)
-                #return
-            
-            if len(breakpoints) == 0:
-                if self._stepped or self._interrupted:
-                    self._stepped = False
-                    self._interrupted = False
-                    if self.stop_signal not in [0x5, 0x2, 0x13]:
-                        log.warn(f"I wanted to step or interrupt, but stopped due to signal: {self._stop_reason}")
-                        if self._ptrace_emulated:
-                            if DEBUG: self.logger.debug("stop will be handle by waitpid")
-                            self._ptrace_has_stopped.set()
-                            return
-                # This should now be handled by libdebug [08/06/23]
-                # AND SIGTRAP COULD ALSO BE DUE TO A INT3 EMULATING PTRACE [24/12/23]
-                #elif self.libdebug.stop_status == 0x57f:
-                #    # Look into how to handle steps in libdebug [21/05/23]
-                #
-                #    log.warn("I suppose libdebug just stepped so let's pretend nothing happened")
-                #    return
-                else:
-                    # Once to let know there may be a problem, but not spamming when it is part of the challenge.
+                    self.__set_stop(f"signal {self._stop_reason} handled")
+            return  
+        # I hope I won't touch a breakpoint at the same time
+        # Usually if I hit a breakpoint it should stop again. At least with step we have the step and then the sigchld 
+        # Will be a problem while stepping, but amen
+        elif self.libdebug.stop_status == 0x117f:
+            log.warn("the child stopped and libdebug caught it. Let's continue waiting for Mario to change the options...")
+            # We have problems with the wait after the step...
+            #self.libdebug.cont(blocking=False)
+            #return
+        
+        if len(breakpoints) == 0:
+            if self._stepped or self._interrupted:
+                self._stepped = False
+                self._interrupted = False
+                if self.stop_signal not in [0x5, 0x2, 0x13]:
+                    log.warn(f"I wanted to step or interrupt, but stopped due to signal: {self._stop_reason}")
                     if self._ptrace_emulated:
                         if DEBUG: self.logger.debug("stop will be handle by waitpid")
                         self._ptrace_has_stopped.set()
                         return
-                    else:
-                        log.warn_once(f"why did I stop ??? [{hex(self.libdebug.stop_status)}]")
-                self.__set_stop("no breakpoint")
-                return            
-            
-            self.__handle_breakpoints(breakpoints)
-            #context.Thread(target=self.__handle_breakpoints, args=(breakpoints,)).start()
+            # This should now be handled by libdebug [08/06/23]
+            # AND SIGTRAP COULD ALSO BE DUE TO A INT3 EMULATING PTRACE [24/12/23]
+            #elif self.libdebug.stop_status == 0x57f:
+            #    # Look into how to handle steps in libdebug [21/05/23]
+            #
+            #    log.warn("I suppose libdebug just stepped so let's pretend nothing happened")
+            #    return
+            else:
+                # Once to let know there may be a problem, but not spamming when it is part of the challenge.
+                if self._ptrace_emulated:
+                    if DEBUG: self.logger.debug("stop will be handle by waitpid")
+                    self._ptrace_has_stopped.set()
+                    return
+                else:
+                    log.warn_once(f"why did I stop ??? [{hex(self.libdebug.stop_status)}]")
+            self.__set_stop("no breakpoint")
+            return            
+        
+        self.__handle_breakpoints(breakpoints)
+        #context.Thread(target=self.__handle_breakpoints, args=(breakpoints,)).start()
 
     # 02/05/25
     # By default this callback is executed every time a process exits, but that includes both our program finishing, and inferior finishing and us detaching from a process
@@ -585,6 +592,7 @@ class Debugger:
         except:
             if DEBUG: _logger.debug("user isn't using pwndbg")
         
+    @context_decorator
     def __setup_gdb(self):
         """
         setup of gdb's events
@@ -598,10 +606,8 @@ class Debugger:
                 if self._kill_threads.is_set() or self._closed.is_set():
                     if DEBUG: self.logger.debug("exiting loop handler")
                     break
-                with context.local(**self._context_params):
-                    context.Thread(target=self.__stop_handler_gdb, name=f"[{self.pid}] stop_handler_gdb").start()
-        with context.local(**self._context_params):
-            context.Thread(target=loop_handler, name=f"[{self.pid}] loop_stop_handler_gdb").start()
+                context.Thread(target=self.__stop_handler_gdb, name=f"[{self.pid}] stop_handler_gdb").start()
+        context.Thread(target=loop_handler, name=f"[{self.pid}] loop_stop_handler_gdb").start()
         
         self.gdb.events.exited.connect(self.__exit_handler)
         def clear_cache(event):
@@ -651,6 +657,7 @@ class Debugger:
     # È già successo che wait ritorni -1 e crashi libdebug [08/05/23]
     # Legacy callbacks won't be transferred over... It's really time to get rid of them [21/05/23]
     # BUG migrating back to gdb while emulating ptrace hangs because the program thinks the interrupt should be handled by waitpid [19/11/23]
+    @context_decorator
     def migrate(self, *, gdb=False, libdebug=False, script=""):
         """
         Switch the debugger being used on the backend. Current options are gdb and libdebug.
@@ -734,6 +741,7 @@ class Debugger:
         return self
 
     # Here to have only one check that we can indeed attach to the process
+    @context_decorator
     def __attach_gdb(self, target, gdbscript=None, exe=None):
         if not context.native:
             log.error("We can not attach to a process under QEMU")
@@ -744,6 +752,7 @@ class Debugger:
             log.error("Can not attach to process! Did you set ptrace scope to 0 ? (/etc/sysctl.d/10-ptrace.conf)")
         return debugger
 
+    @context_decorator
     def debug_from(self, location: [int, str], *, event=None, timeout=0.5):
         """
         Alternative debug_from which isn't blocking.
@@ -1190,6 +1199,7 @@ class Debugger:
         done.set()
         
     # TODO make the option to have "until" be non blocking with an event when we reach the address [28/04/23] In other words migrate wait=False to wait=Event()
+    @context_decorator
     def c(self, *, wait=True, force = False, signal=0x0):
         """
         Continue execution of the process
@@ -1266,6 +1276,7 @@ class Debugger:
             
     # I'm worried about how to handle the lock in this case [12/06/23] I want to block until I send the continue
     # I would like to keep the same priority for step and continue [18/06/23]
+    @context_decorator
     def continue_until(self, location, /, *, wait=True, force=False, loop = False, hw=False):
         """
         Continue until a specific address
@@ -1481,6 +1492,7 @@ class Debugger:
     # Breakpoint callbacks should be handled before the interruption to simplify the logic and I guess that if we reach a breakpoint and still send a SIGINT the signal will arrive later 
     # how do I interrupt in case of remote debugging ?
     @lock_decorator
+    @context_decorator
     def interrupt(self, *, strict=False):
         """
         In a callback it makes no sense to check if the process is running since for that instant it will be on halt. We therefore use strict to force the interrupt call.
@@ -1722,6 +1734,7 @@ class Debugger:
         done.set()
 
     # May not want to wait if you are going over a functions that need user interaction
+    @context_decorator
     def next(self, wait:bool=True, repeat:int=1):
         done = Event()
 
@@ -1778,6 +1791,7 @@ class Debugger:
             done.set()
 
     # May be dependent on the stack frame and cause problems after a jump [27/04/23]
+    @context_decorator
     def finish(self, *, wait:bool=True, repeat = 1, force = False):
         done = Event()    
         
@@ -1922,6 +1936,7 @@ class Debugger:
 
     # I still need end_pointer even if I would like to put the breakpoint on the address from which we call the function because I can't be sure that someone won't want to call a function from inside 
     # Wait, finish is doing it anyway... So let's require that call isn't used while you are inside the function, but still handle it just in case. Like a check that *(rsp - bytes) -> rip. It's not perfect, but it should at least always be true if we used the function properly [21/05/23]
+    @context_decorator
     def call(self, function: [int, str], args: list = [], *, heap=True, wait = True, calling_convention = None):
         """
         Call any function in the binary with the parameters you want
@@ -2057,6 +2072,7 @@ class Debugger:
         return self
 
     # Can not be cached because qemu somehow changes it back at every step! [16/01/25]
+    @context_decorator
     def make_page_rwx(self, address: int, size : int = 1, *, syscall_address : [int, None] = None):
         """
         Sets the memory protections of a page to be readable, writable, and executable (RWX). 
@@ -2084,6 +2100,7 @@ class Debugger:
         else: # pwntools doesn't have constants yet for RISCV yet [18/01/25]
             self.syscall(226, [page_address, page_size, 7], syscall_address = syscall_address)
         
+    @context_decorator
     def syscall(self, code: int, args: list, *, heap = True, syscall_address = None):
         """
         Make the program call a given syscall
@@ -2143,6 +2160,7 @@ class Debugger:
 
     # We could do better regarding the num, like using the stop event to know which breakpoint we hit, but we'll think about it later [25/07/23]
     # Do we want a single callback per breakpoint or allow a list ?
+    @context_decorator
     def catch_syscall(self, name: str, callback):
         """
         the callback must have the following form:
@@ -2204,6 +2222,7 @@ class Debugger:
         
     # Be careful about the interactions between finish and other user breakpoints
     # TODO print ascii strings instead of pointer
+    @context_decorator
     def set_ftrace(self, *, calling_convention = None, n_args = 3, no_return = False, custom_callback = None, exclude = []):
         """
         Can not always read the return value because some "functions" may not return but jump to another function. Use no_return in case of problem 
@@ -2244,6 +2263,7 @@ class Debugger:
 
     # Be careful about the interactions between finish and other user breakpoints [31/07/24]
     # In particular consider skipping ptrace and wait functions if ptrace is emulated and we decide to move the breakpoints from the libc to the plt. [01/08/24]
+    @context_decorator
     def set_ltrace(self, *, calling_convention = None, n_args = 3, no_return = False, exclude = []):
         if self.exe.statically_linked:
             log.warn("The binary does not use libraries!")
@@ -2477,6 +2497,7 @@ class Debugger:
                 self.write(address, data)
         result.put(None)
 
+    @context_decorator
     def __bruteforce(self, threads, init, setup, _to, check, backup, result, shutdown, libdebug):
         # Riconnetti gli eventi di gdb con il nuovo processo 
         for child, _ in threads:
@@ -2567,6 +2588,7 @@ class Debugger:
         #if DEBUG: self.logger.debug("reading from inferior %d, [pid: %d]", inferior.num, inferior.pid)
         return self.inferiors[inferior.num].read_memory(address, size).tobytes()
 
+    @context_decorator
     def read(self, address: int, size: int, *, inferior = None, pid = None) -> bytes:
         if not self.debugging:
             log.warn_once(DEBUG_OFF)
@@ -2587,6 +2609,7 @@ class Debugger:
             return fd.read(size)
 
     # qemu doesn't allow writing in non writable pages [23/08/24]
+    @context_decorator
     def __write_gdb(self, address: int, byte_array: bytes, *, inferior = None):
 
         if inferior == None:
@@ -2669,6 +2692,7 @@ class Debugger:
     def read_long_long(self, address: int) -> int:
         return self.read_long_longs(address, 1)[0]
 
+    @context_decorator
     def read_pointers(self, address: int, n: int) -> list:
         return self.read_longs(address, n) if context.bits == 64 else self.read_ints(address, n)
     
@@ -2730,6 +2754,7 @@ class Debugger:
     def write_long_long(self, address: int, value: int, *, heap = True) -> int:
         return self.write_long_longs(address, [value], heap = heap)
 
+    @context_decorator
     def write_pointers(self, address: int, values: list, *, heap = True) -> list:
         return self.write_longs(address, values, heap = heap) if context.bits == 64 else self.write_ints(address, values, heap = heap)
     
@@ -2761,6 +2786,7 @@ class Debugger:
         """
         return self.write_strings(address, [value], heap = heap)
 
+    @context_decorator
     def push(self, value: int):
         """
         push value (must be uint) on the stack
@@ -2773,6 +2799,7 @@ class Debugger:
         self.stack_pointer -= context.bytes
         self.write(self.stack_pointer, pack(value))
 
+    @context_decorator
     def pop(self) -> int:
         """
         pop value (uint) from the stack
@@ -2846,6 +2873,7 @@ class Debugger:
             #Just use the heap if you can
 
     # We could make size round up to the start of next instruction, but should we ? [23/01/25]
+    @context_decorator
     def nop(self, address, instructions = 1, *, size = None):
         address = self._parse_address(address)
         if size is None:
@@ -2881,6 +2909,7 @@ class Debugger:
 
     # The canary is constant right ? This way you can also set it after a leak and access it from anywhere
     @property
+    @context_decorator
     def canary(self):
         if not self.debugging:
             log.warn_once(DEBUG_OFF)
@@ -2903,6 +2932,7 @@ class Debugger:
         self._canary = value
      
     @property
+    @context_decorator
     def _special_registers(self):
         if context.arch in ["i386", "amd64"]:
             return ["eflags", "cs", "ss", "ds", "es", "fs", "gs"]
@@ -2919,6 +2949,7 @@ class Debugger:
 
     # WARNING reset expects the last two registers to be sp and ip. backup expects the last register to be ip
     @property
+    @context_decorator
     def _registers(self):
         if context.arch == "aarch64":
             return [f"x{i}" for i in range(31)] + ["lr"] + ["sp", "pc"]
@@ -2937,6 +2968,7 @@ class Debugger:
 
     # Making ax accessible will probably be faster that having to write 
     @property
+    @context_decorator
     def _minor_registers(self):
         if context.arch == "aarch64":
             return [f"w{x}" for x in range(31)]
@@ -2978,6 +3010,7 @@ class Debugger:
     # We should add a new type of registers for aliases so that the user can access them, but we don't duplicate them when doing backups. 
     # Would also be useful to access floating points [21/01/25]
     @property
+    @context_decorator
     def _long_registers(self):
         if context.arch == "amd64":
             return [f"xmm{i}" for i in range(32)]
@@ -2985,6 +3018,7 @@ class Debugger:
             return []
 
     @property
+    @context_decorator
     def next_inst(self):
         inst = next(self.disassemble(self.instruction_pointer, 16)) #15 bytes is the maximum size for an instruction in x64
         inst.toString = partial(lambda self: f"{self.mnemonic} {self.op_str}".strip(), inst)
@@ -3003,6 +3037,7 @@ class Debugger:
 
     # May be useful for Inner_Debugger
     # BUG capstone v5, Risky Business start function. disassemble(ip, 1000) will stop after 4 instructions
+    @context_decorator
     def disassemble(self, address, size):
         if self._capstone is None:
             if context.arch == "amd64":
@@ -3027,6 +3062,7 @@ class Debugger:
    ########################## Generic references ##########################
 
     @property
+    @context_decorator
     def return_value(self):
         if context.arch == "amd64":
             return self.rax
@@ -3044,6 +3080,7 @@ class Debugger:
             ...
 
     @return_value.setter
+    @context_decorator
     def return_value(self, value):
         if context.arch == "amd64":
             self.rax = value
@@ -3062,6 +3099,7 @@ class Debugger:
 
 
     @property
+    @context_decorator
     def stack_pointer(self):
         if context.arch == "amd64":
             return self.rsp
@@ -3078,6 +3116,7 @@ class Debugger:
 
     # issue: setting $sp is not allowed when other stack frames are selected... https://sourceware.org/gdb/onlinedocs/gdb/Registers.html [04/03/23]
     @stack_pointer.setter
+    @context_decorator
     def stack_pointer(self, value):
         # May move this line to push and pop if someone can argue a good reason to.
         if context.arch == "amd64":
@@ -3113,6 +3152,7 @@ class Debugger:
                 ...
 
     @property
+    @context_decorator
     def base_pointer(self):
         if context.arch == "amd64":
             return self.rbp
@@ -3128,6 +3168,7 @@ class Debugger:
             ...
     
     @base_pointer.setter
+    @context_decorator
     def base_pointer(self, value):
         if context.arch == "amd64":
             self.rbp = value
@@ -3144,6 +3185,7 @@ class Debugger:
 
     # Prevent null pointers
     @property
+    @context_decorator
     def instruction_pointer(self):
         ans = None
         for attempts in range(2):
@@ -3173,6 +3215,7 @@ class Debugger:
         return ans
 
     @instruction_pointer.setter
+    @context_decorator
     def instruction_pointer(self, value):
         if context.arch == "amd64":
             self.rip = value
@@ -3187,6 +3230,7 @@ class Debugger:
         else:
             ...
 
+    @context_decorator
     def _find_rip(self):
         # experimental, but should be better that the native one for libdebug        
         if self.base_pointer:
@@ -3204,6 +3248,7 @@ class Debugger:
         return unpack(return_pointer)       
 
     @property
+    @context_decorator
     def __saved_ip(self):
         if context.arch == "aarch64":
             return self.x30
@@ -3245,6 +3290,7 @@ class Debugger:
     # Quick attempt to find maps
     # TODO handle remote debugging [20/01/25]
     @property
+    @context_decorator
     def maps(self):
         maps = {}
         try:
@@ -3265,6 +3311,7 @@ class Debugger:
     # I assume that you don't care about the address when you are not debugging the program
     # The main advantage now though is just the speed of not having to run a new process every time we call the function if we are already debugging it.
     @property
+    @context_decorator
     def libs(self):
         """libs() -> dict
         Return a dictionary mapping the path of each shared library loaded
@@ -3317,6 +3364,7 @@ class Debugger:
 
         return maps
 
+    @context_decorator
     def _set_range(self, file: EXE):
         if not self.debugging:
             file.address = 0
@@ -3564,6 +3612,7 @@ class Debugger:
     # I just discovered "gdb.events.new_inferior"... I can take the pid from event.inferior.pid, but can I do more ?
     # interrupt is not working as well as we would like. With a callback on the event we have to call interrupt when we notice the fork, but the program will have continued for a while [22/12/23] 
     # We should move to catch fork and catch clone if we want to allow interrupt [22/12/23]
+    @context_decorator
     def set_split_on_fork(self, off=False, c=False, keep_breakpoints=False, interrupt=False, script=""):
         """
         split out a new debugging session for the child process every time you hit a fork
@@ -3619,8 +3668,7 @@ class Debugger:
                         self.__set_stop("We hit a breakpoint while interrupting the process. Handle it!")
                             
                 ## Non puoi eseguire azioni dentro ad un handler degli eventi quindi lancio in un thread a parte
-                with context.local(**self._context_params):
-                    context.Thread(target=split, args = (inferior,), name=f"[{self.pid}] split_fork").start()
+                context.Thread(target=split, args = (inferior,), name=f"[{self.pid}] split_fork").start()
 
             self.fork_handler = fork_handler
             self.gdb.events.new_inferior.connect(self.fork_handler)
@@ -3650,6 +3698,7 @@ class Debugger:
     # Should we split the "manual" between ptrace and waitpid ? So that I can only wait for the later ? For now I will put the breakpoint a bit later so that you can do continue_until("waitpid") [28/07/23]
     # TODO teach how to add symbols in a binary for the functions if the code is statically linked and stripped
     # TODO use plt if binary is not statically linked so that you don't need to load the libc ? [31/07/24] -> This may interfere with ltrace.
+    @context_decorator
     def emulate_ptrace(self, *, off=False, wait_fun="waitpid", wait_syscall="wait4", manual=False, silent=False, signals = ["SIGSTOP"], syscall=False):
         """
         Emulate all calls to ptrace and waitpid between processes debugged.
@@ -3969,6 +4018,7 @@ class Debugger:
         self.return_value = 0 # right ?
         return manual
 
+    @context_decorator
     def _PTRACE_PEEKTEXT(self, address, _, *, slave, manual=False, **kwargs):
         try:
             data = unpack(slave.read(address, context.bytes))
@@ -4090,6 +4140,7 @@ class Debugger:
 
         return address
 
+    @context_decorator
     def inject_sleep(self, address, inferior=None):
         """
         Inject a shellcode that stops the execution at a specific address
@@ -4201,6 +4252,7 @@ class Debugger:
             self.__getattribute__(name)
 
     # Consider checking if the value is an instance of ELF and in case look for the base address. This is useful when we need other libraries than libc. [11:45] 
+    @context_decorator
     def __setattr__(self, name, value):
         if not self._initialized:
             super().__setattr__(name, value)
