@@ -1165,11 +1165,14 @@ class Debugger:
         with self._ptrace_lock.log("__continue_gdb"):
             priority = self._raise_priority("avoid race condition in continue")
             self.step(force=True)
-            if self._stop_reason != "SINGLE STEP":
+            if self._stop_reason == "RUNNING":
+                log.warn("Somehow we think that the process is still running...")
+                print(self.next_inst)
+            elif self._stop_reason == "SIGINT":
+                if DEBUG: self.logger.debug("syscall interrupted by user") # step doesn't return if we are on a read, so calling interrupt() would leave us here with a SIGINT
+            elif self._stop_reason != "SINGLE STEP":
                 if "BREAKPOINT" in self._stop_reason:
                     if DEBUG: self.logger.debug("step in continue already reached the breakpoint")
-                elif self._stop_reason == "SIGINT":
-                    if DEBUG: self.logger.debug("syscall interrupted by user") # step doesn't return if we are on a read, so calling interrupt() would leave us here with a SIGINT
                 else:
                     log.warn(f"unknown interruption! {self._stop_reason}")
                 self._lower_priority("avoid race condition in continue")
@@ -1340,12 +1343,12 @@ class Debugger:
             self._priority_wait("standard wait")
 
     # This should only be used under the hood, but how do we let the other one to the user without generating problems ? [14/04/23]
-    def _priority_wait(self, comment="?", priority=None):
+    def _priority_wait(self, comment="?", priority=None, timeout=None):
         if not self.debugging:
             log.warn_once(DEBUG_OFF)
-            return
+            return True
 
-        self._myStopped.priority_wait(comment, priority)
+        return self._myStopped.priority_wait(comment, priority, timeout=timeout)
             
     # problems when I haven't executed anything
     # Inside a callback checking running doesn't make sense since in that instant the program is interrupted, but we define it as running for interrupt() to still stop the program when we finish the callback. 
@@ -1506,6 +1509,9 @@ class Debugger:
             log.warn_once(DEBUG_OFF)
             return
 
+        if not context.native:
+            log.warn("Interrupting process under QEMU may not work!")
+
         if not strict and not self.running:
             self._lower_priority("release interrupt")
             # Must go after the lower_priority() to let other threads see it [19/06/23]
@@ -1517,10 +1523,23 @@ class Debugger:
         if DEBUG: self.logger.debug("interrupting [pid:%d]", self.pid)
         # SIGSTOP is too common in gdb
         if DEBUG: self.logger.debug("sending SIGINT")
-        if self.local_debugging:
+        if self.local_debugging and context.native:
             os.kill(self.pid, signal.SIGINT)
         else:
-            self.execute("interrupt")
+            self.execute("interrupt") # shouldn't the first one be an execute action ? For some reason we decided instead to split in with the raise priority immediately as we call it.
+        # counter = 0
+        # while self.running:
+        #     if counter > 5:
+        #         log.error("can not interrupt program!")
+        #     print("interrupting again")
+        #     self.execute("interrupt")
+        #     sleep(0.2)
+        #     counter += 1
+        # if counter:
+        #     address = dbg.instruction_pointer
+        #     with context.silent: dbg.step(repeat=counter)
+        #     if address != self.instruction_pointer or self._stop_reason != "SIGINT":
+        #         log.warn("Oups, I made a mistake trying to catch the SIGINT after a syscall...")
         self._priority_wait(comment="interrupt", priority = priority)
         # For now it will be someone else problem the fact that we sent the SIGINT when we arrived on a breakpoint or something similar. [21/07/23] Think about how to catch it without breaking the other threads that are waiting
         # TODO check that we did indeed took over the control [17/10/23] (BUG interrupt while reading doesn't work)
@@ -1544,6 +1563,8 @@ class Debugger:
                 log.warn("Oups, I made a mistake trying to catch the SIGINT...")
             elif res == -1:
                 log.warn("What the fuck happened with the SIGINT ? I never found it...")
+            else:
+                if DEBUG: self.logger.info(f"found SIGINT in {res} steps.")
             for bp, callback in zip(self.breakpoints[address], saved_callbacks):
                 bp.callback = callback
             res |= INTERRUPT_HIT_BREAKPOINT
@@ -1554,22 +1575,28 @@ class Debugger:
     manual = interrupt
 
 
-    def _step(self, signal=0x0):
+    def _step(self, signal=0x0, timeout=None):
             address = self.instruction_pointer
 
             if DEBUG: self.logger.debug("stepping from 0x%x", self.instruction_pointer)
             if self.gdb is not None:
                 if signal:
-                    self.signal(signal, step=True)
+                    self.signal(signal, step=True, timeout=timeout) # This calls step again
+                    finished = True
                 else:
                     priority = self.execute_action("si", sender="step")
+                    finished = self._priority_wait(comment="step", priority = priority, timeout = timeout)    
             elif self.libdebug is not None:
                 priority = self.execute_action(lambda: self.libdebug.step(signal=signal), sender="step")
+                finished = self._priority_wait(comment="step", priority = priority, timeout = timeout)
             else:
                 ...
             
-            self._priority_wait(comment="step", priority = priority)
-            
+            if not finished:
+                if DEBUG: self.logger.warn("Tried to stepped into a syscall. Interrupting...")
+                self.interrupt()
+                self._lower_priority("step interrupted.")
+
             return address != self.instruction_pointer
 
 
@@ -1578,7 +1605,7 @@ class Debugger:
     # I don't use force=True by default because there are instructions that keep the instruction pointer at the same address even if executed [05/05/23]
     # You need force=True on continue to avoid double call to callbacks [30/05/23]
     @lock_decorator
-    def step(self, repeat:int=1, *, force=False, signal=0x0):
+    def step(self, repeat:int=1, *, force=False, signal=0x0, timeout=None):
         """
         execute a single instruction
 
@@ -1588,7 +1615,10 @@ class Debugger:
         """
         if not self.debugging:
             log.warn_once(DEBUG_OFF)
-            return
+            return self
+
+        if repeat <= 0:
+            return self
 
         # Should only be the first step, right ? [08/05/23]
         if force:
@@ -1596,10 +1626,8 @@ class Debugger:
             repeat -= 1
 
         for _ in range(repeat):
-        
             self._stepped = True
-
-            if not self._step(signal):
+            if not self._step(signal, timeout=timeout):
                 log.warn("You stepped, but the address didn't change. This may be due to a bug in gdb. If this wasn't the intended behaviour use force=True in the function step or continue you just called")
 
         return self
@@ -1620,7 +1648,7 @@ class Debugger:
             # Let's talk... Usually the problem is with SIGSTOP, right ? There are cases where we jump on a signal, so we won't always have a SINGLE STEP. 
             #n = self.step_until_condition(lambda self: self.instruction_pointer != old_ip or self._stop_reason == "SINGLE STEP", limit=5)
             # I don't understand how you can have a stop for single step without changing, but it happens [12/06/23]
-            n = self.step_until_condition(lambda self: self.instruction_pointer != old_ip or self._stop_reason not in ["SIGSTOP", "SINGLE STEP"], limit=5)
+            n = self.step_until_condition(lambda self: self.instruction_pointer != old_ip or self._stop_reason not in ["SIGSTOP", "SINGLE STEP"], limit=5, timeout=0.5) # 0.2 is too low when splitting processes
         if n == -1:
             raise Exception("Could not force step!")
         if n > 0:
@@ -1633,6 +1661,7 @@ class Debugger:
     exit_broken_function = __broken_step
 
     # Should I implement a wait = False here to in case an input is needed ? [28/04/23] (In the meanwhile handle it in the callback)
+    # TODO handle timeout
     def step_until_address(self, location: [int, str], callback=None, limit:int=10_000) -> int:
         """
         step until a particular address is reached.
@@ -1660,6 +1689,7 @@ class Debugger:
             return -1
 
     # May be wrong for RISC-V
+    # TODO handle timeout
     def step_until_ret(self, callback=None, limit:int=10_000) -> int:
         """
         step until the end of the function
@@ -1683,7 +1713,7 @@ class Debugger:
             log.warn_once(f"I made {limit} steps and haven't reached the end of the function...")
             return -1
 
-    def step_until_condition(self, condition, limit=10_000):
+    def step_until_condition(self, condition, limit=10_000, timeout=None):
         """
         Step until condition(self) returns True or limit exceeded
         The condition will be tested after the first step
@@ -1693,7 +1723,7 @@ class Debugger:
             return
 
         for i in range(limit):
-            self.step()
+            self.step(timeout=timeout)
             if condition(self):
                 return i
 
@@ -1701,6 +1731,7 @@ class Debugger:
         log.warn_once(f"I made {limit} steps and haven't found what you are looking for...")
         return -1
 
+    # TODO handle timeout
     def step_until_call(self, callback=None, limit=10_000):
         """
         step until a call to a function
@@ -2015,7 +2046,7 @@ class Debugger:
             self.execute(f"handle {signal} stop nopass")
         self._handled_signals[SIGNALS[signal]] = callback
 
-    def signal(self, n: [int, str], /, *, handler : [int, str] = None, step=False):
+    def signal(self, n: [int, str], /, *, handler : [int, str] = None, step=False, timeout=None):
         """
         Send a signal to the process and put and break returning from the handler
         Once sent the program will jump to the handler and continue running therefore We set a breakpoint on the next instruction before sending the signal.
@@ -2053,7 +2084,7 @@ class Debugger:
                 log.warn_once("Remember that gdb uses a different order for the signals. It is advised to use directly the name of the signal")
             if step:
                 self.execute(f"queue-signal {n}")
-                self.step()
+                self.step(timeout=timeout)
             else:
                 priority = self.execute_action(f"signal {n}", sender="signal")
                 self._priority_wait(comment=f"signal {n}", priority = priority)

@@ -173,28 +173,32 @@ class MyEvent(Event):
 
     # I still need a standard wait for actions not initiated by dbg.cont and dbg.next
     # There seems to be a rare bug where multiple priorities are cleared at the same time [11/06/23]
-    def priority_wait(self, comment = "", priority=None):
+    # If timeout is met we don't want to lower the priority
+    def priority_wait(self, comment = "", priority=None, *, timeout=None):
         if priority is None:
             priority = self.priority
         if DEBUG: _logger.debug(f"[{self.pid}] waiting with priority {priority} for {comment}")
         while True:
             # Unfortunately you can not use the number of threads waiting to find the max priority [18/06/23]
-            super().wait()
-            if DEBUG: _logger.debug(f"wait [{priority}] finished")
+            finished = super().wait(timeout)
+            if DEBUG: _logger.debug(f"wait [{priority}] finished" + ("" if finished else " for timeout"))
             if priority == self.priority:
-                if DEBUG: _logger.debug(f"[{self.pid}] met priority {priority} for {comment}")
-                # Prevent race conditions. Make sure all threads know the current priority before anyone calls lower_priority
-                sleep(0.001)
-                self.lower_priority(comment)
-                # why does it work ?
-                #super().clear()
+                if finished:
+                    if DEBUG: _logger.debug(f"[{self.pid}] met priority {priority} for {comment}")
+                    # Prevent race conditions. Make sure all threads know the current priority before anyone calls lower_priority
+                    sleep(0.001)
+                    self.lower_priority(comment)
+                    # why does it work ?
+                    #super().clear()
+                else:
+                    if DEBUG: _logger.warn(f"[{self.pid}] {comment} did not complete.")
                 break
             # If I call wait again while the event is set it won't block ! [04/04/23]
             self.cleared.wait()
             # I forgot to clear it somewhere... [22/05/23]
             # Wait, what happens if we have 3 threads waiting ??
             self.cleared.clear()
-        #return priority
+        return finished
 
     # I move the priority -= 1 in here to avoid a race condition on the check priority == self.priority. I hope it won't break because I missed a clear somewhere, but with the cleared.wait; cleared.clear it should already break anyway [13/06/23]
     def clear(self, comment):
