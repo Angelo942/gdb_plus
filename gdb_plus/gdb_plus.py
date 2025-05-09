@@ -24,7 +24,7 @@ from elftools.elf.sections import SymbolTableSection
 # Logs to debug the library can be enabled by setting DEBUG = True in gdb_plus.utils
 _logger = logging.getLogger("gdb_plus")
 ch = logging.StreamHandler()
-formatter = logging.Formatter("%(name)s:%(funcName)s:%(message)s")
+formatter = LevelColorFormatter("%(name)s:%(funcName)s:%(message)s")
 ch.setFormatter(formatter)
 _logger.addHandler(ch)
 if DEBUG: _logger.level = 10
@@ -1516,7 +1516,7 @@ class Debugger:
         res = INTERRUPT_SENT
         if self._stop_reason != "SIGINT":
             # Catch del SIGINT
-            if DEBUG: self.logger.debug("We hit a breakpoint before the SIGINT... I will continue stepping to catch them.")
+            if DEBUG: self.logger.warning("We hit a breakpoint before the SIGINT... I will continue stepping to catch them.")
             
             # I must make sure the callbacks aren't called each time!
             address = self.instruction_pointer
@@ -1612,7 +1612,7 @@ class Debugger:
         if n == -1:
             raise Exception("Could not force step!")
         if n > 0:
-            if DEBUG: self.logger.debug("Bug still present. Had to force %d time(s)", n)
+            if DEBUG: self.logger.warn("Bug still present. Had to force %d time(s)", n)
 
         for breakpoint, callback in zip(self.breakpoints[old_ip], saved_callbacks):
             breakpoint.callback = callback

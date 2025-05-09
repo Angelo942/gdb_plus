@@ -5,9 +5,37 @@ from pwn import *
 from threading import Event, Lock
 from queue import Queue
 from dataclasses import dataclass
+import colorama
 
 DEBUG = False
 _logger = logging.getLogger("gdb_plus")
+
+# Initialize colorama (wraps ANSI codes for Windows compatibility)
+colorama.init(autoreset=True)
+
+class LevelColorFormatter(logging.Formatter):
+    """
+    Formatter that applies a color based on the record's log level,
+    using colorama constants rather than raw ANSI codes.
+    """
+    LEVEL_COLORS = {
+        logging.DEBUG:    colorama.Fore.WHITE,
+        logging.INFO:     colorama.Fore.BLUE,
+        logging.WARNING:  colorama.Fore.YELLOW,
+        logging.ERROR:    colorama.Fore.RED,
+        logging.CRITICAL: colorama.Style.BRIGHT + colorama.Fore.RED,
+    }
+
+    def __init__(self, fmt=None, datefmt=None, style='%'):
+        # Initialize base Formatter with format string
+        super().__init__(fmt=fmt, datefmt=datefmt, style=style)
+
+    def format(self, record):
+        # Get the base formatted message
+        msg = super().format(record)
+        # Fetch the color for this level (default to reset)
+        color = self.LEVEL_COLORS.get(record.levelno, colorama.Style.RESET_ALL)
+        return f"{color}{msg}{colorama.Style.RESET_ALL}"
 
 # Only support amd64
 class user_regs_struct:
@@ -184,11 +212,11 @@ class MyEvent(Event):
     #        self.cleared.set()
 
     def raise_priority(self, comment):
-        if DEBUG: _logger.debug(f"[{self.pid}] raising priority [{self.priority}] -> [{self.priority + 1}] for {comment}")
+        if DEBUG: _logger.info(f"[{self.pid}] raising priority [{self.priority}] -> [{self.priority + 1}] for {comment}")
         self.priority += 1
 
     def lower_priority(self, comment):
-        if DEBUG: _logger.debug(f"[{self.pid}] lowering priority [{self.priority - 1}] <- [{self.priority}] for {comment}")
+        if DEBUG: _logger.info(f"[{self.pid}] lowering priority [{self.priority - 1}] <- [{self.priority}] for {comment}")
         self.priority -= 1
         if self.priority < 0:
             log.warn(f"I think there is something wrong with the wait! We reached priority {self.priority}")
@@ -276,7 +304,7 @@ class MyLock:
 
 
     def log(self, function_name):
-        if DEBUG: self.owner.logger.debug(f"[{self.owner.pid}] wrapping {function_name}")
+        if DEBUG: self.owner.logger.info(f"[{self.owner.pid}] wrapping {function_name}")
         return self
 
     def __enter__(self):
