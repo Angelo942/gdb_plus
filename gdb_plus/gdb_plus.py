@@ -3619,27 +3619,37 @@ class Debugger:
                     self.access_library(name)
         return self._libraries
 
-    # @property
-    # def ld(self):
-    #     if self._ld == -1:
-    #         return None
-    #     elif not self.debugging or (self._exe is not None and self._exe.statically_linked):
-    #         self._ld = -1
-    #         return None
-    #     elif self._ld is None:
-    #         path = self._library_fullname("ld")
-    #         if path is not None:
-    #             self._ld = EXE(local_path, checksec=False)
-    #             self._set_range(self._ld)
-    #         else:
-    #             log.warn_once("Can not find loader...")
-    #             self._ld = -1
-    #             return None
-    #     return self._ld
+    # We can not rely on the expected file because in case of symlinks maps shows the real file and not the default name
+    # Example:
+    # root@4b5e4700a41b:/# ls -l /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2
+    # lrwxrwxrwx 1 root root 10 Apr 23  2024 /lib/x86_64-linux-gnu/ld-linux-x86-64.so.2 -> ld-2.28.so
+    # Would show ld-2.28.so instead
+    @property
+    def ld(self):
+        if self._ld == -1:
+            return None
+        elif not self.debugging or (self._exe is not None and self._exe.statically_linked):
+            self._ld = -1
+            return None
+        elif self._ld is None:
+            # We start from the bottom for QEMU that has both its loader and the one of the program being emulated
+            for path, addresses in list(self.libs.items())[::-1]:
+                if Path(path).stem.startswith("ld"): # handle mips ld.so.1
+                    local_path = self.local_path(path)
+                    if local_path is None:
+                        log.warn(f"can not access {path} from remote server.")
+                    else:
+                        self._ld = EXE(local_path, address=addresses[0], end_address=addresses[-1], checksec=False)
+                    break
+            else:
+                log.warn_once("Can not find loader...")
+                self._ld = -1
+                return None
+        return self._ld
 
-    # @ld.setter
-    # def ld(self, elf_ld: ELF):
-    #     self._ld = elf_ld
+    @ld.setter
+    def ld(self, elf_ld: ELF):
+        self._ld = elf_ld
 
     # NOTE: Here for backward compatibility with 7.0 
     @property

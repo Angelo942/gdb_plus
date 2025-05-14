@@ -327,6 +327,8 @@ class MyLock:
             if self.counter == 0:
                 self.event.set()
 
+# This is not guaranteed
+# Debuggging qemu-mips64 find both a different loader than expected because of a symlink and more libraries than expected.
 def enum_libs(file):
     """
     Find which libraries will be used by an executable without having to run it. 
@@ -334,17 +336,18 @@ def enum_libs(file):
     if file.statically_linked:
         return []
 
-    loader = None
-    for seg in file.iter_segments():
-        if seg.header.p_type == "PT_INTERP":
-            # this helper gives you the null-terminated interpreter path
-            loader = seg.get_interp_name().rstrip('\x00')
-            break
-    if loader is None:
-        log.warn("can not find loader!")
-        return []
+    # loader = None
+    # for seg in file.iter_segments():
+    #     if seg.header.p_type == "PT_INTERP":
+    #         # this helper gives you the null-terminated interpreter path
+    #         loader = seg.get_interp_name().rstrip('\x00')
+    #         break
+    # if loader is None:
+    #     log.warn("can not find loader!")
+    #     return []
 
-    libs = [Path(loader).name]
+    # libs = [Path(loader).name]
+    libs = []
 
     # Get the .dynamic section (holds dynamic table entries)
     dynamic_section = file.get_section_by_name('.dynamic')
