@@ -2326,11 +2326,17 @@ class Debugger:
             log.warn("there is already a catchpoint for %s... Overwriting...", name)
             self._event_breakpoints[self._event_table[name]] = callback
         else:
-            if DEBUG: self.logger.debug("setting catchpoint %s", name)
             self.execute(f"catch {name}")
             # In old versions of gdb (bug found in ubuntu 20.4) breakpoints() only return the breakpoints, not the catchpoints. 27/04/24
             #num = self.gdb.breakpoints()[-1].number
-            num = int(self.execute(f"info breakpoints").splitlines()[-2].split()[0])
+            data = self.execute(f"info breakpoints").splitlines()
+            for i in range(len(data)):
+                try:
+                    num = int(data[-i - 1].split()[0])
+                    break
+                except:
+                    continue
+            if DEBUG: self.logger.debug("setting catchpoint %s: %d", name, num)
             self._event_table[name] = num
             self._event_breakpoints[num] = callback
 
