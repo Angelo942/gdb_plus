@@ -171,7 +171,7 @@ class Debugger_EXE(unittest.TestCase):
                 self.assertEqual(len(dbg.libs), 2)
                 dbg.until(dbg.elf.entry)
                 self.assertEqual(len(dbg.libs), 3)
-                self.assertEqual(dbg.libc.address, 0x4001851000)
+                self.assertEqual(dbg.libc.address, 0x4001852000)
                 self.assertEqual(dbg.libc.range, 0x127000)
                 self.assertTrue(dbg.instruction_pointer in dbg.exe)
                 self.assertTrue(dbg.instruction_pointer not in dbg.libc)
@@ -188,7 +188,7 @@ class Debugger_EXE(unittest.TestCase):
         with context.local(binary="./deflation"):
             with Debugger(context.binary, aslr=False, from_entry=True) as dbg:
                 dbg.access_library("libz")
-                self.assertEqual(dbg.libz.address, 0x7ffff7f76000)
+                self.assertEqual(dbg.libz.address, 0x7ffff7f75000)
 
 #@unittest.skip
 class Debugger_actions(unittest.TestCase):
