@@ -3184,8 +3184,10 @@ class Debugger:
                 self._capstone = Cs(CS_ARCH_AARCH64, CS_MODE_ARM)
             elif context.arch == "arm":
                 self._capstone = Cs(CS_ARCH_ARM, CS_MODE_ARM)
-            elif context.arch in ["riscv32", "riscv64"]:
-                self._capstone = Cs(CS_ARCH_RISCV, CS_MODE_RISCVC) #CS_MODE_RISCV32 if context.bits == 32 else CS_MODE_RISCV64)
+            elif context.arch == "riscv32":
+                self._capstone = Cs(CS_ARCH_RISCV, CS_MODE_RISCV32 | CS_MODE_RISCVC) # CS_MODE_RISCVC is needed for 16 bits instructions
+            elif context.arch == "riscv64":
+                self._capstone = Cs(CS_ARCH_RISCV, CS_MODE_RISCV64 | CS_MODE_RISCVC) 
             elif context.arch == "mips":
                 self._capstone = Cs(CS_ARCH_MIPS, CS_MODE_MIPS32 + CS_MODE_BIG_ENDIAN)
             elif context.arch == "mips64":
