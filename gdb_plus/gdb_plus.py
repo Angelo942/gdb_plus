@@ -3732,6 +3732,7 @@ class Debugger:
     # Warn that the child will still be in the middle of the fork [26/04/23]
     # TODO support split for libdebug [02/06/23] (Will require a new patch to libdebug)
     # I thought about setting emulate_ptrace for the child if it is set in the parent, but I want to let the user free of choosing the parameters they wants [23/07/23]
+    @context_decorator
     def _split_child(self, *, pid = None, inferior=None, n=None, script=""):
         if inferior is None:
             for inf_n, inferior in self.inferiors.items():

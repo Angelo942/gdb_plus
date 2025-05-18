@@ -1,4 +1,4 @@
-GDB+ 8.0.0 **Remote QEMU**
+GDB+ 7.4.0 **Remote QEMU**
 * Improve interrupt
 * Improve remote connections to qemu
 * Download libraries from remote server

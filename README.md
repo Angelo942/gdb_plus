@@ -404,7 +404,6 @@ If your binary requires system libraries, look at the (instructions)[https://doc
 * pwndbg may be better than GEF when using qemu.
 
 # TODO
-* Distinguish between process running and dead
 * Improve ptrace emulation
     * handle waitpid(-1) with multiple slaves
     * emulate waitid too
