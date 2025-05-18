@@ -5,37 +5,34 @@ from pwn import *
 from threading import Event, Lock
 from queue import Queue
 from dataclasses import dataclass
-import colorama
+from pathlib import Path
 
 DEBUG = False
 _logger = logging.getLogger("gdb_plus")
 
-# Initialize colorama (wraps ANSI codes for Windows compatibility)
-colorama.init(autoreset=True)
-
 class LevelColorFormatter(logging.Formatter):
-    """
-    Formatter that applies a color based on the record's log level,
-    using colorama constants rather than raw ANSI codes.
-    """
+    WHITE       = "\033[37m"
+    BLUE        = "\033[34m"
+    YELLOW      = "\033[33m"
+    RED         = "\033[31m"
+    BRIGHT_RED  = "\033[1;31m"
+
     LEVEL_COLORS = {
-        logging.DEBUG:    colorama.Fore.WHITE,
-        logging.INFO:     colorama.Fore.BLUE,
-        logging.WARNING:  colorama.Fore.YELLOW,
-        logging.ERROR:    colorama.Fore.RED,
-        logging.CRITICAL: colorama.Style.BRIGHT + colorama.Fore.RED,
+        logging.DEBUG:    WHITE,
+        logging.INFO:     BLUE,
+        logging.WARNING:  YELLOW,
+        logging.ERROR:    RED,
+        logging.CRITICAL: BRIGHT_RED,
     }
 
     def __init__(self, fmt=None, datefmt=None, style='%'):
-        # Initialize base Formatter with format string
         super().__init__(fmt=fmt, datefmt=datefmt, style=style)
 
     def format(self, record):
-        # Get the base formatted message
+        RESET       = "\033[0m"
         msg = super().format(record)
-        # Fetch the color for this level (default to reset)
-        color = self.LEVEL_COLORS.get(record.levelno, colorama.Style.RESET_ALL)
-        return f"{color}{msg}{colorama.Style.RESET_ALL}"
+        color = self.LEVEL_COLORS.get(record.levelno, RESET)
+        return f"{color}{msg}{RESET}"
 
 # Only support amd64
 class user_regs_struct:
