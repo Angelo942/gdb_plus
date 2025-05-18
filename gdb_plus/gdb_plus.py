@@ -351,9 +351,6 @@ class Debugger:
                     log.warn("Failed finding elf base address. Disabling from_entry...")
                     return
                 self.until(address)
-                # If the library is loaded by the program with dlopen access_library will fail.
-                for library in self._libraries:
-                    self.access_library(library)
                     
     def local_path(self, path: [str, Path]) -> [Path, None]:
         """
