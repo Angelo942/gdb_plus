@@ -1151,7 +1151,7 @@ class Debugger:
             try:
                 res = self.execute("info program").splitlines()
             except:
-                return "RUNNING"
+                return "RUNNING" if not self._closed.is_set() else "NOT RUNNING"
             if not res:
                 return "NOT RUNNING"
 
@@ -1460,7 +1460,7 @@ class Debugger:
                     self.execute("info program")
                     return False
                 except:
-                    return True
+                    return not self._closed.is_set()
             elif self.libdebug is not None:
                 return not self.libdebug._test_execution()
             else:
@@ -4004,7 +4004,10 @@ class Debugger:
                     sleep(0.2)
                 tracee = dbg._slaves[pid]
                 stopped = tracee._wait_slave(options)
-
+                # If we close the program while both debuggers are still open we are gonna try to continue the stop handler letting the parent know that the child exited, but since the parent is also closed the code would crash
+                # Instead we exit cleanly
+                if self._closed.is_set(): sys.exit()
+                
                 # TODO what about handling events in status ? [04/06/23]
                 if stopped:
                     if tracee._stop_reason == "NOT RUNNING":
