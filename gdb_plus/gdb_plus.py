@@ -1317,10 +1317,11 @@ class Debugger:
         done = Event()
 
         if self.gdb is not None:
-            context.Thread(target=self.__continue_gdb, args=(force, wait, done), name=f"[{self.pid}] continue").start() 
+            # It would be better to close cleanly the thread when we close the debugger, but for now I just set daemon=True to at least not block the script.
+            context.Thread(target=self.__continue_gdb, args=(force, wait, done), name=f"[{self.pid}] continue", daemon=True).start() 
 
         elif self.libdebug is not None:
-            context.Thread(target=self.__continue_libdebug, args=(force, wait, done, signal), name=f"[{self.pid}] continue").start() 
+            context.Thread(target=self.__continue_libdebug, args=(force, wait, done, signal), name=f"[{self.pid}] continue", daemon=True).start() 
 
         else:
             ...
