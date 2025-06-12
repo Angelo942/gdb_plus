@@ -3837,7 +3837,7 @@ class Debugger:
                     stopped = self.interrupt(strict=True)
                     log.info(f"splitting child: {inferior.pid}")
                     # Am I the reason why the process stopped ?
-                    self.children[pid] = self._split_child(inferior=inferior, script=script)
+                    self.children[pid] = self.__silence(self._split_child, inferior=inferior, script=script)
                     # Should not continue if I reached the breakpoint before the split
                     self._lower_priority("release split")
                     self.split.put(pid)
