@@ -3452,7 +3452,10 @@ class Debugger:
         maps = {}
         for line in self.__raw_maps().splitlines():
             if not context.native and "/qemu-" in line:
-                break
+                if "-static" in line: # Qemu static can be located at the top of our memory, so we shouldn't stop. Since it  doesn't import libraries it is not a problem for us to read all maps [19/05/25]
+                    continue
+                else:
+                    break
             start = end = None
             # /proc/pid/maps uses "start-end", while info proc map uses "start    end"
             for part in line.replace("-", " ").split(" "):
@@ -3476,6 +3479,7 @@ class Debugger:
     # The main advantage now though is just the speed of not having to run a new process every time we call the function if we are already debugging it.
     # If we are working under QEMU and not debugging the process pwntools implementations of elf.libs may fail. If you see this problem we will need to run a debugger ourselves.
     # The idea of using fake_terminal.py is terrible. Somehow it is 3 times slower, so it's not worth it just to prevent having a terminal popping up.
+    # TODO avoid code duplication from maps
     @property
     @context_decorator
     def libs(self):
@@ -3506,7 +3510,10 @@ class Debugger:
             if '/' not in line: continue
             path = line[line.index('/'):]
             if not context.native and "/qemu-" in path: # Everything after the QEMU binary is only libs for QEMU that we don't want. Be careful though if this breaks something [04/02/25]
-                break
+                if "-static" in path: # Qemu static can be located at the top of our memory, so we shouldn't stop. Since it  doesn't import libraries it is not a problem for us to read all maps [19/05/25]
+                    continue
+                else:
+                    break
         
             start = end = None
             # /proc/pid/maps uses "start-end", while info proc map uses "start    end"
