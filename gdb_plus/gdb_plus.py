@@ -1153,7 +1153,7 @@ class Debugger:
             try:
                 res = self.execute("info program").splitlines()
             except:
-                return "RUNNING" if not self._closed.is_set() else "NOT RUNNING"
+                return "RUNNING" if self.running else "NOT RUNNING"
             if not res:
                 return "NOT RUNNING"
 
@@ -1169,8 +1169,11 @@ class Debugger:
                     return "BREAKPOINT"
                 if line == "It stopped after being stepped.":
                     return "SINGLE STEP"
+                if line.endswith("is now running."):
+                    return "RUNNING"
 
             return "STOPPED"
+
 
         # TODO handle it correctly. Is Ox5 only used for step or also breakpoints ? Do we have access to libdebug's stepped variable ? (I would prefer that one at least) [05/06/23]
         elif self.libdebug is not None:
@@ -1459,8 +1462,9 @@ class Debugger:
                     # We need a command that succeeds when the process exits, but fails when inside a callback [02/05/25]
                     # accessing a register fails after we exit
                     # info ... succeeds even inside a callback
-                    self.execute("info program")
-                    return False
+                    # in ubuntu 24 info program succeeds...
+                    res = self.execute("info program")
+                    return res.strip().endswith("is now running.")
                 except:
                     return not self._closed.is_set()
             elif self.libdebug is not None:
