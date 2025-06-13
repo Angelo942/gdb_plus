@@ -2716,13 +2716,14 @@ class Debugger:
 
    ########################## MEMORY ACCESS ##########################
 
+    # current_inferior is super slow...
     def __read_gdb(self, address: int, size: int, *, inferior = None) -> bytes:
 
         if inferior == None:
             inferior = self.current_inferior
 
         #if DEBUG: self.logger.debug("reading from inferior %d, [pid: %d]", inferior.num, inferior.pid)
-        return self.inferiors[inferior.num].read_memory(address, size).tobytes()
+        return inferior.read_memory(address, size).tobytes()
 
     @context_decorator
     def read(self, address: int, size: int, *, inferior = None, pid = None) -> bytes:
