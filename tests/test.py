@@ -12,7 +12,7 @@ source ~/.gdbinit-gef.py
 """
 
 gdbinit_pwndbg = """
-source ~/.pwndbg/gdbinit.py
+source /home/root/pwndbg/gdbinit.py
 """
 
 QUICK = 10
@@ -32,8 +32,8 @@ class Debugger_process(unittest.TestCase):
     @timeout_decorator.timeout(QUICK)
     def test_file_standard(self):
         print("\ntest_file_standard: ", end="")
-        with context.local(arch="i386", bits=32):
-            with Debugger("./start").remote("chall.pwnable.tw", 10000) as dbg:
+        with context.local(binary="./start"):
+            with Debugger(context.binary).remote("chall.pwnable.tw", 10000) as dbg:
                 dbg.c(wait=False)
                 self.assertEqual(dbg.recv(), b"Let's start the CTF:")
                 dbg.interrupt()
@@ -156,6 +156,7 @@ class Debugger_EXE(unittest.TestCase):
         warnings.simplefilter("ignore", ResourceWarning)
         warnings.simplefilter("ignore", ImportWarning)
 
+    #I can not trust range exactly since in ubuntu 22 it's a rougher estimation
     #@unittest.skip
     @timeout_decorator.timeout(QUICK)
     def test_libs_qemu(self):
@@ -164,15 +165,17 @@ class Debugger_EXE(unittest.TestCase):
             with Debugger(context.binary, aslr=False, from_entry=False, script=gdbinit_pwndbg) as dbg:
                 self.assertTrue(dbg.instruction_pointer not in dbg.exe)
                 self.assertTrue(dbg.instruction_pointer in dbg.ld)
-                self.assertEqual(dbg.exe.address, 0x4000000000)
-                self.assertEqual(dbg.exe.range, 0x3000)
-                self.assertEqual(dbg.ld.address, 0x4001804000)
-                self.assertEqual(dbg.ld.range, 0x23000)
+                # self.assertEqual(dbg.exe.range, 0x3000)
+                self.assertTrue(dbg.instruction_pointer in dbg.ld)
+                # self.assertEqual(dbg.ld.range, 0x23000)
                 self.assertEqual(len(dbg.libs), 2)
+                # Test ld address
+                dbg.until("__tunable_get_val")
+                self.assertEqual(dbg.next_inst.insn_name(), 'c.slli')
                 dbg.until(dbg.elf.entry)
                 self.assertEqual(len(dbg.libs), 3)
-                self.assertEqual(dbg.libc.address, 0x4001852000)
-                self.assertEqual(dbg.libc.range, 0x127000)
+                self.assertEqual(dbg.read_pointer(dbg.exe.got["fgets"]), dbg.libc.symbols["fgets"])
+                # self.assertEqual(dbg.libc.range, 0x127000)
                 self.assertTrue(dbg.instruction_pointer in dbg.exe)
                 self.assertTrue(dbg.instruction_pointer not in dbg.libc)
                 self.assertTrue(dbg.instruction_pointer not in dbg.ld)
@@ -188,7 +191,7 @@ class Debugger_EXE(unittest.TestCase):
         with context.local(binary="./deflation"):
             with Debugger(context.binary, aslr=False, from_entry=True) as dbg:
                 dbg.access_library("libz")
-                self.assertEqual(dbg.libz.address, 0x7ffff7f75000)
+                self.assertEqual(dbg.read_pointer(dbg.exe.got["deflateEnd"]), dbg.libz.symbols["deflateEnd"])
 
 #@unittest.skip
 class Debugger_actions(unittest.TestCase):
@@ -564,8 +567,6 @@ class Debbuger_fork(unittest.TestCase):
     def test_ptrace_emulation_syscall(self):
         print("\ntest_ptrace_emulation_syscall: ", end="")
         with context.local(arch = "amd64"):
-            from sage.all import IntegerModRing, MatrixSpace, vector
-
             END_ANTI_TRACING = 0x0401590
             RWX_SECTION = 0x7ffff7ff8000
             CALLED_MMAP = 0x0402520
@@ -580,7 +581,6 @@ class Debbuger_fork(unittest.TestCase):
                 return ans
 
             with Debugger("./traps_withSymbols", aslr=False, debug_from=END_ANTI_TRACING) as dbg:
-                return
                 dbg.set_split_on_fork()
 
                 dbg.continue_until("fork")
@@ -592,7 +592,7 @@ class Debbuger_fork(unittest.TestCase):
                 A, b = [], []
                 dbg.p.sendline(b"A"*0x40)
                 dbg.emulate_ptrace(syscall=True, silent=True) 
-                dbg.cont(wait=False)
+                done = dbg.cont(wait=False)
 
                 child.continue_until(CALLED_MMAP)
 
@@ -609,6 +609,7 @@ class Debbuger_fork(unittest.TestCase):
                         A.append(parse_line(child.read(MATRIX_DATA, 0x40)))
                         b.append(u32(child.read(MATRIX_DATA+ 0x40, 4)))
 
+                from sage.all import IntegerModRing, MatrixSpace, vector
                 R = IntegerModRing(2**32)
                 M = MatrixSpace(R, 0x10, 0x10)
                 A = M(A)
@@ -624,8 +625,6 @@ class Debbuger_fork(unittest.TestCase):
     def test_ptrace_emulation_libdebug(self):
         print("\ntest_ptrace_emulation_libdebug: ", end="")
         with context.local(arch="amd64"):
-            from sage.all import IntegerModRing, MatrixSpace, vector
-
             END_ANTI_TRACING = 0x0401590
             RWX_SECTION = 0x7ffff7ff8000
             CALLED_MMAP = 0x0402520
@@ -677,6 +676,7 @@ class Debbuger_fork(unittest.TestCase):
                         b.append(u32(child.read(MATRIX_DATA+ 0x40, 4)))
 
                 # Risolvi sistema lineare con Sage
+                from sage.all import IntegerModRing, MatrixSpace, vector
                 R = IntegerModRing(2**32)
                 M = MatrixSpace(R, 0x10, 0x10)
                 A = M(A)
@@ -1077,6 +1077,7 @@ class Debugger_RISCV(unittest.TestCase):
                 self.assertEqual(b"ciao\n", dbg.p.recv())
                 self.assertFalse(dbg.priority)
 
+    # This will fail on ubuntu 24 because we can't run shellcodes
     #@unittest.skip
     @timeout_decorator.timeout(QUICK)
     def test_exploit(self):
