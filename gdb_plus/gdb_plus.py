@@ -254,9 +254,11 @@ class Debugger:
         elif from_start:
             try:
                 self.p = self.__silence(gdb.debug, target if isinstance(target, list) else self._exe.path, env=env, aslr=aslr, gdbscript=script, api=True)
-            except pwn.exception.PwnlibException:
+            except pwn.exception.PwnlibException as e:
                 if not context.native:
                     log.error(f"Could not debug program for {context.arch}. Did you install qemu-user ?")
+                else:
+                    raise e
             self.gdb = self.p.gdb
             # If pwntools doesn't find gdb-multiarch it will still start a normal gdb process but the process wouldn't run.
             if not context.native:
