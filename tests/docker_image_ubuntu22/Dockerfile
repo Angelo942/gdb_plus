@@ -38,4 +38,7 @@ RUN echo 'set -g mouse on' > /root/.tmux.conf
 RUN apt-get install -y software-properties-common
 RUN apt-get install -y binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi binutils-arm-linux-gnueabihf binutils-mips64el-linux-gnuabi64 binutils-mipsel-linux-gnu binutils-mips-linux-gnu binutils-x86-64-linux-gnu binutils-riscv64-linux-gnu
 
+RUN apt install libclang-dev
+RUN pip3 install clang==14.0.0
+
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

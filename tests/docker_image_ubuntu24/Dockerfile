@@ -73,4 +73,7 @@ RUN echo "python" >> /root/.gdbinit \
   && echo "import sys; sys.path.insert(0, '/opt/venv/lib/python3.12/site-packages')" >> /root/.gdbinit \
   && echo "end" >> /root/.gdbinit
 
+RUN apt install libclang-dev
+RUN pip3 install clang==18.1.8
+
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
