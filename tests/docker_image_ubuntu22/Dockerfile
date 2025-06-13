@@ -3,14 +3,16 @@ FROM ubuntu:22.04
 # System updates and core tools
 RUN apt update \
     && DEBIAN_FRONTEND=noninteractive apt install -y \
-       python3 ipython3 python3-pip git gdb gdbserver qemu-user qemu-user-static binfmt-support gdb-multiarch tmux wget nano \
+       python3 ipython3 python3-pip git gdb gdbserver qemu-user qemu-user-static binfmt-support gdb-multiarch tmux wget nano libclang-dev \
         libc6-i386-cross \
         libc6-armel-cross \
         libc6-arm64-cross \
         libc6-riscv64-cross \
         libc6-mips64-cross \
         binutils-multiarch \
-    && python3 -m pip install --upgrade pip timeout_decorator git+https://github.com/Angelo942/libdebug.git sortedcontainers pyserial pyelftools zstandard urllib3 unix-ar unicorn six pysocks pygments pycparser psutil plumbum packaging MarkupSafe intervaltree idna charset-normalizer certifi capstone bcrypt rpyc ropgadget requests python-dateutil mako colored_traceback cffi pynacl cryptography paramiko pwntools
+        software-properties-common \
+        binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi binutils-arm-linux-gnueabihf binutils-mips64el-linux-gnuabi64 binutils-mipsel-linux-gnu binutils-mips-linux-gnu binutils-x86-64-linux-gnu binutils-riscv64-linux-gnu \
+    && python3 -m pip install --upgrade pip timeout_decorator git+https://github.com/Angelo942/libdebug.git sortedcontainers pyserial pyelftools zstandard urllib3 unix-ar unicorn six pysocks pygments pycparser psutil plumbum packaging MarkupSafe intervaltree idna charset-normalizer certifi capstone bcrypt rpyc ropgadget requests python-dateutil mako colored_traceback cffi pynacl cryptography paramiko pwntools clang==14.0.0
 
 # Create non-root home dir
 RUN mkdir -p /home/root \
@@ -34,11 +36,5 @@ WORKDIR /home/root/gdb_plus/tests
 RUN printf 'set history save off\nset pagination off\n' > /root/.gdbinit
 
 RUN echo 'set -g mouse on' > /root/.tmux.conf
-
-RUN apt-get install -y software-properties-common
-RUN apt-get install -y binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi binutils-arm-linux-gnueabihf binutils-mips64el-linux-gnuabi64 binutils-mipsel-linux-gnu binutils-mips-linux-gnu binutils-x86-64-linux-gnu binutils-riscv64-linux-gnu
-
-RUN apt install libclang-dev
-RUN pip3 install clang==14.0.0
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
