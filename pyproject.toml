@@ -16,6 +16,7 @@ dependencies = [
     "pwntools>=4.5.0",
     "capstone",
     "clang",
+    "libdebug_legacy@git+https://github.com/Angelo942/libdebug.git",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",
