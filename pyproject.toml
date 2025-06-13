@@ -8,14 +8,14 @@ requires = [
 [project]
 name = "gdb_plus"
 description = "Python library to automate gdb debugging"
-version = "7.3.0"
+version = "7.5.0"
 authors = [{name = "Edoardo"}]
 readme = "README.md"
 requires-python = ">=3.8"
 dependencies = [
     "pwntools>=4.5.0",
     "capstone",
-    "libdebug_legacy@git+https://github.com/Angelo942/libdebug.git",
+    "clang",
 ]
 classifiers = [
     "Programming Language :: Python :: 3",

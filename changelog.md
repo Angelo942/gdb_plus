@@ -1,3 +1,15 @@
+GDB+ 7.5.0 **Parse structures**
+* Parse and read c structures into python objects
+* Docker tests for ubuntu 22.04 and 24.04
+* Improve autocomplete to handle register names
+
+GDB+ 7.4.0 **Remote QEMU**
+* Improve interrupt
+* Improve remote connections to qemu
+* Download libraries from remote server
+* Support multiple debuggers with different contexts
+* Support mips64
+
 GDB+ 7.3.0 **MIPS**
 * Introduce basic mips support
 * Support xmm registers

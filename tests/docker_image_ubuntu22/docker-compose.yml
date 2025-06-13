@@ -1,0 +1,18 @@
+version: "3.8"
+services:
+  gdb_env:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # Allow ptrace for gdbserver inside the container
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
+    volumes:
+      # Mount local gdb_plus source into container
+      - ../..:/home/root/gdb_plus:rw
+    working_dir: /home/root/gdb_plus/tests
+    tty: true
+    stdin_open: true
+    command: []

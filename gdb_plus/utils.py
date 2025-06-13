@@ -5,9 +5,34 @@ from pwn import *
 from threading import Event, Lock
 from queue import Queue
 from dataclasses import dataclass
+from pathlib import Path
 
 DEBUG = False
 _logger = logging.getLogger("gdb_plus")
+
+class LevelColorFormatter(logging.Formatter):
+    WHITE       = "\033[37m"
+    BLUE        = "\033[34m"
+    YELLOW      = "\033[33m"
+    RED         = "\033[31m"
+    BRIGHT_RED  = "\033[1;31m"
+
+    LEVEL_COLORS = {
+        logging.DEBUG:    WHITE,
+        logging.INFO:     BLUE,
+        logging.WARNING:  YELLOW,
+        logging.ERROR:    RED,
+        logging.CRITICAL: BRIGHT_RED,
+    }
+
+    def __init__(self, fmt=None, datefmt=None, style='%'):
+        super().__init__(fmt=fmt, datefmt=datefmt, style=style)
+
+    def format(self, record):
+        RESET       = "\033[0m"
+        msg = super().format(record)
+        color = self.LEVEL_COLORS.get(record.levelno, RESET)
+        return f"{color}{msg}{RESET}"
 
 # Only support amd64
 class user_regs_struct:
@@ -148,28 +173,32 @@ class MyEvent(Event):
 
     # I still need a standard wait for actions not initiated by dbg.cont and dbg.next
     # There seems to be a rare bug where multiple priorities are cleared at the same time [11/06/23]
-    def priority_wait(self, comment = "", priority=None):
+    # If timeout is met we don't want to lower the priority
+    def priority_wait(self, comment = "", priority=None, *, timeout=None):
         if priority is None:
             priority = self.priority
         if DEBUG: _logger.debug(f"[{self.pid}] waiting with priority {priority} for {comment}")
         while True:
             # Unfortunately you can not use the number of threads waiting to find the max priority [18/06/23]
-            super().wait()
-            if DEBUG: _logger.debug(f"wait [{priority}] finished")
+            finished = super().wait(timeout)
+            if DEBUG: _logger.debug(f"wait [{priority}] finished" + ("" if finished else " for timeout"))
             if priority == self.priority:
-                if DEBUG: _logger.debug(f"[{self.pid}] met priority {priority} for {comment}")
-                # Prevent race conditions. Make sure all threads know the current priority before anyone calls lower_priority
-                sleep(0.001)
-                self.lower_priority(comment)
-                # why does it work ?
-                #super().clear()
+                if finished:
+                    if DEBUG: _logger.debug(f"[{self.pid}] met priority {priority} for {comment}")
+                    # Prevent race conditions. Make sure all threads know the current priority before anyone calls lower_priority
+                    sleep(0.001)
+                    self.lower_priority(comment)
+                    # why does it work ?
+                    #super().clear()
+                else:
+                    if DEBUG: _logger.warn(f"[{self.pid}] {comment} did not complete.")
                 break
             # If I call wait again while the event is set it won't block ! [04/04/23]
             self.cleared.wait()
             # I forgot to clear it somewhere... [22/05/23]
             # Wait, what happens if we have 3 threads waiting ??
             self.cleared.clear()
-        #return priority
+        return finished
 
     # I move the priority -= 1 in here to avoid a race condition on the check priority == self.priority. I hope it won't break because I missed a clear somewhere, but with the cleared.wait; cleared.clear it should already break anyway [13/06/23]
     def clear(self, comment):
@@ -184,11 +213,11 @@ class MyEvent(Event):
     #        self.cleared.set()
 
     def raise_priority(self, comment):
-        if DEBUG: _logger.debug(f"[{self.pid}] raising priority [{self.priority}] -> [{self.priority + 1}] for {comment}")
+        if DEBUG: _logger.info(f"[{self.pid}] raising priority [{self.priority}] -> [{self.priority + 1}] for {comment}")
         self.priority += 1
 
     def lower_priority(self, comment):
-        if DEBUG: _logger.debug(f"[{self.pid}] lowering priority [{self.priority - 1}] <- [{self.priority}] for {comment}")
+        if DEBUG: _logger.info(f"[{self.pid}] lowering priority [{self.priority - 1}] <- [{self.priority}] for {comment}")
         self.priority -= 1
         if self.priority < 0:
             log.warn(f"I think there is something wrong with the wait! We reached priority {self.priority}")
@@ -276,7 +305,7 @@ class MyLock:
 
 
     def log(self, function_name):
-        if DEBUG: self.owner.logger.debug(f"[{self.owner.pid}] wrapping {function_name}")
+        if DEBUG: self.owner.logger.info(f"[{self.owner.pid}] wrapping {function_name}")
         return self
 
     def __enter__(self):
@@ -298,12 +327,27 @@ class MyLock:
             if self.counter == 0:
                 self.event.set()
 
+# This is not guaranteed
+# Debuggging qemu-mips64 find both a different loader than expected because of a symlink and more libraries than expected.
 def enum_libs(file):
     """
     Find which libraries will be used by an executable without having to run it. 
     """
     if file.statically_linked:
         return []
+
+    # loader = None
+    # for seg in file.iter_segments():
+    #     if seg.header.p_type == "PT_INTERP":
+    #         # this helper gives you the null-terminated interpreter path
+    #         loader = seg.get_interp_name().rstrip('\x00')
+    #         break
+    # if loader is None:
+    #     log.warn("can not find loader!")
+    #     return []
+
+    # libs = [Path(loader).name]
+    libs = []
 
     # Get the .dynamic section (holds dynamic table entries)
     dynamic_section = file.get_section_by_name('.dynamic')
@@ -318,8 +362,6 @@ def enum_libs(file):
         print("No .dynstr section found!")
         exit(1)
     dynstr_data = dynstr_section.data()
-
-    libs = []
 
     # Iterate over the dynamic table entries
     for i in range(0, len(data), context.bytes * 2):
@@ -399,6 +441,7 @@ shellcode_syscall = {
     "riscv32": b's\x00\x00\x00',
     "riscv64": b's\x00\x00\x00',
     "mips": b'\x0c\x00\x00\x00',
+    "mips64": b'\x0c\x00\x00\x00',
 }
 # First register is where to save the syscall num
 syscall_calling_convention = {
@@ -409,6 +452,7 @@ syscall_calling_convention = {
     "riscv32": ["a7"]+[f"a{i}"for i in range(6)],
     "riscv64": ["a7"]+[f"a{i}"for i in range(6)],
     "mips": ["v0"] + [f"a{i}" for i in range(4)],
+    "mips64": ["v0"] + [f"a{i}" for i in range(6)],
 }
 function_calling_convention = {
     "amd64": ["rdi", "rsi", "rdx", "rcx", "r8", "r9"],
@@ -418,6 +462,7 @@ function_calling_convention = {
     "riscv32": [f"a{i}"for i in range(8)],
     "riscv64": [f"a{i}"for i in range(8)],
     "mips": [f"a{i}" for i in range(4)],
+    "mips64": [f"a{i}" for i in range(6)],
 }
 return_instruction = {
     "amd64": b"\xc3",
@@ -427,6 +472,7 @@ return_instruction = {
     "riscv32": b'g\x80\x00\x00',
     "riscv64": b'g\x80\x00\x00',
     "mips": b'\x08\x00\xe0\x03',
+    "mips64": b'\x08\x00\xe0\x03',
 }
 nop = {
     "amd64": b"\x90",
@@ -436,4 +482,5 @@ nop = {
     "riscv32": b'\x13\x00\x00\x00',
     "riscv64": b'\x13\x00\x00\x00',
     "mips": b'\x00\x00\x00\x00',
+    "mips64": b'\x00\x00\x00\x00',
 }
