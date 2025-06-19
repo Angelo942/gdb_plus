@@ -201,7 +201,7 @@ class Debugger:
                 log.info(f"context not set... Using {context}")
                 self._context_params = context.copy()
             else:
-                log.warn("No context set and no binary given. We recommend setting context.binary at the beginning of your script.")
+                log.warn_once("No context set and no binary given. We recommend setting context.binary at the beginning of your script.")
 
         # The idea was to let gdb interrupt only one inferior while letting the other one run, but this doesn't work [29/04/23]
         #script = "set target-async on\nset pagination off\nset non-stop on" + script
@@ -235,8 +235,8 @@ class Debugger:
                 self.pid = pid
             except:
                 if self.gdbserver_qemu is None:
-                    log.warn("If you want to debug a remote program under QEMU please also debug QEMU itself and pass the debugger as gdbserver_qemu=...")
-                    log.warn("I will not be able to access informations about the memory layout and libraries used.")
+                    log.warn_once("If you want to debug a remote program under QEMU please also debug QEMU itself and pass the debugger as gdbserver_qemu=...")
+                    log.warn_once("I will not be able to access informations about the memory layout and libraries used.")
         # We should check if we crash when elf.native == False to warn the user to install qemu-user, but elf doesn't exist yet... [06/01/25]
         # Do we try only for context.native == False and context.copy == {} ? [06/01/25]
         elif type(target) is int:
@@ -286,13 +286,13 @@ class Debugger:
                     file_name = line.split("'")[1]
                     return Path(file_name)
             else:
-                log.warn("can not find executable") # Should be an error, but I don't want to break the debugger
+                log.warn_once("can not find executable") # Should be an error, but I don't want to break the debugger
                 return None
 
         # I wanted to move it inside __attach_gdb, but we don't have self.gdb defined yet to call download so I prefer to keep it here instead of assigning self.gdb inside the attach function [09/05/25]
         if self._exe is None:
             if self.pid is None:
-                log.warn("No file specified! What are we debugging ?")
+                log.warn_once("No file specified! What are we debugging ?")
             exe_path = find_executable()
             if exe_path is not None: # This should never fail
                 local_path = self.local_path(exe_path)
@@ -300,7 +300,7 @@ class Debugger:
                     self._exe = EXE(local_path, checksec=False)
                     if DEBUG: self.logger.debug("found executable: %s -> %s", exe_path, local_path)
                 else:
-                    log.warn(f"can not find copy of {exe_path}")
+                    log.warn_once(f"can not find copy of {exe_path}")
             
         # TODO test with programs using dlopen
         if self._exe is not None and not self._exe.statically_linked:
@@ -343,14 +343,14 @@ class Debugger:
             # This is here to have the libc always available [06/01/25]
             # self.instruction_pointer != self._exe.entry: May not have a loader and libc, but still be considered dynamically linked
             if from_entry and self._exe is not None and not self._exe.statically_linked and self.ld is None:
-                log.warn(f"{self._exe.name} is not marked as statically linked, but I can not find a loader!")
+                log.warn_once(f"{self._exe.name} is not marked as statically linked, but I can not find a loader!")
             elif from_entry and self._exe is not None and self.ld is not None and self.instruction_pointer in self.ld:
                 if not context.native:
                     log.warn_once("Debugging from entry may fail with qemu. In case set Debugger(..., from_entry = False)")
                 try:
                     address = self.exe.entry
                 except Exception:
-                    log.warn("Failed finding elf base address. Disabling from_entry...")
+                    log.warn_once("Failed finding elf base address. Disabling from_entry...")
                     return
                 self.until(address)
                     
@@ -1613,7 +1613,7 @@ class Debugger:
             return
 
         if not context.native:
-            log.warn("Interrupting process under QEMU may not work!")
+            log.warn_once("Interrupting process under QEMU may not work!")
 
         if not strict and not self.running:
             self._lower_priority("release interrupt")
@@ -2673,7 +2673,7 @@ class Debugger:
         result.put(None)
 
     def bruteforce(self, _to, check, _from=None, setup=None, init=None, limit=1000, backup = [], libdebug=False, n_threads=1, n_processes=cpu_count()):
-        log.warn("Bruteforce is experimental! Function may break and names may change")
+        log.warn_once("Bruteforce is experimental! Function may break and names may change")
         parallel = n_threads * n_processes
         result = p_Queue()
         shutdown = p_Event()
@@ -2979,7 +2979,7 @@ class Debugger:
         pointer
         """
         if heap and "malloc" not in self.symbols:
-            log.warn("Can not find malloc. Data will be allocated on the BSS!")
+            log.warn_once("Can not find malloc. Data will be allocated on the BSS!")
             heap = False
 
         if heap:
@@ -3579,7 +3579,7 @@ class Debugger:
         
             try:
                 if file.data[offset:offset+0x8] == self.read(address+offset-0x10000, 8):
-                    log.warn(f"[{file.name}] We are not sure between {hex(address)} and {hex(address - 0x10000)}. We are assuming the second one")
+                    log.warn_once(f"[{file.name}] We are not sure between {hex(address)} and {hex(address - 0x10000)}. We are assuming the second one")
                     address -= 0x10000
             except:
                 pass
