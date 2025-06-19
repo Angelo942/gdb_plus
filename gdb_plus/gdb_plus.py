@@ -2560,11 +2560,11 @@ class Debugger:
             if DEBUG: self.logger.debug("putting breakpoint in %s", self.reverse_lookup(address))
         
         if self.gdb is not None:
-            breakpoint = Breakpoint(self.__breakpoint_gdb(address, legacy_callback, hw=hw).server_breakpoint, address, callback, temporary, user_defined)
+            breakpoint = Breakpoint(self.__breakpoint_gdb(address, legacy_callback, hw=hw).server_breakpoint, address, callback, temporary, user_defined, hw)
         elif self.libdebug is not None:
             if legacy_callback is not None:
                 callback = legacy_callback
-            breakpoint = Breakpoint(self.__breakpoint_libdebug(address, hw=hw), address, callback, temporary, user_defined)
+            breakpoint = Breakpoint(self.__breakpoint_libdebug(address, hw=hw), address, callback, temporary, user_defined, hw)
         else:
             ...
 
