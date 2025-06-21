@@ -376,12 +376,13 @@ class Debugger:
         # This is only when debugging a remote gdbserver
 
         if self.download_libraries:
+            remote_path = self.remote_path(path)
             gdb_files_path.mkdir(exist_ok=True)
-            self.download(path, gdb_file_path)
+            self.download(remote_path, gdb_file_path)
             return gdb_file_path
         else:
             if path.exists():
-                log.warn_once("The library {path} used may not be the exact same as the one on the remote server. If you want to download the one on the server set Debugger(..., download=True)", path)
+                log.warn_once("The library %s used may not be the exact same as the one on the remote server. If you want to download the one on the server set Debugger(..., download=True)", path)
                 return path
             elif Path(path.name).exists():
                 # We allow the case where the executable is in the same directory as the solve script. Although it may not be clean it's easier for the user. I just hope to not hide too much a problem.
@@ -389,6 +390,18 @@ class Debugger:
             else:
                 log.warn_once("Can not find %s. Please set Debugger(..., download=True) if you want to copy if from the remote server.", path)
                 return None
+
+    # TODO handle symlinks. We may have a path to a symlink while in the maps the real file is present.
+    def remote_path(self, path: [str, Path]) -> [Path, None]:
+        """
+        Find absolute path on the remote server.
+        """
+        if DEBUG: self.logger.debug(f"searching for {path} on remote server")
+        path = Path(path)
+        for lib in self.libs:
+            if path.name in lib:
+                return Path(lib)
+        return None
 
     def download(self, source: [str, Path], destination: [str, Path]):
         assert not self.local_debugging, "why are you trying to download files that are already on your system ?"
@@ -404,6 +417,8 @@ class Debugger:
             except Exception as e:
                 if not context.native:
                     log.error("Can not download files from qemu's gdbstup. Please debug qemu itself and pass it in Debugger(..., qemu_gdbserver=...)")
+                else:
+                    if DEBUG: self.logger.warn("Could not download %s", source)
 
 
     def __handle_breakpoints(self, breakpoints):
