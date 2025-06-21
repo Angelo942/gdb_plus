@@ -516,8 +516,13 @@ class Debugger:
                     # Make sure we don't miss the return
                     # Put above to avoid race condition after the jump
                     self._raise_priority("handling syscall")
+                    saved_return_value = self.return_value
                     should_skip = callback(self, entry=True)
                     if should_skip is not None and should_skip & SKIP_SYSCALL:
+                        if DEBUG: self.logger.info("skipping syscall")
+                        if self.return_value == saved_return_value:
+                            log.warn_once("You skipped the syscall execution, but didn't set the return value. This may break the process")# so I will set it to 0.")
+                            # self.return_value = 0
                         self.jump(self.instruction_pointer)
                         if not should_skip & SHOULD_STOP:
                             self.__hidden_continue()
