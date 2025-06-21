@@ -1,3 +1,6 @@
+GDB+ 7.6.0
+* address = dbg.write(None, data) allocates memory to store data
+
 GDB+ 7.5.0 **Parse structures**
 * Parse and read c structures into python objects
 * Docker tests for ubuntu 22.04 and 24.04

@@ -2766,50 +2766,59 @@ class Debugger:
 
     # qemu doesn't allow writing in non writable pages [23/08/24]
     @context_decorator
-    def __write_gdb(self, address: int, byte_array: bytes, *, inferior = None):
+    def __write_gdb(self, address: int, data: bytes, *, inferior = None):
 
         if inferior == None:
             inferior = self.current_inferior
         
         try:
-            inferior.write_memory(address, byte_array)
+            inferior.write_memory(address, data)
         except Exception as e: #gdb.MemoryError
             if not context.native:
                 log.warn_once("QEMU is preventing to write on the page. Changing permissions...") # Warn only once because QEMU will reset the protection at each step and it would spam the user of errors [16/01/25]
-                self.make_page_rwx(address, len(byte_array))
-                inferior.write_memory(address, byte_array)
+                self.make_page_rwx(address, len(data))
+                inferior.write_memory(address, data)
                 log.warn_once("Successfully changed permissions.")
             else:
                 raise e
 
     # How to handle multiple processes ?
-    def __write_libdebug(self, address: int, byte_array: bytes, *, pid = None):
+    def __write_libdebug(self, address: int, data: bytes, *, pid = None):
         if pid is not None:
             ...
 
-    # Do we want to handle here that if address is none we allocate ourself a pointer ? [17/11/23]
-    def write(self, address: int, byte_array: bytes, *, inferior = None, pid = None):
+    def write(self, address: int, data: bytes, *, inferior = None, pid = None, heap = True) -> int:
         if not self.debugging:
             log.warn_once(DEBUG_OFF)
             return 
-            
+
+        if address is None:
+            address = self.alloc(len(data), heap=heap)
+        
+        if DEBUG: self.logger.debug("writing %s at 0x%x", data.hex(), address)
+        
+        # BUG: GDB may write in the wrong inferior...
+        # BUG: GDB with QEMU can not write in non writable pages
+        if self.gdb is not None:
+            self.__write_gdb(address, data)
+            return address
+
+        elif self.new_libdebug is not None:
+            self.new_libdebug.mem.write(address, data)
+            return address
+
+        # Doesn't exist if the process is not running locally (ex remote gdbserver)
+        # Doesn't matter if running under qemu because /proc/pid/mem is just a copy created at launch and nothing more 
         if inferior is not None:
             pid = inferior.pid
         if pid is None:
             pid = self.pid
 
-        if DEBUG: self.logger.debug("writing %s at 0x%x", byte_array.hex(), address)
-        
-        # BUG: GDB may write in the wrong inferior...
-        # BUG: GDB with QEMU can not write in non writable pages
-        if self.gdb is not None:
-            return self.__write_gdb(address, byte_array)
-
-        # Doesn't exist if the process is not running locally (ex remote gdbserver)
-        # Doesn't matter if running under qemu because /proc/pid/mem is just a copy created at launch and nothing more 
         with open(f"/proc/{pid}/mem", "r+b") as fd:
             fd.seek(address)
-            fd.write(byte_array)
+            fd.write(data)
+
+        return address
 
     # Names should be singular or plurals ? I wanted singular for read and plural for write but it should be consistent [02/06/23]
     # I assume little endianness [02/06/23]
@@ -2873,9 +2882,7 @@ class Debugger:
 
     def _write_numbers(self, address: int, values: list, byte_size: int, *, heap = True) -> int:
         data = b"".join([pack(x, byte_size * 8) for x in values])
-        if address is None:
-            address = self.alloc(len(data), heap=heap)
-        else:
+        if address is not None:
             address = self._parse_address(address)
         self.write(address, data)
         return address     
