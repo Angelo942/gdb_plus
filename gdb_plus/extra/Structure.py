@@ -21,7 +21,7 @@ def parse_header_file(name: str, code: str) -> dict:
     index = clang.cindex.Index.create()
     tu = index.parse(
         path='struct.h',
-        args=['-std=c11'],
+        args=['-std=c11', '-fpack-struct'],
         unsaved_files=[('struct.h', code)],
         options=0
     )
