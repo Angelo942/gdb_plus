@@ -533,7 +533,12 @@ class Debugger:
                         return
                     # hit the return
                     self._syscall_return = True
-                    self.c()
+                    # address = self.instruction_pointer
+                    if DEBUG: self.logger.info("executing syscall")
+                    with context.silent:
+                        self.si()
+                    # if address != self.instruction_pointer:
+                    #     log.warn("The execution of the syscall didn't go as planned.")
                     should_stop = callback(self, entry=False)
                     self._lower_priority("syscall handled")
                     self._syscall_return = False

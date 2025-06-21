@@ -335,7 +335,30 @@ class Debugger_catchpoint(unittest.TestCase):
                 dbg.load_libc()
                 self.assertTrue(dbg.libc is not None)
 
-    # The syscalls are tested in ptrace emulation
+    #@unittest.skip
+    @timeout_decorator.timeout(QUICK)
+    def test_execute_syscall(self):
+        print("\ntest_execute_syscall: ", end="")
+        path = "./data.txt"
+        data = b"syscall altered"
+        with open(path, "wb") as file:
+            file.write(b"") 
+        with context.local(binary = ELF("./test_syscall_hook")):
+            with Debugger(context.binary, aslr=False) as dbg:
+                address = dbg.write(None, data)
+                def callback(self, entry):
+                    if entry:
+                        self.syscall_args[1] = address
+                        self.syscall_args[2] = len(data)
+                    return False
+
+                dbg.catch_syscall("write", callback)
+                dbg.b(0x555555555229)
+                dbg.until(0x555555555226)
+                self.assertEqual(0x555555555226, dbg.instruction_pointer)
+        with open(path, "rb") as file:
+            self.assertEqual(data, file.read())
+
 
 #@unittest.skip
 class Debugger_memory(unittest.TestCase):
