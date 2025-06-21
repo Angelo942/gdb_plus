@@ -67,7 +67,7 @@ def parse_header_file(name: str, code: str) -> dict:
 
 class Structure:
     def __init__(self, name: str, header: [str, dict], *, address: int = 0):
-        self.name = name
+        self._name = name
         self._symbols = {}
         self._content = {}
         self._address = 0
@@ -88,7 +88,7 @@ class Structure:
 
     def load(self, raw_data: bytes):
         # Maybe we should just give a warning if len(raw_data) > len(self) and still continue
-        assert len(raw_data) == len(self), f"{self.name} expected {len(self)} bytes, but got {len(raw_data)}"
+        assert len(raw_data) == len(self), f"{self._name} expected {len(self)} bytes, but got {len(raw_data)}"
 
         counter = 0
         for variable, size in self._sizes.items():
@@ -153,4 +153,4 @@ class Structure:
         new_obj._symbols = copy.copy(self._symbols) # This should be faster than reconstructing it by computing values
         return new_obj
 
-        # return Structure(self.name, self._sizes) # This as the same time as copy.copy, but looses eventual additional methods we add...
+        # return Structure(self._name, self._sizes) # This as the same time as copy.copy, but looses eventual additional methods we add...
