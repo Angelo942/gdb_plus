@@ -359,6 +359,31 @@ class Debugger_catchpoint(unittest.TestCase):
         with open(path, "rb") as file:
             self.assertEqual(data, file.read())
 
+    #@unittest.skip
+    @timeout_decorator.timeout(QUICK)
+    def test_syscall_control_flow(self):
+        print("\ntest_syscall_control_flow: ", end="")
+        path = "./data.txt"
+        data = b"syscall skipped"
+        with open(path, "wb") as file:
+            file.write(b"") 
+        with context.local(binary = ELF("./test_syscall_hook")):
+            with Debugger(context.binary) as dbg:
+                address = dbg.write(None, data)
+                def callback(self, entry):
+                    if entry:
+                        with open(path, "wb") as file:
+                            file.write(data)
+                            self.return_value = self.syscall_args[2]
+                        return SKIP_SYSCALL
+
+                dbg.catch_syscall("write", callback)
+                dbg.b(0x555555555229)
+                dbg.until(0x555555555226)
+                self.assertEqual(0x555555555226, dbg.instruction_pointer)
+        with open(path, "rb") as file:
+            self.assertEqual(data, file.read())
+
 
 #@unittest.skip
 class Debugger_memory(unittest.TestCase):

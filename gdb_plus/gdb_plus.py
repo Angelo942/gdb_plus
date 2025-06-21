@@ -548,8 +548,11 @@ class Debugger:
                     self._lower_priority("syscall handled")
                     self._syscall_return = False
                     if should_stop == False:
+                        if DEBUG: self.logger.info("resuming execution")
                         self.__hidden_continue()
                     else:
+                        if should_stop is None:
+                            log.warn_once("You didn't specify a behaviour leaving the syscall. By default I will stop.")
                         self.__set_stop("returned from syscall")
                 else:
                     self.__set_stop("returned from syscall")
