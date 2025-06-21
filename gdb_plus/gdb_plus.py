@@ -507,56 +507,62 @@ class Debugger:
         # We could also pass the stop event and read the breakpoint from there... But it would only be useful to know that it is a catchpoint and which one, so who cares [25/07/23]
         # We have a problem with multiple catchpoints for the same syscall... [26/07/23]
         # Can we get the reason from the StopEvent ?
+        # TODO WARNING stepping over a syscall doesn't trigger these callbacks! [21/06/25]
         if self._stop_reason == "BREAKPOINT" and (callback := self._event_breakpoints.get(self._details_breakpoint_stopped, None)) is not None:
-            if DEBUG: self.logger.debug("stopped for catchpoint")
+            if DEBUG: self.logger.debug("stopped for catchpoint at %x", self.instruction_pointer)
             name = list(self._event_table.keys())[list(self._event_table.values()).index(self._details_breakpoint_stopped)]
             # Syscalls have to be handled differently because we break both when calling it and when returning
             if name.startswith("syscall "):
-                if self._syscall_return == False: 
-                    # Make sure we don't miss the return
-                    # Put above to avoid race condition after the jump
-                    self._raise_priority("handling syscall")
-                    saved_return_value = self.return_value
-                    should_skip = callback(self, entry=True)
-                    if should_skip is not None and should_skip & SKIP_SYSCALL:
-                        if DEBUG: self.logger.info("skipping syscall")
-                        if self.return_value == saved_return_value:
-                            log.warn_once("You skipped the syscall execution, but didn't set the return value. This may break the process")# so I will set it to 0.")
-                            # self.return_value = 0
-                        self.jump(self.instruction_pointer)
-                        if not should_skip & SHOULD_STOP:
-                            self.__hidden_continue()
-                        else:
-                            # Wait I must stop for the user, not the emulator...
-                            # I should tell any wait() that I stopped, but not waitpid...
-                            # if self._ptrace_emulated:
-                            #     self._ptrace_has_stopped.set()
-                            #else:
-                            #    # TODO TEST IT [26/07/23]
-                            self.__set_stop("stopped after skipping syscall")
-                        self._lower_priority("syscall skipped")    
-                        return
-                    # hit the return
+                if self._syscall_return:
+                    # This used to be hit when we were running the syscall with continue because it triggered the catchpoint, but now step just flies over it. I keep it to remember in case we revert to a continue(force=False) [21/06/25]
+                    # The advantage of keeping this instead of stepping would be that we don't have to handle a special step where we ignore the breakpoints.
+                    raise Exception("this code should not be reachable")
+                    self.__set_stop("returned from syscall")
+                    return
+                    
+
+                # Make sure we don't miss the return
+                # Put above to avoid race condition after the jump
+                self._raise_priority("handling syscall")
+                saved_return_value = self.return_value
+                should_skip = callback(self, entry=True)
+                if should_skip is not None and should_skip & SKIP_SYSCALL:
+                    if DEBUG: self.logger.info("skipping syscall")
+                    if self.return_value == saved_return_value:
+                        log.warn_once("You skipped the syscall execution, but didn't set the return value. This may break the process")# so I will set it to 0.")
+                        # self.return_value = 0
+                    self.jump(self.instruction_pointer)
+                    # This will not save you from manual interactions unfortunately, but it's still better than anything
+                    if not should_skip & SHOULD_STOP and len(breakpoints) == 0:
+                        if DEBUG: self.logger.info("resuming execution")
+                        self.__hidden_continue()
+                    else:
+                        # Wait I must stop for the user, not the emulator...
+                        # I should tell any wait() that I stopped, but not waitpid...
+                        # if self._ptrace_emulated:
+                        #     self._ptrace_has_stopped.set()
+                        #else:
+                        #    # TODO TEST IT [26/07/23]
+                        self.__set_stop("stopped after skipping syscall")
+                    self._lower_priority("syscall skipped")
+                else:
                     self._syscall_return = True
                     # address = self.instruction_pointer
                     if DEBUG: self.logger.info("executing syscall")
                     with context.silent:
-                        self.si()
+                        self.si() # Consider implementing a self.c(force=False) that doesn't step
                     # if address != self.instruction_pointer:
                     #     log.warn("The execution of the syscall didn't go as planned.")
                     should_stop = callback(self, entry=False)
                     self._lower_priority("syscall handled")
                     self._syscall_return = False
-                    if should_stop == False:
+                    if should_stop == False and len(breakpoints) == 0:
                         if DEBUG: self.logger.info("resuming execution")
                         self.__hidden_continue()
                     else:
                         if should_stop is None:
                             log.warn_once("You didn't specify a behaviour leaving the syscall. By default I will stop.")
                         self.__set_stop("returned from syscall")
-                else:
-                    self.__set_stop("returned from syscall")
-                return
             else:
                 self._raise_priority("handling event")
                 should_stop = callback(self)
@@ -568,9 +574,12 @@ class Debugger:
                 else:
                     if DEBUG: self.logger.debug("[%d] callback returned False", self.pid)
                     self.__hidden_continue()
+                    return
+            if len(breakpoints) == 0:
                 return
 
-        if len(breakpoints) == 0:
+        # Don't execute callbacks when we are finishing the execution of a syscall. This will be handled after.
+        if len(breakpoints) == 0 or self._syscall_return:
             # Is it right to catch SIGSTOP and SIGTRAP ? [04/06/23]
             #if self._stop_reason == "SIGSEGV":
             #    self.__exit_handler(...)

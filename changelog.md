@@ -1,5 +1,6 @@
 GDB+ 7.6.0
 * address = dbg.write(None, data) allocates memory to store data
+* Improve callback handling for syscall catchpoints
 
 GDB+ 7.5.0 **Parse structures**
 * Parse and read c structures into python objects

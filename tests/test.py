@@ -368,7 +368,7 @@ class Debugger_catchpoint(unittest.TestCase):
         with open(path, "wb") as file:
             file.write(b"") 
         with context.local(binary = ELF("./test_syscall_hook")):
-            with Debugger(context.binary) as dbg:
+            with Debugger(context.binary, aslr=False) as dbg:
                 address = dbg.write(None, data)
                 def callback(self, entry):
                     if entry:
@@ -384,6 +384,81 @@ class Debugger_catchpoint(unittest.TestCase):
         with open(path, "rb") as file:
             self.assertEqual(data, file.read())
 
+    # @unittest.skip
+    @timeout_decorator.timeout(QUICK)
+    def test_breakpoint_after_syscall(self):
+        print("\ntest_breakpoint_after_syscall: ", end="")
+        path = "./data.txt"
+        data = b"syscall altered"
+        with open(path, "wb") as file:
+            file.write(b"") 
+        with context.local(binary = ELF("./test_syscall_hook")):
+            with Debugger(context.binary, aslr=False) as dbg:
+                address = dbg.write(None, data)
+                def callback_stop(self, entry):
+                    if entry:
+                        # Execute the syscall
+                        return False
+                    else:
+                        # Then stop
+                        return True
+
+                def callback_syscall(self, entry):
+                    if entry:
+                        self.syscall_args[1] = address
+                        self.syscall_args[2] = len(data)
+                    return False
+
+                counter = [0]
+                def callback_breakpoint(self):
+                    counter[0] += 1
+                    return True
+
+                dbg.catch_syscall("write", callback_syscall)
+                dbg.catch_syscall("open", callback_stop)
+                dbg.c()
+                syscall_address = dbg.instruction_pointer
+                dbg.b(syscall_address, callback_breakpoint)
+                dbg.c()
+                sleep(2)
+                self.assertEqual(syscall_address, dbg.instruction_pointer)
+                self.assertEqual(counter[0], 1)
+        with open(path, "rb") as file:
+            self.assertEqual(data, file.read())
+
+    # # This is not supported by gdb!
+    # #@unittest.skip
+    # @timeout_decorator.timeout(QUICK)
+    # def test_step_into_syscall(self):
+    #     print("\ntest_step_into_syscall: ", end="")
+    #     path = "./data.txt"
+    #     data = b"syscall altered"
+    #     with open(path, "wb") as file:
+    #         file.write(b"") 
+    #     with context.local(binary = ELF("./test_syscall_hook")):
+    #         with Debugger(context.binary, aslr=False) as dbg:
+    #             address = dbg.write(None, data)
+    #             def callback_stop(self, entry):
+    #                 if entry:
+    #                     return SKIP_SYSCALL | True
+    #                 else:
+    #                     return True
+
+    #             def callback(self, entry):
+    #                 if entry:
+    #                     self.syscall_args[1] = address
+    #                     self.syscall_args[2] = len(data)
+    #                 return False
+
+    #             dbg.catch_syscall("write", callback)
+    #             dbg.catch_syscall("open", callback_stop)
+    #             dbg.c() # Until end of sys_open
+    #             before_syscall_address = dbg.instruction_pointer
+    #             dbg.until(before_syscall_address - len(shellcode_syscall[context.arch]), loop=True)
+    #             dbg.si()
+    #             self.assertEqual(syscall_address, dbg.instruction_pointer)
+    #     with open(path, "rb") as file:
+    #         self.assertEqual(data, file.read())
 
 #@unittest.skip
 class Debugger_memory(unittest.TestCase):
