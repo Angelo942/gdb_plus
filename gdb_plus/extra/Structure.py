@@ -119,7 +119,7 @@ class Structure:
     def __repr__(self):
         structure=[]
         for name in self._symbols:
-            structure.append(f"{hex(self._symbols[name])}: {name} -> {hex(self._content[name]) if isinstance(self._content[name], int) else self._content[name]}")
+            structure.append(f"{hex(self._symbols[name])}: {name} -> {hex(getattr(self, name)) if isinstance(getattr(self, name), int) else getattr(self, name)}")
         return "{"+ "\n".join(structure)+"}"
 
     def __len__(self):
@@ -129,13 +129,13 @@ class Structure:
         return self.export()
 
     def __getattr__(self, name):
-        if self.__dict__.get('_content') and name in self._sizes:
+        if self.__dict__.get('_sizes') is not None and name in self._sizes:
             return self._content.get(name, 0)
         else:
             return self.__getattribute__(name)
 
     def __setattr__(self, name, value):
-        if self.__dict__.get('_content') and name in self._sizes:
+        if self.__dict__.get('_sizes') is not None and name in self._sizes:
             self._content[name] = value
         else:
             super().__setattr__(name, value)
