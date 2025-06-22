@@ -98,8 +98,13 @@ class Structure:
 
     def export(self):
         structure = b''
-        for name, val in self._content.items():
-            structure += pack(val, self._sizes[name]*8)
+        for name, size in self._sizes.items():
+            parsed = pack(getattr(self, name), size*8)
+            if len(parsed) != size:
+                log.warn(f"something went wrong exporting {name}")
+            structure += parsed
+        if len(structure) != len(self):
+            log.warn(f"something went wrong exporting {self._name}")
         return structure
 
     @property
