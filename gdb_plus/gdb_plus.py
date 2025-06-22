@@ -1895,18 +1895,18 @@ class Debugger:
             log.warn_once(f"I made {limit} steps and haven't reached the end of the function...")
             return -1
 
-    def __next(self, repeat, done):
+    def __next(self, repeat, done, hw):
         for _ in range(repeat):
             next_inst = self.next_inst
             if next_inst.is_call:
-                self.continue_until(self.instruction_pointer+next_inst.size)
+                self.continue_until(self.instruction_pointer+next_inst.size, hw=hw)
             else:
                 self.step()
         done.set()
 
     # May not want to wait if you are going over a functions that need user interaction
     @context_decorator
-    def next(self, wait:bool=True, repeat:int=1):
+    def next(self, wait:bool=True, repeat:int=1, hw=False):
         done = Event()
 
         if not self.debugging:
@@ -1914,7 +1914,7 @@ class Debugger:
             log.warn_once(DEBUG_OFF)
             return done
         
-        context.Thread(target=self.__next, args=(repeat, done), name=f"[{self.pid}] next").start()
+        context.Thread(target=self.__next, args=(repeat, done, hw), name=f"[{self.pid}] next").start()
         if wait:
             done.wait()
             return self
@@ -1946,7 +1946,7 @@ class Debugger:
             log.warn_once(f"I made {limit} steps and haven't reached the end of the function...")
             return -1
 
-    def __finish(self, repeat, force, done):
+    def __finish(self, repeat, force, done, hw):
         # Should be possible to take immediately the corresponding stack frame instead of using a loop [28/04/23]
         for _ in range(repeat):
             ip = self.__saved_ip
@@ -1957,13 +1957,13 @@ class Debugger:
                 log.warn(f"wait, we already are at the address {hex(ip)}!")
                 log.warn("Trying experimental finish. Use dbg.execute('finish') if this doesn't work")
                 ip = self._find_rip()
-            self.continue_until(ip, force=force)
+            self.continue_until(ip, force=force, hw=hw)
         if done is not None:
             done.set()
 
     # May be dependent on the stack frame and cause problems after a jump [27/04/23]
     @context_decorator
-    def finish(self, *, wait:bool=True, repeat = 1, force = False):
+    def finish(self, *, wait:bool=True, repeat = 1, force = False, hw = False):
         done = Event()    
         
         if not self.debugging:
@@ -1971,7 +1971,7 @@ class Debugger:
             log.warn_once(DEBUG_OFF)
             return done
         
-        context.Thread(target=self.__finish, args=(repeat, force, done), name=f"[{self.pid}] finish").start()
+        context.Thread(target=self.__finish, args=(repeat, force, done, hw), name=f"[{self.pid}] finish").start()
         if wait:
             done.wait()
             return self
