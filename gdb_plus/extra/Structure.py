@@ -27,10 +27,12 @@ def parse_header_file(name: str, code: str) -> dict:
             3: "Error",
             4: "Fatal"
         }
-        for diag in tu.diagnostics:
-            severity = severity_map.get(diag.severity, "Unknown")
-            print(f"  {severity}: {diag.spelling} (at {diag.location.file}:{diag.location.line})")
-        raise Exception
+
+    # Check diagnostics for undeclared identifiers
+    for diag in tu.diagnostics:
+        msg = diag.spelling
+        if diag.severity >= clang.cindex.Diagnostic.Error:
+            raise RuntimeError(f"Clang parse error: {msg}")
     
     # Find the typedef for FILE and output its field offsets
     for cursor in tu.cursor.get_children():
