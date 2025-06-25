@@ -81,6 +81,8 @@ class Structure:
 
         self._total_size = 0
         for variable, size in self._sizes.items():
+            if variable == "address":
+                log.error("Structure can not have reserved attribute \"address\"!")
             self._symbols[variable] = self._total_size
             self._total_size += size
 
