@@ -1441,22 +1441,25 @@ class Debugger:
                 return done
 
             address = self._parse_address(location)
-            if not loop and address == self.instruction_pointer:
+            if address != self.instruction_pointer or loop:
+                self.b(address, temporary=True, user_defined=False, hw=hw)
+                if DEBUG: self.logger.debug("continuing until %s", self.reverse_lookup(address))
+
+                if self.gdb is not None:
+                    context.Thread(target=self.__continue_until_gdb, args=(address, done, force), name=f"[{self.pid}] continue_until").start()
+                elif self.libdebug is not None:
+                    context.Thread(target=self.__continue_until_libdebug, args=(address, done, force), name=f"[{self.pid}] continue_until").start()
+                else:
+                    ...
+                # Wait for the next lock to be set
+                sleep(0.02)
+
+            else:
                 log.warn(f"I'm already at {self.reverse_lookup(address)}")
                 log.warn_once("Be careful that the default behaviour changed. Use loop=True if you want to continue anyway")
-                return done
-                
-            self.b(address, temporary=True, user_defined=False, hw=hw)
-            if DEBUG: self.logger.debug("continuing until %s", self.reverse_lookup(address))
+                done.set()
 
-            if self.gdb is not None:
-                context.Thread(target=self.__continue_until_gdb, args=(address, done, force), name=f"[{self.pid}] continue_until").start()
-            elif self.libdebug is not None:
-                context.Thread(target=self.__continue_until_libdebug, args=(address, done, force), name=f"[{self.pid}] continue_until").start()
-            else:
-                ...
-            # Wait for the next lock to be set
-            sleep(0.02)
+
 
         if wait:
             done.wait()
