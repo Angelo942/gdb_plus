@@ -77,25 +77,32 @@ def parse_header_file(name: str, code: str) -> dict:
 
                 # Handle fixed-size char arrays → bytes
                 if field.type.kind == clang.cindex.TypeKind.CONSTANTARRAY:
+                    # print(f"{field.spelling} is an array ", end="")
                     elem = field.type.get_array_element_type()
                     if elem.kind in (clang.cindex.TypeKind.RECORD, clang.cindex.TypeKind.ELABORATED):
                         decl = elem.get_declaration()
+                        # print(f"of {decl.spelling=}")
                         py_types[field.spelling] = [decl.spelling, field.type.get_array_size()]
-                    elif _KIND_TO_PY.get(elem.kind, base) is bytes:
+                    elif _KIND_TO_PY.get(elem.kind, None) is bytes:
+                        # print("of bytes")
                         py_types[field.spelling] = bytes
                     else:
                         # fallback for other arrays
-                        base = _KIND_TO_PY.get(elem.kind, base)
+                        base = _KIND_TO_PY[elem.kind]
+                        # print(f"of {base=}")
                         py_types[field.spelling] = [base, field.type.get_array_size()]
                 elif field.type.kind == clang.cindex.TypeKind.POINTER:
+                    # print(f"{field.spelling} is an pointer ", end="")
                     pointee = field.type.get_pointee()
                     if pointee.kind in (clang.cindex.TypeKind.RECORD, clang.cindex.TypeKind.ELABORATED):
                         decl = pointee.get_declaration()
                         type = decl.spelling
                     else:
                         type = _KIND_TO_PY.get(pointee.kind, pointee.kind)
+                    # print(f"to {type}")
                     py_types[field.spelling] = Array([type])
                 else:
+                    # print(f"{field.spelling} is {field.type.kind}")
                     py_types[field.spelling] = _KIND_TO_PY.get(field.type.kind, field.type.kind)
 
                 old_field = field.spelling
