@@ -161,6 +161,9 @@ class Structure:
                 raise ValueError("Unsupported float byte size. Supported sizes: 4, 8.")
 
         def parse(obj, size, name=None):
+            if isinstance(obj, Element):
+                return parse(obj.address, size)
+
             if isinstance(obj, str):
                 obj = obj.encode()
             if isinstance(obj, bytes):
@@ -169,8 +172,6 @@ class Structure:
                 return pack(obj, size*8)
             elif isinstance(obj, float):
                 return pack_float(obj, size)
-            elif isinstance(obj, Array):
-                return parse(obj.address, size)
             elif isinstance(obj, list):
                 if len(obj) > size:
                     log.error(f"{obj} can not fit in {size} bytes. If {name} is a pointer to your list, please assign it with struct.{name} = Array([...], address=struct.{name})")
@@ -227,9 +228,30 @@ class Structure:
         else:
             return self.__getattribute__(name)
 
+    # Make Array and String as invisible as possible
     def __setattr__(self, name, value):
-        if self.__dict__.get('_sizes') is not None and name in self._sizes:
-            self._content[name] = value
+        if self.__dict__.get('_types') is not None and name in self._sizes:
+            # If we are overwriting a pointer of which we know the address
+            if self._types is not None and isinstance(self._types[name], Array) and not isinstance(value, Element):
+                # The structure has been expanded but we haven't assigned a value to the Array/String yet
+                if isinstance(getattr(self, name), Element) and len(getattr(self, name)) == 0:
+                    address = getattr(self, name).address
+                elif isinstance(getattr(self, name), int):
+                    address = getattr(self, name)
+                else:
+                    self._content[name] = value
+                    return
+                
+                if isinstance(value, str):
+                    value = value.encode()
+                if isinstance(value, list):
+                    self._content[name] = Array(value, address=address)
+                elif isinstance(value, bytes):
+                    self._content[name] = String(value, address=address)
+                else: # We could maybe first check that the type matches or something...
+                    self._content[name] = Array([value], address=address)
+            else:
+                self._content[name] = value
         else:
             super().__setattr__(name, value)
 
@@ -253,12 +275,21 @@ class Structure:
         new_obj._symbols = copy.copy(self._symbols) # This should be faster than reconstructing it by computing values
         return new_obj
 
-        # return Structure(self._name, self._sizes) # This as the same time as copy.copy, but looses eventual additional methods we add...
+        # return Structure(self._name, self._sizes, types=self._types) # This as the same time as copy.copy, but looses eventual additional methods we add...
 
-class Array(list):
-    def __init__(self, *args, address=0):
-        super().__init__(*args) 
+class Element:
+    def __init__(self, address=0):
         self.address = address
+
+    def __repr__(self):
+        return f"{hex(self.address)} -> {super().__repr__()}"
+
+# I would want to call it vector, but it has a specific meaning
+# Can we treat an Array with only one element in a different way ? [26/06/25]
+class Array(Element, list):
+    def __init__(self, *args, address=0):
+        Element.__init__(self, address)
+        list.__init__(self, *args)
 
     def export(self):
         def pack_float(value: float, num_bytes: int) -> bytes:
@@ -270,6 +301,9 @@ class Array(list):
                 raise ValueError("Unsupported float byte size. Supported sizes: 4, 8.")
 
         def parse(obj, size, name=None):
+            if isinstance(obj, Element):
+                return parse(obj.address, size)
+
             if isinstance(obj, str):
                 obj = obj.encode()
             if isinstance(obj, bytes):
@@ -278,8 +312,6 @@ class Array(list):
                 return pack(obj, size*8)
             elif isinstance(obj, float):
                 return pack_float(obj, size)
-            elif isinstance(obj, Array):
-                return parse(obj.address, size)
             elif isinstance(obj, list):
                 if len(obj) > size:
                     log.error(f"{obj} can not fit in {size} bytes. If {name} is a pointer to your list, please assign it with struct.{name} = Array([...], address=struct.{name})")
@@ -312,5 +344,24 @@ class Array(list):
             return self.address == other
         return NotImplemented
 
-    def __repr__(self):        
-        return f"{hex(self.address)} -> {super().__repr__()}"
+class String(Element, bytes):
+    def __new__(cls, content=b"", address=0):
+        # bytes is immutable, so we override __new__ not __init__
+        obj = bytes.__new__(cls, content)
+        Element.__init__(obj, address)
+        return obj
+
+    def __init__(self, content=b"", address=0):
+        # now only address goes into Element.__init__
+        Element.__init__(self, address)
+
+    def export(self):
+        return bytes(self)
+
+    def __eq__(self, other):
+        # Must be equal even with different addresses. We just check the content
+        if isinstance(other, bytes):
+            return bytes(self) == bytes(other)
+        elif isinstance(other, int):
+            return self.address == other
+        return NotImplemented
