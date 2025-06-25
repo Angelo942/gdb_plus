@@ -19,7 +19,7 @@ QUICK = 10
 MEDIUM = 30
 LONG = 60
 
-#@unittest.skip
+# @unittest.skip
 class Debugger_structures(unittest.TestCase):
     def setUp(self):
         warnings.simplefilter("ignore", ResourceWarning)
@@ -35,7 +35,7 @@ class Debugger_structures(unittest.TestCase):
 
     # Based on CCIT2025 rev 2
     # Testing Structure from text, from dict, access methods
-    # @unittest.skip
+    @unittest.skip
     @timeout_decorator.timeout(QUICK)
     def test_writeup_structure(self):
         print("\ntest_writeup_structure: ", end="")
@@ -129,7 +129,7 @@ class Debugger_structures(unittest.TestCase):
                 self.assertEqual(result, b'Nice job!\n')
 
     # Testing symbols addresses
-    # @unittest.skip
+    @unittest.skip
     @timeout_decorator.timeout(QUICK)
     def test_structure_symbols(self):
         print("\ntest_structure_symbols: ", end="")
@@ -309,6 +309,58 @@ class Debugger_structures(unittest.TestCase):
                 self.assertEqual(company, Structure("Company", Company_structure).load(dbg.read(company_pointer, len(company))))
                 self.assertTrue(isinstance(company.office_address, Array))
                 self.assertTrue(isinstance(company.name, String))
+
+    # Testing if we can automatically parse all the data inside the structure 
+    # @unittest.skip
+    @timeout_decorator.timeout(QUICK)
+    def test_structure_expansion(self):
+        print("\ntest_structure_expansion: ", end="")
+        
+        Address_structure = """
+            typedef struct {
+                char street[50];
+                char city[30];
+                char country[30];
+            } Address;
+        """
+
+        Employee_structure = """
+            typedef struct {
+                int id;
+                char name[40];
+                char pad[4];
+                double salary;
+            } Employee;
+        """
+
+        Company_structure = Address_structure + Employee_structure + """
+            typedef struct {
+                char* name;
+                Address *office_address;
+                Employee employees[5];
+                int employee_count;
+            } Company;
+        """
+
+        with context.local(binary="./structures_folder/company"):
+            with Debugger(context.binary) as dbg:
+                dbg.until("total_payroll")
+                company_pointer = dbg.args[0]
+                company = Structure("Company", Company_structure, address=company_pointer)
+                company.load(dbg.read(company_pointer, len(company)))
+                company.expand()
+                company.name = dbg.read_string(company.name.address)
+                office_address = Structure("Address", Address_structure, address=company.office_address.address)
+                office_address.load(dbg.read(office_address.address, len(office_address)), expand=True)
+                company.office_address = office_address
+                print(company.employees)
+                for employee in company.employees:
+                    self.assertTrue(isinstance(employee.salary, float))
+                self.assertEqual(company, dbg.read(company_pointer, len(company)))
+                self.assertEqual(company, Structure("Company", Company_structure).load(dbg.read(company_pointer, len(company))))
+                self.assertTrue(isinstance(company.office_address, Array))
+                self.assertTrue(isinstance(company.name, String))
+
 
 if __name__ == "__main__":
     with context.quiet:

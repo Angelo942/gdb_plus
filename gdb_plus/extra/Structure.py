@@ -115,7 +115,7 @@ def parse_header_file(name: str, code: str) -> dict:
 
     return sizes, py_types
 
-# Optional would be nice to allow an automatic expansion by filling in all the fields you can identify
+# Could be interesting in gdb_plus.py a method to recursively read and write structures in memory
 class Structure:
     def __init__(self, name: str, header: [str, dict], *, address: int = 0, types: dict = None):
         self._name = name
@@ -141,7 +141,7 @@ class Structure:
 
         self.address = address
 
-    def load(self, raw_data: bytes):
+    def load(self, raw_data: bytes, *, expand = False):
         # Maybe we should just give a warning if len(raw_data) > len(self) and still continue
         assert len(raw_data) == len(self), f"{self._name} expected {len(self)} bytes, but got {len(raw_data)}"
 
@@ -149,7 +149,51 @@ class Structure:
         for variable, size in self._sizes.items():
             self._content[variable] = unpack(raw_data[counter:counter+size], size*8)
             counter += size
+
+        if expand:
+            self.expand()
+
         return self
+
+    def expand(self):
+        assert self._types is not None, "Please, give me a header file to know what types are used."
+        
+        def parse(data, type, size):
+            if type is int:
+                return data
+            elif isinstance(type, str):
+                if isinstance(data, int): data = data.to_bytes(size, "little")
+                return Structure(type, self._header).load(data, expand=True) # All types should be defined to compile anyway, so when would this fail ?
+            elif type is bytes:
+                return data.to_bytes(size, "little")
+            elif type is float:
+                if isinstance(data, int): data = data.to_bytes(size, "little")
+                if size == 4:
+                    return struct.unpack('f', data)[0]
+                elif size == 8:
+                    return struct.unpack('d', data)[0]
+                else:
+                    log.warn_once("Unsupported float byte size expanding data. Supported sizes: 4, 8.")
+                    data = int.from_bytes(data, "little")
+                    return data
+            # We have no information on how to read, and how many elements, so we can't handle this case
+            elif isinstance(type, Array):
+                return Array([], address=data)
+            # The trouble here is to split properly the data in each chunk
+            elif isinstance(type, list):
+                result = []
+                type, n_elements = type[:]
+                if isinstance(data, int): data = data.to_bytes(size, "little")
+                length = size // n_elements
+                for i in range(n_elements):
+                    result.append(parse(data[i*length:(i+1)*length], type, length))
+                return result
+            else:
+                raise ValueError(f"What type is {type} ?")
+
+        for variable, type in self._types.items():
+            self._content[variable] = parse(getattr(self, variable), type, self._sizes[variable])
+
 
     def export(self):
         def pack_float(value: float, num_bytes: int) -> bytes:
