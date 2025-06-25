@@ -70,7 +70,7 @@ class Structure:
         self._name = name
         self._symbols = {}
         self._content = {}
-        self._address = 0
+        self._address = address
         
         if isinstance(header, str):
             self._sizes = parse_header_file(name, header)
