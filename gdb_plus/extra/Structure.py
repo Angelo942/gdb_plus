@@ -1,16 +1,7 @@
 from gdb_plus import *
 from gdb_plus.extra.setup_clang import load_clang, clang
 import copy
-
-class Element(int):
-    def __new__(cls, value, address=0):
-        obj = super().__new__(cls, value)
-        obj.value = value
-        obj.address = address
-        return obj
-
-    def __str__(self):
-        return f"{hex(self.address)} -> {hex(self.value)}"
+import struct
 
 def parse_header_file(name: str, code: str) -> dict:
     load_clang()
@@ -99,9 +90,42 @@ class Structure:
         return self
 
     def export(self):
+        def pack_float(value: float, num_bytes: int) -> bytes:
+            if num_bytes == 4:
+                return struct.pack('f', value)
+            elif num_bytes == 8:
+                return struct.pack('d', value)
+            else:
+                raise ValueError("Unsupported float byte size. Supported sizes: 4, 8.")
+
+        def parse(obj, size, name=None):
+            if isinstance(obj, str):
+                obj = obj.encode()
+            if isinstance(obj, bytes):
+                obj = int.from_bytes(obj, "little")
+            if isinstance(obj, int):
+                return pack(obj, size*8)
+            elif isinstance(obj, float):
+                return pack_float(obj, size)
+            elif isinstance(obj, Array):
+                return parse(obj.address, size)
+            elif isinstance(obj, list):
+                if len(obj) > size:
+                    log.error(f"{obj} can not fit in {size} bytes. If {name} is a pointer to your list, please assign it with struct.{name} = Array([...], address=struct.{name})")
+                return b"".join([parse(item, size//len(obj)) for item in obj])
+            elif isinstance(obj, Structure):
+                # Would be nice to detect if it should be a pointer and then pack obj.address instead. Could we do it from the header file ? [21/06/25]
+                # If things are parsed properly we could do a check obj.address == self._symbols[name] to know if it's a pointer or not
+                if obj.address  and self.address:
+                    return obj.export() if obj.address == self._symbols[name] else parse(obj.address, size)
+
+                return obj.export() if len(obj) == size else parse(obj.address, size) # We could check that size is a pointer size...
+            else:
+                raise ValueError(f"Unsupported type for {name}")
+
         structure = b''
         for name, size in self._sizes.items():
-            parsed = pack(getattr(self, name), size*8)
+            parsed = parse(getattr(self, name), size, name)
             if len(parsed) != size:
                 log.warn(f"something went wrong exporting {name}")
             structure += parsed
@@ -127,7 +151,7 @@ class Structure:
         structure=[]
         for name in self._symbols:
             structure.append(f"{hex(self._symbols[name])}: {name} -> {hex(getattr(self, name)) if isinstance(getattr(self, name), int) else getattr(self, name)}")
-        return "{"+ "\n".join(structure)+"}"
+        return "{\n"+ "\n".join(structure)+"\n}"
 
     def __len__(self):
         return self._total_size
@@ -150,6 +174,13 @@ class Structure:
     def __dir__(self):
         return object.__dir__(self) + list(self._symbols)
 
+    def __eq__(self, other):
+        if isinstance(other, Structure):
+            return bytes(self) == bytes(other)
+        elif isinstance(other, bytes):
+            return bytes(self) == other
+        return NotImplemented
+
     # 6x faster than doing deepcopy
     def copy(self):
         # return copy.deepcopy(self)
@@ -161,3 +192,63 @@ class Structure:
         return new_obj
 
         # return Structure(self._name, self._sizes) # This as the same time as copy.copy, but looses eventual additional methods we add...
+
+class Array(list):
+    def __init__(self, *args, address=0):
+        super().__init__(*args) 
+        self.address = address
+
+    def export(self):
+        def pack_float(value: float, num_bytes: int) -> bytes:
+            if num_bytes == 4:
+                return struct.pack('f', value)
+            elif num_bytes == 8:
+                return struct.pack('d', value)
+            else:
+                raise ValueError("Unsupported float byte size. Supported sizes: 4, 8.")
+
+        def parse(obj, size, name=None):
+            if isinstance(obj, str):
+                obj = obj.encode()
+            if isinstance(obj, bytes):
+                obj = int.from_bytes(obj, "little")
+            if isinstance(obj, int):
+                return pack(obj, size*8)
+            elif isinstance(obj, float):
+                return pack_float(obj, size)
+            elif isinstance(obj, Array):
+                return parse(obj.address, size)
+            elif isinstance(obj, list):
+                if len(obj) > size:
+                    log.error(f"{obj} can not fit in {size} bytes. If {name} is a pointer to your list, please assign it with struct.{name} = Array([...], address=struct.{name})")
+                return b"".join([parse(item, size//len(obj)) for item in obj])
+            elif isinstance(obj, Structure):
+                # Would be nice to detect if it should be a pointer and then pack obj.address instead. Could we do it from the header file ? [21/06/25]
+                # If things are parsed properly we could do a check obj.address == self._symbols[name] to know if it's a pointer or not
+                if obj.address  and self.address:
+                    return obj.export() if obj.address == self._symbols[name] else parse(obj.address, size)
+
+                return obj.export() if len(obj) == size else parse(obj.address, size) # We could check that size is a pointer size...
+            else:
+                raise ValueError(f"Unsupported type for {self._name}.{name}")
+
+        structure = b''
+        for name, size in self._sizes.items():
+            parsed = parse(getattr(self, name), size, name)
+            if len(parsed) != size:
+                log.warn(f"something went wrong exporting {name}")
+            structure += parsed
+        if len(structure) != len(self):
+            log.warn(f"something went wrong exporting {self._name}")
+        return structure
+
+    def __eq__(self, other):
+        # Must be equal even with different addresses. We just check the content
+        if isinstance(other, list):
+            return list(self) == list(other)
+        elif isinstance(other, int):
+            return self.address == other
+        return NotImplemented
+
+    def __repr__(self):        
+        return f"{hex(self.address)} -> {super().__repr__()}"

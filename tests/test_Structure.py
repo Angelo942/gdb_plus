@@ -213,6 +213,55 @@ class Debugger_structures(unittest.TestCase):
                 result = dbg.p.recvline()
                 self.assertEqual(result, b'Nice job!\n')
 
+    # Testing if export can handle lists of Structure, Array, float and bytes
+    # @unittest.skip
+    def test_structure_comparison(self):
+        print("\ntest_structure_comparison: ", end="")
+        
+        Address_structure = """
+            typedef struct {
+                char street[50];
+                char city[30];
+                char country[30];
+            } Address;
+        """
+
+        Employee_structure = """
+            typedef struct {
+                int id;
+                char name[40];
+                char pad[4];
+                double salary;
+            } Employee;
+        """
+
+        Company_structure = Address_structure + Employee_structure + """
+            typedef struct {
+                char name[50];
+                char pad[6];
+                Address *office_address;                  // pointer to a nested Address
+                Employee employees[5]; // array of Employee structs
+                int employee_count;
+            } Company;
+        """
+
+        with context.local(binary="./structures_folder/company"):
+            with Debugger(context.binary) as dbg:
+                dbg.until("total_payroll")
+                company_pointer = dbg.args[0]
+                company = Structure("Company", Company_structure, address=company_pointer)
+                company.load(dbg.read(company_pointer, len(company)))
+                company.name = company.name.to_bytes(50, "little")
+                empty_employee = Structure("Employee", Employee_structure)
+                company.employees = [empty_employee.copy().load(company.employees.to_bytes(len(empty_employee)*5, "little")[i*len(empty_employee):(i+1)*len(empty_employee)]) for i in range(5)]
+                for employee, salary in zip(company.employees, [55000.00, 62000.00, 58000.00, 60000.00]):
+                    employee.salary = salary
+                office_address = Structure("Address", Address_structure, address=company.office_address)
+                office_address.load(dbg.read(office_address.address, len(office_address)))
+                company.office_address = Array([office_address], address=office_address.address)
+                self.assertEqual(company, dbg.read(company_pointer, len(company)))
+                self.assertEqual(company, Structure("Company", Company_structure).load(dbg.read(company_pointer, len(company))))
+
 if __name__ == "__main__":
     with context.quiet:
         unittest.main()
