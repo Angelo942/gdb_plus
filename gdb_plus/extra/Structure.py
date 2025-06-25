@@ -2,11 +2,33 @@ from gdb_plus import *
 from gdb_plus.extra.setup_clang import load_clang, clang
 import copy
 import struct
+import re
+
+# Mapping from Clang TypeKind to Python types
+# Would be nice to handle signed values, but too complex for now
+_KIND_TO_PY = {
+    clang.cindex.TypeKind.BOOL:        bool,
+    clang.cindex.TypeKind.CHAR_U:      int,    # unsigned char
+    clang.cindex.TypeKind.UCHAR:       int,
+    clang.cindex.TypeKind.CHAR_S:      bytes,  # signed char → treat as raw byte
+    clang.cindex.TypeKind.SCHAR:       bytes,
+    clang.cindex.TypeKind.CHAR16:      bytes,
+    clang.cindex.TypeKind.CHAR32:      bytes,
+    clang.cindex.TypeKind.UINT:        int,
+    clang.cindex.TypeKind.USHORT:      int,
+    clang.cindex.TypeKind.ULONG:       int,
+    clang.cindex.TypeKind.ULONGLONG:   int,
+    clang.cindex.TypeKind.INT:         int,
+    clang.cindex.TypeKind.SHORT:       int,
+    clang.cindex.TypeKind.LONG:        int,
+    clang.cindex.TypeKind.LONGLONG:    int,
+    clang.cindex.TypeKind.FLOAT:       float,
+    clang.cindex.TypeKind.DOUBLE:      float,
+    clang.cindex.TypeKind.LONGDOUBLE:  float,
+}
 
 def parse_header_file(name: str, code: str) -> dict:
     load_clang()
-
-    sizes = {}
 
     # Create Clang index and parse the in-memory code
     index = clang.cindex.Index.create()
@@ -34,6 +56,8 @@ def parse_header_file(name: str, code: str) -> dict:
         if diag.severity >= clang.cindex.Diagnostic.Error:
             raise RuntimeError(f"Clang parse error: {msg}")
     
+    sizes = {}
+    py_types = {}
     # Find the typedef for FILE and output its field offsets
     for cursor in tu.cursor.get_children():
         if cursor.kind == clang.cindex.CursorKind.TYPEDEF_DECL and cursor.spelling == name:
@@ -43,32 +67,61 @@ def parse_header_file(name: str, code: str) -> dict:
             old_field = None
             old_offset = 0
             for field in struct_decl.get_children():
-                if field.kind == clang.cindex.CursorKind.FIELD_DECL:
-                    offset_bits = struct_type.get_offset(field.spelling)
-                    offset_bytes = offset_bits // 8
-                    if old_field is not None:
-                        sizes[old_field] = offset_bytes - old_offset
-                    old_field = field.spelling
-                    old_offset = offset_bytes
+                if field.kind != clang.cindex.CursorKind.FIELD_DECL:
+                    continue
+
+                offset_bits = struct_type.get_offset(field.spelling)
+                offset_bytes = offset_bits // 8
+                if old_field is not None:
+                    sizes[old_field] = offset_bytes - old_offset
+
+                # Handle fixed-size char arrays → bytes
+                if field.type.kind == clang.cindex.TypeKind.CONSTANTARRAY:
+                    elem = field.type.get_array_element_type()
+                    if elem.kind in (clang.cindex.TypeKind.RECORD, clang.cindex.TypeKind.ELABORATED):
+                        decl = elem.get_declaration()
+                        py_types[field.spelling] = [decl.spelling, field.type.get_array_size()]
+                    elif _KIND_TO_PY.get(elem.kind, base) is bytes:
+                        py_types[field.spelling] = bytes
+                    else:
+                        # fallback for other arrays
+                        base = _KIND_TO_PY.get(elem.kind, base)
+                        py_types[field.spelling] = [base, field.type.get_array_size()]
+                elif field.type.kind == clang.cindex.TypeKind.POINTER:
+                    pointee = field.type.get_pointee()
+                    if pointee.kind in (clang.cindex.TypeKind.RECORD, clang.cindex.TypeKind.ELABORATED):
+                        decl = pointee.get_declaration()
+                        type = decl.spelling
+                    else:
+                        type = _KIND_TO_PY.get(pointee.kind, pointee.kind)
+                    py_types[field.spelling] = Array([type])
+                else:
+                    py_types[field.spelling] = _KIND_TO_PY.get(field.type.kind, field.type.kind)
+
+                old_field = field.spelling
+                old_offset = offset_bytes
+
             sizes[old_field] = size - old_offset
             break
     else:
         log.error(f"can not find {name} in the given structure: \n{code}")
 
-    return sizes
+    return sizes, py_types
 
-
+# Optional would be nice to allow an automatic expansion by filling in all the fields you can identify
 class Structure:
-    def __init__(self, name: str, header: [str, dict], *, address: int = 0):
+    def __init__(self, name: str, header: [str, dict], *, address: int = 0, types: dict = None):
         self._name = name
         self._symbols = {}
         self._content = {}
         self._address = address
         
         if isinstance(header, str):
-            self._sizes = parse_header_file(name, header)
+            self._sizes, self._types = parse_header_file(name, header)
+            self._header = header
         elif isinstance(header, dict):
             self._sizes = header # We assume that sizes never changes, so we can copy only the reference
+            self._types = types
         else:
             log.error("header must be string or dictionary!")
 
