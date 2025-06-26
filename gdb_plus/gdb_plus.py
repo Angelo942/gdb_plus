@@ -2909,8 +2909,7 @@ class Debugger:
         data = b"".join([pack(x, byte_size * 8) for x in values])
         if address is not None:
             address = self._parse_address(address)
-        self.write(address, data)
-        return address     
+        return self.write(address, data)
 
     def write_bytes(self, address: int, values: list, *, heap = True) -> int:
         return self._write_numbers(address, values, 1, heap = heap)
