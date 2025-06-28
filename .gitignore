@@ -3,3 +3,4 @@ dist/
 *.pyc
 gdb_plus.egg-info
 tests/.gdb_history
+*.txt

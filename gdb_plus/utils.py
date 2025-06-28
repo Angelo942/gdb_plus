@@ -191,7 +191,7 @@ class MyEvent(Event):
                     # why does it work ?
                     #super().clear()
                 else:
-                    if DEBUG: _logger.warn(f"[{self.pid}] {comment} did not complete.")
+                    if DEBUG: _logger.warning(f"[{self.pid}] {comment} did not complete.")
                 break
             # If I call wait again while the event is set it won't block ! [04/04/23]
             self.cleared.wait()
