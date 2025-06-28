@@ -1,4 +1,5 @@
-GDB+ 7.6.0
+GDB+ 7.6.0 **New libdebug**
+* Intruduce minimal support for new libdebug
 * address = dbg.write(None, data) allocates memory to store data
 * Improve callback handling for syscall catchpoints
 * Improve structure parsing to interpret types and pointers
