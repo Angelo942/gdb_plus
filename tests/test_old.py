@@ -206,8 +206,8 @@ class Debugger_actions(unittest.TestCase):
     @timeout_decorator.timeout(QUICK)
     def test_continue_until(self):
         print("\ntest_continue_until: ", end="")
-        with context.local(arch="amd64", bits=64):
-            with Debugger("./insaaaaaaane") as dbg:
+        with context.local(binary="./insaaaaaaane"):
+            with Debugger(context.binary) as dbg:
                 dbg.b(0x403ad7, temporary=True)
                 print("\nPlay with gdb once we hit address 0x403ad7 and then send continue")
                 # Possible bug: If I hit the breakpoint too soon it won't detect it... 
@@ -218,30 +218,32 @@ class Debugger_actions(unittest.TestCase):
     @timeout_decorator.timeout(QUICK)
     def test_nonblocking_continue_until(self):
         print("\ntest_nonblocking_continue_until: ", end="")
-        with context.local(arch="amd64", bits=64):
-            with Debugger("./insaaaaaaane") as dbg:
+        with context.local(binary="./insaaaaaaane"):
+            with Debugger(context.binary) as dbg:
                 done = dbg.continue_until(0x4038c2, wait=False)
                 dbg.p.sendline(b"ciao")
                 done.wait()
                 self.assertEqual(dbg.instruction_pointer, 0x4038c2)
 
+    # Make sure not to overshoot
     # @unittest.skip
     @timeout_decorator.timeout(QUICK)
     def test_crowded_breakpoints_1(self):
         print("\ntest_crowded_breakpoints_1: ", end="")
-        with context.local(arch="amd64", bits=64):
-            with Debugger("./insaaaaaaane") as dbg:
+        with context.local(binary="./insaaaaaaane"):
+            with Debugger(context.binary) as dbg:
                 for inst in dbg.disassemble(dbg.instruction_pointer + dbg.next_inst.size, 0x24):
                     dbg.b(inst.address)
                     dbg.c()
                     self.assertEqual(inst.address, dbg.instruction_pointer)
 
+    # Step gets cleared
     # @unittest.skip
     @timeout_decorator.timeout(QUICK)
     def test_crowded_breakpoints_2(self):
         print("\ntest_crowded_breakpoints_2: ", end="")
-        with context.local(arch="amd64", bits=64):
-            with Debugger("./insaaaaaaane") as dbg:
+        with context.local(binary="./insaaaaaaane"):
+            with Debugger(context.binary) as dbg:
                 addresses = []
                 counter = [0]
                 def callback(debugger):
@@ -252,32 +254,15 @@ class Debugger_actions(unittest.TestCase):
                     addresses.append(inst.address)
                     dbg.b(inst.address, callback)
                 dbg.until(dbg.instruction_pointer + 0x24)
+                self.assertEqual(dbg.instruction_pointer, dbg.exe.entry + 0x24)
 
+    # Still stop because of a step
     # @unittest.skip
     @timeout_decorator.timeout(QUICK)
     def test_crowded_breakpoints_3(self):
         print("\ntest_crowded_breakpoints_3: ", end="")
-        with context.local(arch="amd64", bits=64):
-            with Debugger("./insaaaaaaane") as dbg:
-                addresses = []
-                counter = [0]
-                def callback(debugger):
-                    self.assertEqual(debugger.instruction_pointer, addresses[counter[0]])
-                    counter[0] += 1
-                    return False   
-                for inst in dbg.disassemble(dbg.instruction_pointer + dbg.next_inst.size, 0x24):
-                    addresses.append(inst.address)
-                    dbg.b(inst.address, callback)
-                dbg.b(dbg.instruction_pointer + 0x24)
-                dbg.c()
-                self.assertEqual(dbg.instruction_pointer, dbg.exe.entry + 0x24)
-
-    # @unittest.skip
-    @timeout_decorator.timeout(QUICK)
-    def test_crowded_breakpoints_4(self):
-        print("\ntest_crowded_breakpoints_4: ", end="")
-        with context.local(arch="amd64", bits=64):
-            with Debugger("./insaaaaaaane") as dbg:
+        with context.local(binary="./insaaaaaaane"):
+            with Debugger(context.binary) as dbg:
                 addresses = []
                 counter = [0]
                 def callback(debugger):
@@ -326,8 +311,8 @@ class Debugger_callbacks(unittest.TestCase):
             dbg.b(0x403ad9, temporary=True)
             return False
 
-        with context.local(arch="amd64", bits=64):
-            with Debugger("./insaaaaaaane") as dbg:
+        with context.local(binary="./insaaaaaaane"):
+            with Debugger(context.binary) as dbg:
                 dbg.b(0x403ad0, callback=callback, temporary=True)
                 
                 dbg.c(wait=True)
@@ -346,8 +331,8 @@ class Debugger_callbacks(unittest.TestCase):
             dbg.step()
             return True
 
-        with context.local(arch="amd64", bits=64):
-            with Debugger("./insaaaaaaane") as dbg:
+        with context.local(binary="./insaaaaaaane"):
+            with Debugger(context.binary) as dbg:
                 dbg.b(0x403ad0, callback=callback, temporary=True)
                 dbg.c(wait=True)
                 self.assertEqual(dbg.rip, 0x403ad2)
@@ -362,8 +347,8 @@ class Debugger_callbacks(unittest.TestCase):
             dbg.finish()
             return False
 
-        with context.local(arch="amd64", bits=64):
-            with Debugger("./insaaaaaaane") as dbg:
+        with context.local(binary="./insaaaaaaane"):
+            with Debugger(context.binary) as dbg:
                 dbg.b(0x400870, callback=callback)
                 #dbg.b(0x40388e)
                 #dbg.c(wait=True)
@@ -646,7 +631,6 @@ class Debbuger_fork(unittest.TestCase):
                 self.assertEqual(dbg.rip, 0x5555555566d5)
                 self.assertFalse(dbg.priority)
         
-    # Priority not cleared
     # @unittest.skip
     @timeout_decorator.timeout(MEDIUM)
     def test_split(self):
@@ -751,7 +735,7 @@ class Debbuger_fork(unittest.TestCase):
                 self.assertFalse(dbg.priority)
 
     # @unittest.skip
-    @timeout_decorator.timeout(LONG * 4)
+    @timeout_decorator.timeout(LONG * 2)
     def test_ptrace_emulation_syscall(self):
         print("\ntest_ptrace_emulation_syscall: ", end="")
         with context.local(arch = "amd64"):

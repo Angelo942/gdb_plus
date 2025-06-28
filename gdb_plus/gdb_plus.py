@@ -155,6 +155,8 @@ class Debugger:
         self._cached_registers = {}
         # To know that I'm responsible for the interruption even if there is no callback
         self._stepped = False
+        # To know that continue should resume the execution even if we hit a breakpoint
+        self._callback_return_overwritten = False
         self._interrupted = False
         self._detached = False
         # Maybe not needed (see set_split_on_fork)
@@ -230,7 +232,6 @@ class Debugger:
                     raise e
             try:
                 pid = self.current_inferior.pid
-                print(self.current_inferior)
                 assert pid not in [1, 42000]
                 self.pid = pid
             except:
@@ -418,14 +419,16 @@ class Debugger:
                 if not context.native:
                     log.error("Can not download files from qemu's gdbstup. Please debug qemu itself and pass it in Debugger(..., qemu_gdbserver=...)")
                 else:
-                    if DEBUG: self.logger.warn("Could not download %s", source)
+                    if DEBUG: self.logger.warning("Could not download %s", source)
 
 
     def __handle_breakpoints(self, breakpoints):
         """
         Execute callbacks and determine if the execution should resume.
         """
-        should_continue = self._stop_reason != "SINGLE STEP" # Simple version. If the user is stepping the breakpoint should never make the program continue [05/06/23]
+        should_continue = True
+        callback_return_overwritten = True
+        stepped = self._stepped # Save it in this scope to make sure that no action performed by a callback can change it. It's just unfortunate that I can not detect it yet for manual interactions. 
         # I don't set stop after each breakpoint to avoid letting a script continue while another callback is running [06/06/23]
         set_stop = []
         address = self.instruction_pointer
@@ -437,6 +440,7 @@ class Debugger:
 
             if breakpoint.callback is None:
                 should_continue = False
+                callback_return_overwritten &= False
                 # Must be set for each breakpoint for the library functions to work [05/06/23]
                 # Check that the priorities can't be broken by a breakpoint set by the user... [05/06/23]
                 set_stop.append(f"No callback")
@@ -445,11 +449,22 @@ class Debugger:
                 should_stop = True if should_stop is None else should_stop
                 if should_stop:
                     should_continue = False
-                    set_stop.append(f"callback returned True or None")  
+                    callback_return_overwritten &= False
+                    set_stop.append(f"callback returned True or None")
 
                 else:
                     should_continue &= True
                     if DEBUG: self.logger.debug("[%d] callback returned False", self.pid)
+                    # if self._stop_reason == "SINGLE STEP": # Simple version. If the user is stepping the breakpoint should never make the program continue [05/06/23]
+                    if stepped: # _stop_reason will never return SINGLE_STEP if there is a breakpoint. [28/06/25]
+                        if DEBUG: self.logger.debug("[%d] Callback 0x%x would continue, but we don't because you stepped.", self.pid, self.instruction_pointer)
+                        should_continue = False
+                        callback_return_overwritten &= True
+                        set_stop.append(f"callback overwritten by step rule.")
+
+        # I just don't want to have an also in that if stepped so i check here instead if we have should_continue set to false... Change if you think it's clearer, but I like the idea of touching that property only if we are sure instead of setting it to true by accidente [28/06/25]
+        self._callback_return_overwritten = callback_return_overwritten and not should_continue
+            
 
         # Be sure to be in the last stop
         if address == self.instruction_pointer:
@@ -519,7 +534,6 @@ class Debugger:
                     raise Exception("this code should not be reachable")
                     self.__set_stop("returned from syscall")
                     return
-                    
 
                 # Make sure we don't miss the return
                 # Put above to avoid race condition after the jump
@@ -577,7 +591,7 @@ class Debugger:
                     return
             if len(breakpoints) == 0:
                 return
-
+        
         # Don't execute callbacks when we are finishing the execution of a syscall. This will be handled after.
         if len(breakpoints) == 0 or self._syscall_return:
             # Is it right to catch SIGSTOP and SIGTRAP ? [04/06/23]
@@ -602,7 +616,7 @@ class Debugger:
             else:
                 if DEBUG: self.logger.debug("stopped for a manual interaction")
                 self.__enforce_stop("manual interaction")
-            return            
+            return
             
         # Doesn't handle the case where we use ni and hit the breakpoint though... [17/04/23] TODO!
         # Doesn't even handle the case where I step, but I'm waiting in continue until
@@ -738,10 +752,13 @@ class Debugger:
                 context.Thread(target=self.__stop_handler_gdb, name=f"[{self.pid}] stop_handler_gdb").start()
         context.Thread(target=loop_handler, name=f"[{self.pid}] loop_stop_handler_gdb").start()
         
+        # We should consider setting again a events.stop to have access to event.inferior_thread.inferior instead of needing current_inferior()
+
         self.gdb.events.exited.connect(self.__exit_handler)
         def clear_cache(event):
             if DEBUG: self.logger.debug("GDB clearing register cache")
             self._cached_registers = {}
+            self._callback_return_overwritten = False
         self.gdb.events.cont.connect(clear_cache)
         # Could be improved clearing only event.regnum, but you need a map to which register corresponds to which number for each architecture [08/07/24]
         self.gdb.events.register_changed.connect(clear_cache)
@@ -1029,7 +1046,7 @@ class Debugger:
         Doesn't kill child processes.
         """
 
-        self.detach()
+        self.detach(quit=True)
         # Yah, I should do it here, but I close the terminal in detach, so let's handle it there.
         #except:
         #    if DEBUG: self.logger.debug("can't detach because process has already exited")
@@ -1213,6 +1230,8 @@ class Debugger:
 
 
         # TODO handle it correctly. Is Ox5 only used for step or also breakpoints ? Do we have access to libdebug's stepped variable ? (I would prefer that one at least) [05/06/23]
+        # SIGTRAP (0x5) is also used for breakpoints [20/06/25]
+        # GDB would prioritize BREAKPOINT over SINGLE STEP. Catchpoints are treated as BREAKPOINT, but don't fire if we step
         elif self.libdebug is not None:
             if self._stepped:
                 return "SINGLE STEP"
@@ -1230,7 +1249,7 @@ class Debugger:
             if reason == "SINGLE STEP":
                 return 0x5
             if "BREAKPOINT" in reason:
-                return 0x13 # Not sure
+                return 0x13 # This is wrong SIGSTOP (0x13) -> SIGTRAP (0x5) [20/06/25] TODO Check if anything depends on it.
             else:
                 return SIGNALS[reason]
         elif self.libdebug is not None:
@@ -1274,12 +1293,14 @@ class Debugger:
         if self.gdb is not None:
             self.execute(command)
         elif self.libdebug is not None and command != "":
+            self._callback_return_overwritten = False # Not needed for gdb because it's set by events.cont
             command()
         else:
             ...
         return priority
 
     # Simplify continue after callback so that it can still work after migrating inside the callback
+    # It has to do everything like execute action continue, except raising the priority
     @lock_decorator
     def __hidden_continue(self, force=False):
         # The step is not needed if we set handle SIGSTOP nopass
@@ -1291,10 +1312,14 @@ class Debugger:
         #        return
         if DEBUG: self.logger.debug("hidden continue")
         sleep(0.02)
+        self._callback_return_overwritten = False
         if self.gdb is not None:
             self.gdb.execute("continue")
         elif self.libdebug is not None:
             self.libdebug.cont(blocking=False)
+        elif self.new_libdebug is not None:
+            self.new_libdebug.c() # TODO check if this is valid [20/06/25]
+            self.new_libdebug._resumed.set()
         else:
             ...
 
@@ -1303,12 +1328,16 @@ class Debugger:
         with self._ptrace_lock.log("__continue_gdb"):
             priority = self._raise_priority("avoid race condition in continue")
             self.step(force=True)
+
             if self._stop_reason == "RUNNING":
                 log.warn("Somehow we think that the process is still running...")
-                print(self.next_inst)
+                if DEBUG: self.logger.debug(self.next_inst)
+
             elif self._stop_reason == "SIGINT":
                 if DEBUG: self.logger.debug("syscall interrupted by user") # step doesn't return if we are on a read, so calling interrupt() would leave us here with a SIGINT
-            elif self._stop_reason != "SINGLE STEP":
+                # Should we return or not ?
+
+            elif self._stop_reason != "SINGLE STEP" and not self._callback_return_overwritten:
                 if "BREAKPOINT" in self._stop_reason:
                     if DEBUG: self.logger.debug("step in continue already reached the breakpoint")
                 else:
@@ -1769,7 +1798,6 @@ class Debugger:
             repeat -= 1
 
         for _ in range(repeat):
-            self._stepped = True
             if not self._step(signal, timeout=timeout):
                 log.warn("You stepped, but the address didn't change. This may be due to a bug in gdb. If this wasn't the intended behaviour use force=True in the function step or continue you just called")
 
@@ -1791,11 +1819,11 @@ class Debugger:
             # Let's talk... Usually the problem is with SIGSTOP, right ? There are cases where we jump on a signal, so we won't always have a SINGLE STEP. 
             #n = self.step_until_condition(lambda self: self.instruction_pointer != old_ip or self._stop_reason == "SINGLE STEP", limit=5)
             # I don't understand how you can have a stop for single step without changing, but it happens [12/06/23]
-            n = self.step_until_condition(lambda self: self.instruction_pointer != old_ip or self._stop_reason not in ["SIGSTOP", "SINGLE STEP"], limit=5, timeout=0.5) # 0.2 is too low when splitting processes
+            n = self.step_until_condition(lambda self: self.instruction_pointer != old_ip or self._stop_reason not in ["SIGSTOP", "SINGLE STEP", "BREAKPOINT"], limit=5, timeout=5) # 0.2 is too low when splitting processes # 2 is too low when handling some breakpoints
         if n == -1:
             raise Exception("Could not force step!")
         if n > 0:
-            if DEBUG: self.logger.warn("Bug still present. Had to force %d time(s)", n)
+            if DEBUG: self.logger.warning("Bug still present. Had to force %d time(s)", n)
 
         for breakpoint, callback in zip(self.breakpoints[old_ip], saved_callbacks):
             breakpoint.callback = callback
@@ -2348,6 +2376,7 @@ class Debugger:
                 <return False if should not stop after the syscall>
 
         If you decide to skip the syscall remember to set the right return value
+        A catchpoint doesn't fire if you step
         """
         if context.arch in ["riscv32", "riscv64"]:
             log.warn_once("catch syscall not supported for RISCV")
