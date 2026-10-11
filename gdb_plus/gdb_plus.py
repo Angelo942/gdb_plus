@@ -11,6 +11,7 @@ except ImportError:
     CS_ARCH_AARCH64 = CS_ARCH_ARM64
 from threading import Event
 from queue import Queue
+from pwn import *
 from gdb_plus.utils import *
 from collections import defaultdict
 from queue import Queue
@@ -20,7 +21,7 @@ import re
 from functools import cache, cached_property
 from elftools.elf.sections import SymbolTableSection
 
-# Logs to debug the library can be enabled by setting DEBUG = True in gdb_plus.utils
+# Logs to debug the library can be enabled by setting DEBUG = True in gdb_plus/utils/logger.py
 _logger = logging.getLogger("gdb_plus")
 ch = logging.StreamHandler()
 formatter = LevelColorFormatter("%(name)s:%(funcName)s:%(message)s")
