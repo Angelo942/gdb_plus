@@ -330,6 +330,7 @@ class MyLock:
 
 # This is not guaranteed
 # Debuggging qemu-mips64 find both a different loader than expected because of a symlink and more libraries than expected.
+# TODO handle corrupted headers [11/10/26]
 def enum_libs(file):
     """
     Find which libraries will be used by an executable without having to run it. 
@@ -353,15 +354,15 @@ def enum_libs(file):
     # Get the .dynamic section (holds dynamic table entries)
     dynamic_section = file.get_section_by_name('.dynamic')
     if dynamic_section is None:
-        print("No .dynamic section found. Is this a statically linked binary?")
-        exit(1)
+        print("No .dynamic section found. Section header may be corrupted")
+        return []
     data = dynamic_section.data()
 
     # Get the .dynstr section (holds dynamic strings)
     dynstr_section = file.get_section_by_name('.dynstr')
     if dynstr_section is None:
         print("No .dynstr section found!")
-        exit(1)
+        return []
     dynstr_data = dynstr_section.data()
 
     # Iterate over the dynamic table entries
