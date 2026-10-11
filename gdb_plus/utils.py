@@ -152,7 +152,7 @@ class Arguments_syscall:
             for i, el in zip(range(0 if index.start is None else index.start, -1 if index.stop is None else index.stop, 1 if index.step is None else index.step), value):
                 self[i] = el
             return
-        calling_convention = function_calling_convention[context.arch]
+        calling_convention = syscall_calling_convention[context.arch]
         if index < len(calling_convention):
             register = calling_convention[index]
             if DEBUG: self.dbg.logger.debug(f"argument {index} is in register {register}")
@@ -448,7 +448,7 @@ shellcode_syscall = {
 # First register is where to save the syscall num
 syscall_calling_convention = {
     "amd64": ["rax", "rdi", "rsi", "rdx", "r10", "r8", "r9"],
-    "i386": ["rax", "ebx", "ecx", "edx", "esi", "edi", "ebp"],
+    "i386": ["eax", "ebx", "ecx", "edx", "esi", "edi", "ebp"],
     "aarch64": ["x8"]+[f"x{i}"for i in range(6)],
     "arm": ["r7"]+[f"r{i}"for i in range(7)],
     "riscv32": ["a7"]+[f"a{i}"for i in range(6)],
