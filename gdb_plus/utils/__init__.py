@@ -10,6 +10,7 @@ from gdb_plus.utils.arch import (
     syscall_calling_convention, function_calling_convention,
     return_instruction, nop,
 )
+from gdb_plus.utils.syscalls import describe_syscall
 
 __all__ = [
     "DEBUG", "LevelColorFormatter",
@@ -22,4 +23,5 @@ __all__ = [
     "shellcode_sleep", "shellcode_syscall",
     "syscall_calling_convention", "function_calling_convention",
     "return_instruction", "nop",
+    "describe_syscall",
 ]

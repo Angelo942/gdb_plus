@@ -1,6 +1,9 @@
 import pwn
 import os
-from time import sleep
+import sys
+import signal
+import logging
+from pathlib import Path
 from functools import partial
 from capstone import Cs, CS_ARCH_X86, CS_ARCH_ARM, CS_ARCH_RISCV, CS_MODE_32, CS_MODE_64, CS_MODE_ARM, CS_MODE_RISCV32, CS_MODE_RISCV64, CS_MODE_RISCVC, CS_ARCH_MIPS, CS_MODE_MIPS32, CS_MODE_MIPS64, CS_MODE_BIG_ENDIAN
 # Migrate to capstone v6, but keep support for v5
@@ -11,13 +14,13 @@ except ImportError:
     CS_ARCH_AARCH64 = CS_ARCH_ARM64
 from threading import Event
 from queue import Queue
-from pwn import *
+from pwn import ELF, args, constants, context, gdb, log, p32, pack, process, remote, sleep, unpack
 from gdb_plus.utils import *
 from collections import defaultdict
 from queue import Queue
 from math import ceil
 from multiprocessing import Process, Event as p_Event, Queue as p_Queue, cpu_count
-import re
+from math import inf
 from functools import cache, cached_property
 from elftools.elf.sections import SymbolTableSection
 
@@ -2611,7 +2614,7 @@ class Debugger:
     # We could do better regarding the num, like using the stop event to know which breakpoint we hit, but we'll think about it later [25/07/23]
     # Do we want a single callback per breakpoint or allow a list ?
     @context_decorator
-    def catch_syscall(self, name: str, callback):
+    def catch_syscall(self, name: str, callback = lambda dbg, entry: True):
         """
         the callback must have the following form:
         def callback(dbg, entry):
@@ -2745,6 +2748,41 @@ class Debugger:
     def disable_ltrace(self):
         for bp in self._ltrace_breakpoints:
             self.delete_breakpoint(bp)
+
+    # I hate having to write so much code for the styling...
+    @context_decorator
+    def _describe_syscall(self):
+        """Read the registers of the syscall the process just entered.
+        Returns (name, raw argument values, 'name(arg=value, ...)')."""
+        number_register, *argument_registers = syscall_calling_convention[context.arch]
+        if context.arch == "amd64":
+            number_register = "orig_rax"
+        elif context.arch == "i386":
+            number_register = "orig_eax"
+        values = [getattr(self, register) for register in argument_registers]
+        name, call = describe_syscall(getattr(self, number_register), values, self.safe_read, self.read_string)
+        return name, values, call
+
+    @context_decorator
+    def set_strace(self, *, exclude: list[str] | None = None, only: list[str] | None = None):
+        def callback(dbg, entry):
+            name, values, call = self._describe_syscall()
+            to_log = (only is not None and name in only) or (only is None and (exclude is None or name not in exclude))
+            if entry:
+                # Careful to not block. We can check the pipe on local programs, but I doubt we can call a syscall from here
+                # to check it on a remote gdb_server [11/10/26]
+                # TODO We still need to handle read even if we don't log.
+                if to_log:
+                    print(f"{self.instruction_pointer:#x}: {call}", end="", flush=True)
+            else:
+                if to_log:
+                    # Could style it more
+                    print(f" = {dbg.return_value}")
+            return False
+
+        self.catch_syscall("", callback)
+        return self
+        
 
     # TODO take a library for relative addresses like libdebug
     # May want to increase the limit
@@ -3087,6 +3125,13 @@ class Debugger:
             fd.seek(address)
             return fd.read(size)
 
+    def safe_read(self, address: int, size: int) -> bytes | None:
+        """read() that returns None instead of raising on unmapped memory"""
+        try:
+            return self.read(address, size)
+        except Exception:
+            return None
+
     # qemu doesn't allow writing in non writable pages [23/08/24]
     @context_decorator
     def __write_gdb(self, address: int, data: bytes, *, inferior = None):
@@ -3188,18 +3233,18 @@ class Debugger:
         return self.read_pointers(address, 1)[0]
 
     # Should we return the null bytes ? No, consistent with write_strings [02/06/23]
-    def read_strings(self, address: int, n: int) -> list:
+    def read_strings(self, address: int, n: int, *, limit: int = inf) -> list:
         address = self._parse_address(address)
         chunk = 0x100
         data = b""
         i = 0
-        while data.count(b"\x00") <= n:
+        while data.count(b"\x00") <= n and len(data) < limit:
             data += self.read(address + chunk*i, chunk)
             i += 1
         return data.split(b"\x00")[:n]
         
-    def read_string(self, address: int) -> bytes:
-        return self.read_strings(address, 1)[0]
+    def read_string(self, address: int, *, limit: int = inf) -> bytes:
+        return self.read_strings(address, 1, limit=limit)[0]
 
     #def write_bit(self, address: int, )
 
@@ -3423,8 +3468,10 @@ class Debugger:
     @property
     @context_decorator
     def _special_registers(self):
-        if context.arch in ["i386", "amd64"]:
-            return ["eflags", "cs", "ss", "ds", "es", "fs", "gs"]
+        if context.arch == "i386":
+            return ["eflags", "cs", "ss", "ds", "es", "fs", "gs", "orig_eax"]
+        elif context.arch == "amd64":
+            return ["eflags", "cs", "ss", "ds", "es", "fs", "gs", "orig_rax"]
         elif context.arch == "aarch64":
             return ["cpsr", "fpsr", "fpcr", "vg"]
         elif context.arch == "arm":
