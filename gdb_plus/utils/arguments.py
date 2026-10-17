@@ -71,7 +71,7 @@ class Arguments:
             self.dbg.write(pointer, pack(value))
         elif context.arch in ["arm", "aarch64"]:
             pointer = self.dbg.stack_pointer + index * context.bytes
-            self.dbg.write(pointer, context.bytes)
+            self.dbg.write(pointer, pack(value))
 
 class Arguments_syscall:
     def __init__(self, dbg):
@@ -95,10 +95,19 @@ class Arguments_syscall:
             for i, el in zip(range(0 if index.start is None else index.start, -1 if index.stop is None else index.stop, 1 if index.step is None else index.step), value):
                 self[i] = el
             return
-        calling_convention = syscall_calling_convention[context.arch]
+        calling_convention = syscall_calling_convention[context.arch][1:]
         if index < len(calling_convention):
             register = calling_convention[index]
             if DEBUG: self.dbg.logger.debug(f"argument {index} is in register {register}")
             setattr(self.dbg, register, value)
         else:
             raise Exception(f"We don't have {index + 1} arguments in a syscall!")
+
+    @property
+    def sys_num(self) -> int:
+        getattr(self.dbg, syscall_calling_convention[context.arch][0])
+
+    @sys_num.setter
+    def sys_num(self, value: int):
+        setattr(self.dbg, syscall_calling_convention[context.arch][0], value)
+    

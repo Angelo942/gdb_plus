@@ -1359,6 +1359,14 @@ class Debugger:
 
     sys_args = syscall_args
 
+    @property
+    def sys_num(self) -> int:
+        return self.syscall_args.sys_num
+
+    @sys_num.setter
+    def sys_num(self, value: int):
+        self.syscall_args.sys_num = value
+
     # Taken from GEF to handle slave interruption
     @property
     def _stop_reason(self) -> str:
