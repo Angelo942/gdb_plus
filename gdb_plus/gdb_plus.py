@@ -845,6 +845,15 @@ class Debugger:
         """
         setup of gdb's events
         """
+        assert self.gdb is not None # Just for static checks to be happy. We already know that it's true
+        # pwntools wastes a lot of time waiting to serve responses [17/10/26]
+        self.gdb.execute("python GdbConnection.SERVE_TIME = 0.001; GdbConnection.IDLE_TIME = 0.001", to_string=True)
+        for thread in enumerate_threads():
+            server = getattr(getattr(thread, "_target", None), "__self__", None)
+            if isinstance(server, BgServingThread) and server._conn is self.conn:
+                # Block in poll() instead of serve(0) + sleep(0.1). rpyc routes the replies of the other threads to them
+                server._serve_interval, server._sleep_interval = 1.0, 0.0
+
         def loop_handler():
             while True:
                 self._internal_wait() # Move the wait here to se look only when needed [09/07/24]
