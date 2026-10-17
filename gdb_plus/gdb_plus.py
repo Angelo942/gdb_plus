@@ -840,11 +840,8 @@ class Debugger:
         except:
             if DEBUG: _logger.debug("user isn't using pwndbg")
         
-    @context_decorator
-    def __setup_gdb(self):
-        """
-        setup of gdb's events
-        """
+
+    def __optimize_gdb(self) -> None:
         assert self.gdb is not None # Just for static checks to be happy. We already know that it's true
         # pwntools wastes a lot of time waiting to serve responses [17/10/26]
         self.gdb.execute("python GdbConnection.SERVE_TIME = 0.001; GdbConnection.IDLE_TIME = 0.001", to_string=True)
@@ -853,6 +850,20 @@ class Debugger:
             if isinstance(server, BgServingThread) and server._conn is self.conn:
                 # Block in poll() instead of serve(0) + sleep(0.1). rpyc routes the replies of the other threads to them
                 server._serve_interval, server._sleep_interval = 1.0, 0.0
+
+
+        # pwntools' Gdb.__getattr__ fetches conn.root.Agdb again on every access: 4 round trips per self.gdb.execute()
+        gdb_module = self.conn.root.gdb
+        for name in ["execute", "parse_and_eval", "selected_inferior", "selected_thread"]:
+            setattr(self.gdb, name, getattr(gdb_module, name))
+
+    @context_decorator
+    def __setup_gdb(self) -> None:
+        """
+        setup of gdb's events
+        """
+        assert self.gdb is not None # Just for static checks to be happy. We already know that it's true
+        self.__optimize_gdb()
 
         def loop_handler():
             while True:
