@@ -4611,12 +4611,12 @@ class Debugger:
         return manual
 
     def _PTRACE_DETACH(self, _, __, *, slave, manual=False, **kwargs):
-        log.ingo(f"ptrace detached from {slave.pid}")
-        self._slaves.pop(pid)
+        log.info(f"ptrace detached from {slave.pid}")
+        self._slaves.pop(slave.pid)
         slave._ptrace_can_continue.set()
         if not manual:
             log.info(f"detach will let the slave continue")
-            self.__hidden_continue(force=True)
+            slave.__hidden_continue(force=True)
         self.return_value = 0x0
         return manual
 
