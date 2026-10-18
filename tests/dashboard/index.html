@@ -1,0 +1,1073 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GDB+ Test Matrix</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  --bg:#eceef2; --surface:#ffffff; --surface-2:#f5f6f8; --ink:#1a1d23; --ink-soft:#3a404b; --muted:#606775; --faint:#8b93a1;
+  --border:#d9dde4; --border-strong:#c3c9d3; --accent:#b4560a; --accent-bright:#e07b16; --accent-weak:#fbe4cf;
+  /* status: fixed hues, each always paired with its own glyph and label */
+  --ok:#0ca30c; --ok-ink:#1f7a44; --bad:#d03b3b; --bad-ink:#b3261e; --gap:#fab219; --gap-ink:#8a5a00;
+  --na:#8b93a1; --na-ink:#5d6472; --skip:#b4bac6; --skip-ink:#737a88;
+  --con-bg:#15181f; --con-ink:#dfe3ea; --con-muted:#7f8896; --con-border:#2c313c;
+  --shadow:0 1px 2px rgba(20,24,32,.05),0 8px 24px -12px rgba(20,24,32,.14);
+  --shadow-lg:0 24px 60px -28px rgba(20,24,32,.38);
+  --radius:12px; --radius-sm:7px;
+  --sans:"IBM Plex Sans",system-ui,sans-serif; --mono:"IBM Plex Mono",ui-monospace,monospace;
+  color-scheme:light;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#111318; --surface:#191c22; --surface-2:#1f232a; --ink:#e7e9ee; --ink-soft:#c3c8d2; --muted:#9aa2b1; --faint:#6f7787;
+    --border:#282d36; --border-strong:#343a45; --accent:#f0a24a; --accent-bright:#f5a623; --accent-weak:#33270f;
+    --ok-ink:#4ac97e; --bad-ink:#f0685a; --gap-ink:#fab219; --na:#7d8594; --na-ink:#a3abb9; --skip:#4a505c; --skip-ink:#8c94a3;
+    --shadow:0 1px 2px rgba(0,0,0,.3),0 10px 30px -14px rgba(0,0,0,.6); --shadow-lg:0 30px 70px -30px rgba(0,0,0,.8);
+    color-scheme:dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#111318; --surface:#191c22; --surface-2:#1f232a; --ink:#e7e9ee; --ink-soft:#c3c8d2; --muted:#9aa2b1; --faint:#6f7787;
+  --border:#282d36; --border-strong:#343a45; --accent:#f0a24a; --accent-bright:#f5a623; --accent-weak:#33270f;
+  --ok-ink:#4ac97e; --bad-ink:#f0685a; --gap-ink:#fab219; --na:#7d8594; --na-ink:#a3abb9; --skip:#4a505c; --skip-ink:#8c94a3;
+  --shadow:0 1px 2px rgba(0,0,0,.3),0 10px 30px -14px rgba(0,0,0,.6); --shadow-lg:0 30px 70px -30px rgba(0,0,0,.8);
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{background:var(--bg); color:var(--ink); font:14px/1.45 var(--sans); -webkit-font-smoothing:antialiased}
+button,input,select{font:inherit; color:inherit}
+code,.mono{font-family:var(--mono); font-size:.92em}
+a{color:var(--accent)}
+
+/* ---------- status vocabulary ---------- */
+.s-working{--c:var(--ok); --ci:var(--ok-ink)}
+.s-failing{--c:var(--bad); --ci:var(--bad-ink)}
+.s-not_implemented{--c:var(--gap); --ci:var(--gap-ink)}
+.s-not_applicable{--c:var(--na); --ci:var(--na-ink)}
+.s-not_run{--c:var(--skip); --ci:var(--skip-ink)}
+.s-not_covered{--c:var(--na); --ci:var(--na-ink)}
+.s-missing{--c:var(--bad); --ci:var(--bad-ink)}
+.glyph{display:inline-grid; place-items:center; width:16px; height:16px; border-radius:50%; background:var(--c); color:#fff; font-size:10px; font-weight:700; line-height:1; flex:none}
+.s-not_implemented .glyph{color:#3d2a00}
+.s-not_run .glyph{background:transparent; border:1.5px dashed var(--c); color:var(--ci)}
+.s-not_applicable .glyph{background:transparent; border:1.5px solid var(--c); color:var(--ci)}
+.s-not_covered .glyph{background:transparent; border:1.5px dotted var(--c); color:var(--ci)}
+.s-missing .glyph{background:transparent; border:1.5px dashed var(--c); color:var(--ci)}
+.badge{display:inline-flex; align-items:center; gap:6px; padding:2px 9px 2px 4px; border-radius:99px; font-size:12px; font-weight:600; color:var(--ci);
+  background:color-mix(in srgb, var(--c) 13%, var(--surface)); border:1px solid color-mix(in srgb, var(--c) 38%, transparent)}
+
+/* ---------- top bar ---------- */
+.top{position:sticky; top:0; z-index:20; background:color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter:blur(10px);
+  border-bottom:1px solid var(--border)}
+.top-in{max-width:1480px; margin:0 auto; padding:10px 20px; display:flex; flex-wrap:wrap; align-items:center; gap:10px 18px}
+.brand{display:flex; align-items:center; gap:10px; font-weight:700; letter-spacing:-.01em; font-size:16px; margin-right:6px}
+.brand .mark{width:28px; height:28px; border-radius:7px; background:var(--con-bg); color:var(--accent-bright); display:grid; place-items:center;
+  font:600 12px var(--mono); box-shadow:inset 0 0 0 1px var(--con-border)}
+.brand small{font-weight:500; color:var(--muted); font-size:13px}
+.tabs{display:flex; gap:2px; background:var(--surface-2); border:1px solid var(--border); border-radius:9px; padding:3px}
+.tabs button{border:0; background:none; padding:5px 13px; border-radius:6px; cursor:pointer; color:var(--muted); font-weight:500}
+.tabs button[aria-selected="true"]{background:var(--surface); color:var(--ink); box-shadow:var(--shadow)}
+.pickers{display:flex; gap:10px; align-items:center; flex-wrap:wrap}
+label.pick{display:flex; align-items:center; gap:6px; color:var(--muted); font-size:12px; font-weight:500; text-transform:uppercase; letter-spacing:.04em}
+select,input[type=text],input[type=search]{background:var(--surface); border:1px solid var(--border-strong); border-radius:var(--radius-sm); padding:5px 9px; min-height:32px}
+select{padding-right:6px}
+input:focus-visible,select:focus-visible,button:focus-visible{outline:2px solid var(--accent-bright); outline-offset:1px}
+.spacer{flex:1}
+.conn{display:flex; align-items:center; gap:7px; font-size:12px; color:var(--muted)}
+.conn .dot{width:8px; height:8px; border-radius:50%; background:var(--faint)}
+.conn.live .dot{background:var(--ok)}
+.conn.busy .dot{background:var(--accent-bright); animation:pulse 1.2s infinite}
+@keyframes pulse{50%{opacity:.35}}
+.iconbtn{border:1px solid var(--border-strong); background:var(--surface); border-radius:var(--radius-sm); min-width:32px; height:32px; cursor:pointer; color:var(--muted)}
+
+main{max-width:1480px; margin:0 auto; padding:18px 20px 80px}
+.view[hidden]{display:none}
+.card{background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); box-shadow:var(--shadow)}
+h2{font-size:15px; margin:0; letter-spacing:-.01em}
+.muted{color:var(--muted)} .faint{color:var(--faint)}
+.btn{display:inline-flex; align-items:center; gap:7px; border:1px solid var(--border-strong); background:var(--surface); border-radius:var(--radius-sm);
+  padding:5px 12px; min-height:32px; cursor:pointer; font-weight:500}
+.btn:hover{border-color:var(--faint)}
+.btn.primary{background:var(--ink); color:var(--surface); border-color:var(--ink)}
+.btn.danger{color:var(--bad-ink)}
+.btn:disabled{opacity:.45; cursor:not-allowed}
+.btn.small{min-height:26px; padding:2px 9px; font-size:12px}
+
+/* ---------- summary ---------- */
+.summary{display:grid; grid-template-columns:repeat(7,minmax(0,1fr)) ; gap:10px; margin-bottom:12px}
+.stat{padding:12px 14px; display:flex; flex-direction:column; gap:4px; cursor:pointer; text-align:left; border:1px solid var(--border)}
+.stat[aria-pressed="false"]{opacity:.45}
+.stat .lab{display:flex; align-items:center; gap:7px; font-size:12px; color:var(--muted); font-weight:500}
+.stat .num{font-size:26px; font-weight:600; letter-spacing:-.02em; font-variant-numeric:tabular-nums; color:var(--ink)}
+.stat .num small{font-size:12px; color:var(--faint); font-weight:500; margin-left:4px}
+.meter{display:flex; gap:2px; height:8px; border-radius:4px; overflow:hidden; margin:0 0 14px}
+.meter span{background:var(--c); min-width:2px}
+.meta{display:flex; flex-wrap:wrap; gap:6px 16px; font-size:12px; color:var(--muted); margin:-4px 0 14px}
+.meta b{color:var(--ink-soft); font-weight:600}
+
+.toolbar{display:flex; flex-wrap:wrap; gap:8px 12px; align-items:center; margin-bottom:12px}
+.toolbar input[type=search]{width:280px; max-width:100%}
+.chips{display:flex; gap:4px; flex-wrap:wrap}
+.chip{border:1px solid var(--border-strong); background:var(--surface); border-radius:99px; padding:3px 11px; cursor:pointer; font-size:12px; font-weight:500; color:var(--muted)}
+.chip[aria-pressed="true"]{background:var(--ink); color:var(--surface); border-color:var(--ink)}
+.toggle{display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--ink-soft); cursor:pointer; user-select:none}
+.toggle input{accent-color:var(--accent-bright)}
+
+/* ---------- matrix ---------- */
+.tablewrap{overflow:auto; max-height:calc(100vh - 150px); border-radius:var(--radius)}
+table{border-collapse:separate; border-spacing:0; width:100%}
+.matrix th,.matrix td{border-bottom:1px solid var(--border); padding:0}
+.matrix thead th{position:sticky; top:0; z-index:5; background:var(--surface); text-align:center; padding:10px 8px 8px; vertical-align:bottom; border-bottom:1px solid var(--border-strong)}
+.matrix thead th.feat{text-align:left; left:0; z-index:6; padding-left:16px}
+.matrix .dl{font-weight:600; font-size:13px}
+.matrix .ds{font-size:11px; color:var(--faint); font-weight:400}
+.matrix .dc{display:flex; gap:2px; height:4px; margin:7px auto 0; width:84px; border-radius:2px; overflow:hidden}
+.matrix .dc span{background:var(--c)}
+.matrix .dn{font-size:11px; color:var(--muted); font-weight:500; margin-top:4px; font-variant-numeric:tabular-nums}
+.matrix td.feat{position:sticky; left:0; background:var(--surface); z-index:2; padding:5px 12px 5px 16px; min-width:300px; max-width:440px; cursor:pointer}
+.matrix tr.row:hover td{background:var(--surface-2)}
+.matrix td.feat .t{display:block; max-width:400px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap}
+.matrix td.feat .t .p{font-family:var(--mono); font-size:11.5px; color:var(--muted)}
+.matrix td.c{text-align:center; padding:4px 6px; min-width:96px}
+.matrix tr.group td{background:var(--surface-2); padding:0; position:sticky; left:0}
+.grp{display:flex; align-items:center; gap:10px; width:100%; border:0; background:none; text-align:left; padding:9px 16px 8px; cursor:pointer}
+.grp .caret{transition:transform .15s; color:var(--faint); font-size:10px; width:10px}
+.grp[aria-expanded="false"] .caret{transform:rotate(-90deg)}
+.grp .tier{font:600 10.5px var(--mono); text-transform:uppercase; letter-spacing:.06em; color:var(--accent)}
+.grp .name{font-weight:600; text-transform:capitalize}
+.grp .gd{color:var(--faint); font-size:12px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; flex:1 1 0; width:0; min-width:0}
+.grp .gc{display:flex; gap:10px; font-size:12px; color:var(--muted); font-variant-numeric:tabular-nums; flex:none}
+.grp .gc span{display:inline-flex; align-items:center; gap:4px}
+.cell{position:relative; display:inline-flex; align-items:center; justify-content:center; gap:6px; min-width:96px; height:26px; padding:0 9px; border-radius:6px; cursor:pointer;
+  background:color-mix(in srgb, var(--c) 12%, var(--surface)); border:1px solid color-mix(in srgb, var(--c) 36%, transparent); color:var(--ci);
+  font:500 11.5px var(--mono); font-variant-numeric:tabular-nums}
+.cell:hover{border-color:var(--c)}
+.cell.s-not_run{background:transparent; border-style:dashed}
+.cell.s-not_covered{background:transparent; border-style:dotted}
+.cell.s-missing{background:transparent; border-style:dashed}
+.cell.s-not_applicable{background:transparent}
+.cell.old{opacity:.4}
+.cell .n{font-size:10px; color:var(--muted)}
+.chg{position:absolute; top:-6px; right:-6px; width:15px; height:15px; border-radius:50%; display:grid; place-items:center; font-size:8px; color:#fff; box-shadow:0 0 0 2px var(--surface)}
+.chg.up{background:var(--ok)} .chg.down{background:var(--bad)}
+.empty{color:var(--border-strong); font-size:16px}
+.blank{padding:60px 20px; text-align:center; color:var(--muted)}
+.blank h3{color:var(--ink); margin:0 0 6px}
+.blank code{background:var(--surface-2); padding:2px 6px; border-radius:4px}
+.legend{display:flex; flex-wrap:wrap; gap:6px 16px; font-size:12px; color:var(--muted); margin-top:10px}
+.legend span{display:inline-flex; align-items:center; gap:6px}
+
+/* ---------- drawer ---------- */
+.drawer{position:fixed; top:0; right:0; bottom:0; width:min(620px,100vw); background:var(--surface); border-left:1px solid var(--border); box-shadow:var(--shadow-lg);
+  z-index:40; transform:translateX(105%); transition:transform .2s ease; display:flex; flex-direction:column}
+.drawer.open{transform:none}
+.drawer header{padding:16px 20px 12px; border-bottom:1px solid var(--border); display:flex; gap:12px; align-items:flex-start}
+.drawer header .h{flex:1; min-width:0}
+.drawer header h2{font-size:17px; text-transform:none}
+.drawer .key{font:11.5px var(--mono); color:var(--faint); word-break:break-all; margin-top:3px}
+.drawer .body{overflow:auto; padding:14px 20px 40px; display:flex; flex-direction:column; gap:14px}
+.dom-card{border:1px solid var(--border); border-radius:10px; overflow:hidden}
+.dom-card > .hd{display:flex; align-items:center; gap:10px; padding:9px 12px; background:var(--surface-2); border-bottom:1px solid var(--border)}
+.dom-card > .hd .dname{font-weight:600}
+.rec{padding:10px 12px; display:flex; flex-direction:column; gap:7px}
+.rec + .rec{border-top:1px dashed var(--border)}
+.rec .nid{font:11.5px var(--mono); color:var(--ink-soft); word-break:break-all}
+.rec .msg{font:12px/1.5 var(--mono); background:var(--surface-2); border-radius:6px; padding:7px 9px; white-space:pre-wrap; word-break:break-word; color:var(--ink-soft); max-height:140px; overflow:auto}
+.kv{display:flex; flex-wrap:wrap; gap:4px 16px; font-size:12px; color:var(--muted)}
+.kv b{color:var(--ink); font-weight:600; font-variant-numeric:tabular-nums}
+details summary{cursor:pointer; font-size:12px; color:var(--muted)}
+pre.trace{font:11.5px/1.5 var(--mono); background:var(--con-bg); color:var(--con-ink); border-radius:8px; padding:10px 12px; overflow:auto; max-height:360px; margin:6px 0 0}
+.what h3,.absent h3{margin:0 0 6px; font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); font-weight:600}
+.what p{margin:0; font-size:14px; line-height:1.55; color:var(--ink); white-space:pre-line}
+.what p.area{margin-top:8px; font-size:12.5px; color:var(--muted)}
+.what code{font:12px var(--mono); background:var(--surface-2); padding:1px 5px; border-radius:4px}
+.absent{display:flex; flex-direction:column; gap:8px}
+.ab{border:1px solid var(--border); border-radius:10px; padding:9px 12px; display:flex; flex-direction:column; gap:5px}
+.ab-hd{display:flex; flex-wrap:wrap; align-items:center; gap:6px}
+.ab-hd .doms{display:flex; flex-wrap:wrap; gap:4px}
+.ab-why{font-size:13.5px; line-height:1.5; color:var(--ink)}
+.ab-mean{font-size:12px; line-height:1.45}
+.rec .why{font-size:13px; line-height:1.5; background:var(--surface-2); border-radius:6px; padding:7px 9px; color:var(--ink)}
+.rec .why b{display:block; font-size:11px; text-transform:uppercase; letter-spacing:.05em; color:var(--muted); margin-bottom:2px}
+.hist{font-size:12px; width:100%}
+.hist th,.hist td{padding:5px 8px; border-bottom:1px solid var(--border); text-align:left; white-space:nowrap}
+.hist th{color:var(--muted); font-weight:500}
+
+/* ---------- evolution ---------- */
+.charts{display:grid; grid-template-columns:repeat(auto-fit,minmax(340px,1fr)); gap:12px; margin-bottom:14px}
+.chart{padding:14px 16px 10px}
+.chart h2{margin-bottom:2px} .chart p{margin:0 0 8px; font-size:12px; color:var(--muted)}
+.chart svg{width:100%; height:auto; display:block; overflow:visible}
+.chart svg text{font-family:var(--sans); fill:var(--muted); font-size:11px}
+.chart svg .val{fill:var(--ink-soft); font-weight:600}
+.chart svg .grid{stroke:var(--border); stroke-width:1}
+.chart svg rect.hit{fill:transparent}
+.chart svg g.col:hover rect.bar{opacity:.85}
+.evo th,.evo td{padding:5px 10px; border-bottom:1px solid var(--border); white-space:nowrap; text-align:left}
+.evo thead th{position:sticky; top:0; background:var(--surface); z-index:3; font-size:12px; color:var(--muted); font-weight:600; border-bottom:1px solid var(--border-strong)}
+.evo td.vc{min-width:120px}
+.evo .vc .badge{font-family:var(--mono); font-weight:500; font-size:11px}
+.evo td.f{max-width:420px; overflow:hidden; text-overflow:ellipsis; cursor:pointer}
+.evo tr:hover td{background:var(--surface-2)}
+.delta{font:500 12px var(--mono); font-variant-numeric:tabular-nums}
+.delta.slow{color:var(--bad-ink)} .delta.fast{color:var(--ok-ink)}
+.dtag{font:500 10.5px var(--mono); color:var(--muted); background:var(--surface-2); border:1px solid var(--border); padding:1px 6px; border-radius:4px}
+
+/* ---------- runs ---------- */
+.runs-grid{display:grid; grid-template-columns:minmax(320px,440px) 1fr; gap:14px; align-items:start}
+.form{padding:16px; display:flex; flex-direction:column; gap:12px}
+.form .row{display:flex; flex-direction:column; gap:5px}
+.form .row > span{font-size:12px; color:var(--muted); font-weight:500}
+.form .inline{display:flex; gap:12px; flex-wrap:wrap}
+.form input[type=text]{width:100%}
+.form .acts{display:flex; gap:8px; flex-wrap:wrap}
+.progress{height:6px; background:var(--surface-2); border-radius:3px; overflow:hidden}
+.progress span{display:block; height:100%; background:var(--accent-bright); transition:width .4s}
+.log{font:11.5px/1.5 var(--mono); background:var(--con-bg); color:var(--con-ink); border-radius:10px; padding:10px 12px; height:340px; overflow:auto; white-space:pre-wrap; word-break:break-all; margin:0}
+.log:empty::before{content:"No run started from the dashboard yet."; color:var(--con-muted)}
+.history{padding:0; overflow:auto}
+.history table th,.history table td{padding:8px 12px; border-bottom:1px solid var(--border); text-align:left; white-space:nowrap; font-size:12.5px}
+.history table th{color:var(--muted); font-weight:500; font-size:12px; position:sticky; top:0; background:var(--surface)}
+.mini{display:flex; gap:1px; width:120px; height:6px; border-radius:3px; overflow:hidden; background:var(--surface-2)}
+.mini span{background:var(--c)}
+.counts{display:flex; gap:8px; font:500 11.5px var(--mono)}
+.counts span{color:var(--ci)}
+.note{font-size:12px; color:var(--muted); background:var(--surface-2); border:1px solid var(--border); border-radius:8px; padding:9px 11px}
+
+#tip{position:fixed; z-index:60; pointer-events:none; background:var(--con-bg); color:var(--con-ink); font-size:12px; padding:7px 10px; border-radius:7px; box-shadow:var(--shadow-lg); max-width:320px; opacity:0; transition:opacity .08s}
+#tip.on{opacity:1}
+#tip b{color:#fff}
+#toast{position:fixed; bottom:18px; left:50%; transform:translateX(-50%); background:var(--ink); color:var(--surface); padding:8px 14px; border-radius:8px; font-size:13px; z-index:70; opacity:0; transition:opacity .2s; pointer-events:none}
+#toast.on{opacity:1}
+
+@media (max-width:900px){
+  .summary{grid-template-columns:repeat(4,minmax(0,1fr))}
+  .runs-grid{grid-template-columns:1fr}
+}
+@media (max-width:560px){
+  .top-in,main{padding-left:16px; padding-right:16px}
+  .summary{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .matrix td.feat{min-width:190px}
+  .toolbar input[type=search]{width:100%}
+}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="top-in">
+    <div class="brand"><div class="mark">G+</div><div>Test matrix <small id="subtitle"></small></div></div>
+    <nav class="tabs" role="tablist">
+      <button role="tab" data-view="matrix">Matrix</button>
+      <button role="tab" data-view="evolution">Evolution</button>
+      <button role="tab" data-view="runs">Runs</button>
+    </nav>
+    <div class="pickers">
+      <label class="pick">Version <select id="version"></select></label>
+      <label class="pick">gdb flavor <select id="flavor"></select></label>
+    </div>
+    <div class="spacer"></div>
+    <div class="conn" id="conn"><span class="dot"></span><span id="conn-text">…</span></div>
+    <button class="iconbtn" id="theme" title="Theme: auto / light / dark">◐</button>
+  </div>
+</header>
+
+<main>
+  <!-- MATRIX -->
+  <section class="view" id="view-matrix">
+    <div class="summary" id="summary"></div>
+    <div class="meter" id="meter"></div>
+    <div class="meta" id="meta"></div>
+    <div class="toolbar">
+      <input type="search" id="search" placeholder="Filter features, files, areas…">
+      <div class="chips" id="tier-chips"></div>
+      <label class="toggle"><input type="checkbox" id="changed"> changed since the previous run</label>
+      <label class="toggle"><input type="checkbox" id="dim"> dim results not from the last run</label>
+      <div class="spacer"></div>
+      <button class="btn small" id="expand">Expand all</button>
+      <button class="btn small" id="collapse">Collapse all</button>
+      <button class="btn small" id="run-visible" data-needs-server>Run visible</button>
+    </div>
+    <div class="card tablewrap" id="matrix"></div>
+    <div class="legend" id="legend"></div>
+  </section>
+
+  <!-- EVOLUTION -->
+  <section class="view" id="view-evolution" hidden>
+    <div class="charts">
+      <div class="card chart"><h2>Results per version</h2><p>Every recorded test, by status. Latest result of each version.</p><div id="chart-status"></div></div>
+      <div class="card chart"><h2>Time per version</h2><p id="time-caption">Sum of the duration of the tests present in every version shown.</p><div id="chart-time"></div></div>
+    </div>
+    <div class="toolbar">
+      <input type="search" id="evo-search" placeholder="Filter features…">
+      <label class="pick">Domain <select id="evo-domain"></select></label>
+      <label class="pick">Sort <select id="evo-sort">
+        <option value="feature">feature</option>
+        <option value="delta">slowest change first</option>
+        <option value="status">status changes first</option>
+      </select></label>
+      <label class="toggle"><input type="checkbox" id="evo-changed" checked> only status changes or ±25% time</label>
+    </div>
+    <div class="card tablewrap" id="evo-table"></div>
+  </section>
+
+  <!-- RUNS -->
+  <section class="view" id="view-runs" hidden>
+    <div class="runs-grid">
+      <div style="display:flex; flex-direction:column; gap:14px">
+        <div class="card form" id="run-form">
+          <h2>Run the suite</h2>
+          <div class="row"><span>Tiers</span>
+            <div class="inline" id="run-tiers"></div>
+          </div>
+          <label class="row"><span>Select with <code>-k</code></span><input type="text" id="run-k" placeholder="e.g. finish or (gdb and not libdebug)"></label>
+          <label class="row"><span>Markers <code>-m</code></span><input type="text" id="run-m" placeholder="e.g. not regression"></label>
+          <div class="inline">
+            <label class="row" style="flex:1"><span>gdb flavor</span>
+              <select id="run-flavor"><option>vanilla</option><option>gef</option><option>pwndbg</option><option>user</option></select></label>
+            <label class="row" style="flex:1"><span>Record as version</span><input type="text" id="run-as" placeholder="pyproject version"></label>
+          </div>
+          <label class="row"><span>Extra pytest arguments</span><input type="text" id="run-extra" placeholder="e.g. -x --timeout-scale=2"></label>
+          <div class="acts">
+            <button class="btn primary" id="run-start">Run</button>
+            <button class="btn" id="run-failing">Re-run failing</button>
+            <button class="btn danger" id="run-stop">Stop</button>
+          </div>
+          <div id="run-status" class="muted" style="font-size:12.5px"></div>
+          <div class="progress"><span id="run-bar" style="width:0"></span></div>
+        </div>
+        <pre class="log" id="run-log"></pre>
+      </div>
+      <div class="card history" id="history"></div>
+    </div>
+  </section>
+</main>
+
+<aside class="drawer" id="drawer" aria-hidden="true"></aside>
+<div id="tip"></div>
+<div id="toast"></div>
+
+<script id="embedded-data" type="application/json"></script>
+<script>
+"use strict";
+const TOKEN = "__DASHBOARD_TOKEN__";
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const store = {
+  get(k, d) { try { const v = localStorage.getItem("gdbplus-dash:" + k); return v === null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem("gdbplus-dash:" + k, JSON.stringify(v)); } catch {} },
+};
+
+const STATUSES = ["working", "failing", "not_implemented", "missing", "not_applicable", "not_covered", "not_run"];
+const S = {
+  working:         {label: "Working",         glyph: "✓", sev: 4},
+  failing:         {label: "Failing",         glyph: "✕", sev: 7},
+  not_implemented: {label: "Not implemented", glyph: "!", sev: 5},
+  missing:         {label: "Missing",         glyph: "∅", sev: 6},
+  not_applicable:  {label: "Not applicable",  glyph: "–", sev: 1},
+  not_covered:     {label: "Not covered",     glyph: "○", sev: 2},
+  not_run:         {label: "Not run",         glyph: "?", sev: 3},
+};
+const S_HINT = {
+  working: "passed",
+  failing: "failed or errored: a bug in gdb_plus, or a known gap that now passes",
+  not_implemented: "known gap (xfail, known_gap marker) or NotImplementedError",
+  missing: "no test on this domain and no marker saying why: add a test or justify it",
+  not_applicable: "the feature can't exist on this domain",
+  not_covered: "could work there, but not tested: the reason is in the cell",
+  not_run: "skipped: this machine lacks something (qemu, libdebug, sage…)",
+};
+// What a status means when it is the answer to "why doesn't this feature run here?"
+const S_WHY = {
+  not_applicable: {title: "Why it is not applicable", text: "The feature can't exist on this domain by design: nothing is missing in gdb_plus or in the suite."},
+  not_covered: {title: "Why it is not tested", text: "The feature could work here, but this suite doesn't test it on this domain (another test covers it, or the harness doesn't exist yet)."},
+  not_implemented: {title: "Why it doesn't work yet", text: "A known gap: gdb_plus should support this and doesn't. The test is a strict xfail, so it turns red the day the gap is fixed."},
+  missing: {title: "Why it is missing", text: "No test of this feature runs here and no marker says why: add a test, or a not_applicable / untested / known_gap marker with the reason."},
+  not_run: {title: "Why it was skipped", text: "This machine lacks something the test needs: install it and run again."},
+  failing: {title: "Why it fails", text: "A failing test without an xfail marker is a bug in gdb_plus (or a known gap that now passes)."},
+};
+const QUALITY = {working: 2, not_implemented: 1, failing: 0};
+const DOMAINS = {
+  offline: {label: "Offline", sub: "unit · no process"},
+  gdb: {label: "gdb", sub: "x86-64 process"},
+  libdebug: {label: "libdebug", sub: "legacy fork"},
+  new_libdebug: {label: "new libdebug", sub: "libdebug ≥ 0.8"},
+  remote: {label: "Remote", sub: "gdbserver"},
+  i386: {label: "i386", sub: "native · gdb"},
+  arm: {label: "arm", sub: "qemu-user"},
+  aarch64: {label: "aarch64", sub: "qemu-user"},
+  riscv32: {label: "riscv32", sub: "qemu-user"},
+  riscv64: {label: "riscv64", sub: "qemu-user"},
+  mips: {label: "mips", sub: "qemu-user · BE"},
+  mips64: {label: "mips64", sub: "qemu-user · BE"},
+  aarch64_native: {label: "aarch64 native", sub: "Raspberry Pi · planned"},
+  aarch64_remote: {label: "aarch64 remote", sub: "gdbserver on the Pi · planned"},
+  qemu: {label: "QEMU", sub: "older results"},
+};
+// features on a real process first, the offline unit checks last
+const TIERS = ["integration", "regression", "unit"];
+
+const state = {
+  data: null, live: null, runner: null, connected: false, isStatic: false, liveStamp: null,
+  view: store.get("view", "matrix"), version: null, flavor: null,
+  search: "", tiers: new Set(store.get("tiers", TIERS)), statuses: new Set(STATUSES),
+  changed: false, dim: false, collapsed: new Set(store.get("collapsed", [])),
+  evo: {domain: "all", search: "", sort: "feature", changed: true},
+  drawer: null,
+};
+
+/* ---------------- formatting ---------------- */
+function dur(s) {
+  if (s == null) return "";
+  if (s < 0.001) return "<1ms";
+  if (s < 1) return Math.round(s * 1000) + "ms";
+  if (s < 10) return s.toFixed(2) + "s";
+  if (s < 60) return s.toFixed(1) + "s";
+  return Math.floor(s / 60) + "m" + String(Math.round(s % 60)).padStart(2, "0") + "s";
+}
+function ago(t) {
+  if (!t) return "";
+  const s = Date.now() / 1000 - t;
+  if (s < 60) return "just now";
+  if (s < 3600) return Math.round(s / 60) + " min ago";
+  if (s < 86400) return Math.round(s / 3600) + " h ago";
+  return Math.round(s / 86400) + " d ago";
+}
+const date = t => t ? new Date(t * 1000).toLocaleString([], {year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"}) : "";
+const glyph = st => `<span class="glyph">${S[st].glyph}</span>`;
+const badge = (st, text) => `<span class="badge s-${st}">${glyph(st)}${esc(text ?? S[st].label)}</span>`;
+function cmpVersion(a, b) {
+  const pa = a.split(/[^0-9]+/).filter(Boolean).map(Number), pb = b.split(/[^0-9]+/).filter(Boolean).map(Number);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] ?? -1) - (pb[i] ?? -1);
+    if (d) return d;
+  }
+  return a.localeCompare(b);
+}
+function toast(text) {
+  const t = $("#toast"); t.textContent = text; t.classList.add("on");
+  clearTimeout(toast.timer); toast.timer = setTimeout(() => t.classList.remove("on"), 2600);
+}
+
+/* ---------------- data model ---------------- */
+const versions = () => state.data.versions.map(v => v.version).sort(cmpVersion);
+const versionFile = v => state.data.versions.find(f => f.version === v);
+function flavors() {
+  const set = new Set();
+  for (const f of state.data.versions) for (const r of Object.values(f.results || {})) set.add(r.flavor || "vanilla");
+  return [...set].sort((a, b) => (a !== "vanilla") - (b !== "vanilla") || a.localeCompare(b));
+}
+function records(version, flavor = state.flavor) {
+  const f = versionFile(version);
+  return f ? Object.values(f.results || {}).filter(r => (r.flavor || "vanilla") === flavor) : [];
+}
+const declared = r => (r.flags || []).includes("declared");
+// The descriptions and the reasons of the markers as they are in the test files now (server.py: load_catalog),
+// instead of the ones saved with each result, which are only as recent as the run of that test
+const catalog = () => state.data?.catalog || {};
+const DECLARABLE = ["not_applicable", "not_covered", "not_implemented"];
+function liveRecord(r) {
+  const live = catalog()[r.feature]?.declared?.[r.domain];
+  return live && live[0] === r.status && DECLARABLE.includes(r.status) && live[1] && live[1] !== r.message ? {...r, message: live[1]} : r;
+}
+function buildRows(recs) {
+  const rows = new Map();
+  for (let r of recs) {
+    r = liveRecord(r);
+    let row = rows.get(r.feature);
+    const live = catalog()[r.feature];
+    if (!row) rows.set(r.feature, row = {feature: r.feature, title: r.title, doc: live?.doc || r.doc, tier: r.tier, area: r.area,
+      area_doc: live?.area_doc || r.area_doc, cells: {}, order: Infinity});
+    (row.cells[r.domain] ||= []).push(r);
+    if (!declared(r)) row.order = Math.min(row.order, r.when);
+  }
+  for (const row of rows.values()) {
+    for (const d in row.cells) {
+      const real = row.cells[d].filter(r => !declared(r));
+      if (real.length) row.cells[d] = real;  // a declared "not applicable" never hides a real result
+    }
+    if (row.order === Infinity) row.order = Math.min(...Object.values(row.cells).flat().map(r => r.when));
+  }
+  return [...rows.values()];
+}
+const cellStatus = recs => recs.reduce((a, r) => S[r.status].sev > S[a].sev ? r.status : a, recs[0].status);
+function change(r) {
+  const p = r.previous;
+  if (!p || !(p.status in QUALITY) || !(r.status in QUALITY) || p.status === r.status) return 0;
+  return QUALITY[r.status] > QUALITY[p.status] ? 1 : -1;
+}
+const cellChange = recs => { const c = recs.map(change); return c.includes(-1) ? -1 : c.includes(1) ? 1 : 0; };
+function domainsOf(rows) {
+  const present = new Set(rows.flatMap(r => Object.keys(r.cells)));
+  return [...Object.keys(DOMAINS).filter(d => present.has(d)), ...[...present].filter(d => !(d in DOMAINS)).sort()];
+}
+function lastRun(version = state.version) {
+  const runs = (versionFile(version)?.runs || []).filter(r => (r.flavor || "vanilla") === state.flavor);
+  return runs[runs.length - 1];
+}
+function countBy(list) {
+  const c = Object.fromEntries(STATUSES.map(s => [s, 0]));
+  for (const s of list) c[s]++;
+  return c;
+}
+const segs = counts => STATUSES.filter(s => counts[s]).map(s => `<span class="s-${s}" style="flex:${counts[s]}"></span>`).join("");
+
+/* ---------------- header ---------------- */
+function renderHeader() {
+  const vs = versions().reverse();
+  $("#version").innerHTML = vs.map(v => `<option value="${esc(v)}">${esc(v)}${v === state.data.current ? "  · pyproject" : ""}</option>`).join("");
+  $("#version").value = state.version;
+  const fl = flavors();
+  $("#flavor").innerHTML = (fl.length ? fl : ["vanilla"]).map(f => `<option>${esc(f)}</option>`).join("");
+  $("#flavor").value = state.flavor;
+  $$(".tabs button").forEach(b => b.setAttribute("aria-selected", b.dataset.view === state.view));
+  $$(".view").forEach(v => v.hidden = v.id !== "view-" + state.view);
+  $("#subtitle").textContent = state.data.current ? "· gdb_plus " + state.data.current : "";
+  $$("[data-needs-server]").forEach(b => b.hidden = !state.connected);
+  const conn = $("#conn"), running = state.live?.running || state.runner?.running;
+  const nRunning = (state.lives || []).filter(l => l.running).length;
+  conn.className = "conn " + (state.connected ? (running ? "busy" : "live") : "");
+  $("#conn-text").textContent = state.isStatic ? "static export · " + date(state.data.generated)
+    : !state.connected ? "server offline" : running ? `running ${state.live ? state.live.done + "/" + state.live.total : ""}${nRunning > 1 ? ` (+${nRunning - 1} more)` : ""}` : "connected";
+}
+
+/* ---------------- matrix ---------------- */
+function rowVisible(row) {
+  if (!state.tiers.has(row.tier)) return false;
+  if (state.search) {
+    const q = state.search.toLowerCase();
+    if (![row.title, row.feature, row.area, row.tier, row.doc].some(x => (x || "").toLowerCase().includes(q))) return false;
+  }
+  const cells = Object.values(row.cells);
+  if (state.changed && !cells.some(c => cellChange(c))) return false;
+  if (state.statuses.size < STATUSES.length && !cells.some(c => state.statuses.has(cellStatus(c)))) return false;
+  return true;
+}
+function renderMatrix() {
+  const all = buildRows(records(state.version));
+  const tierRows = all.filter(r => state.tiers.has(r.tier));
+  const rows = all.filter(rowVisible).sort((a, b) => TIERS.indexOf(a.tier) - TIERS.indexOf(b.tier) || a.area.localeCompare(b.area) || a.order - b.order);
+  const domains = domainsOf(rows.length ? rows : tierRows);
+  const last = lastRun();
+
+  // summary over the cells of the selected tiers (not affected by search / status filters)
+  const cellsAll = tierRows.flatMap(r => Object.values(r.cells).map(cellStatus));
+  const counts = countBy(cellsAll);
+  $("#summary").innerHTML = STATUSES.map(s => `
+    <button class="card stat s-${s}" data-status="${s}" aria-pressed="${state.statuses.has(s)}" title="${esc(S_HINT[s])} — click to filter">
+      <span class="lab">${glyph(s)} ${S[s].label}</span>
+      <span class="num">${counts[s]}<small>${cellsAll.length ? Math.round(counts[s] * 100 / cellsAll.length) + "%" : ""}</small></span>
+    </button>`).join("");
+  $("#meter").innerHTML = segs(counts);
+  const vf = versionFile(state.version);
+  const testCount = tierRows.reduce((n, r) => n + Object.values(r.cells).flat().filter(x => !declared(x)).length, 0);
+  $("#meta").innerHTML = vf ? `
+    <span><b>${tierRows.length}</b> features · <b>${testCount}</b> test results</span>
+    ${last ? `<span>last run <b>${esc(ago(last.finished || last.started))}</b> · <span class="mono">${esc(last.commit || "")}</span> · ${esc(last.host || "")}</span>
+    <span class="mono faint">pytest ${esc((last.args || []).join(" ") || "(all)")}</span>` : ""}` : "";
+
+  if (!state.data.versions.length) {
+    $("#matrix").innerHTML = `<div class="blank"><h3>No results yet</h3>Run <code>pytest tests/unit</code> (or any part of the suite)${state.connected ? ", or start a run from the Runs tab" : ""}: every run is recorded in <code>tests/.results/</code>.</div>`;
+    return;
+  }
+  if (!rows.length) {
+    $("#matrix").innerHTML = `<div class="blank"><h3>Nothing matches</h3>Change the filters above.</div>`;
+    return;
+  }
+  const head = `<thead><tr><th class="feat">Feature</th>${domains.map(d => {
+      const st = countBy(tierRows.filter(r => r.cells[d]).map(r => cellStatus(r.cells[d])));
+      const n = Object.values(st).reduce((a, b) => a + b, 0);
+      return `<th><div class="dl">${esc(DOMAINS[d]?.label || d)}</div><div class="ds">${esc(DOMAINS[d]?.sub || "")}</div>
+        <div class="dc">${segs(st)}</div><div class="dn">${st.working}/${n - st.not_applicable - st.not_run - st.not_covered} working</div></th>`;
+    }).join("")}</tr></thead>`;
+  let body = "", group = null;
+  const groupRows = {};
+  for (const r of rows) (groupRows[r.tier + "/" + r.area] ||= []).push(r);
+  for (const r of rows) {
+    const g = r.tier + "/" + r.area;
+    const open = !state.collapsed.has(g);
+    if (g !== group) {
+      group = g;
+      const gc = countBy(groupRows[g].flatMap(x => Object.values(x.cells).map(cellStatus)));
+      body += `<tr class="group"><td colspan="${domains.length + 1}"><button class="grp" data-group="${esc(g)}" aria-expanded="${open}">
+        <span class="caret">▼</span><span class="tier">${esc(r.tier)}</span><span class="name">${esc(r.area)}</span>
+        <span class="gd">${esc(r.area_doc || "")}</span>
+        <span class="gc">${["working", "failing", "not_implemented", "missing"].filter(s => gc[s]).map(s => `<span class="s-${s}">${glyph(s)}${gc[s]}</span>`).join("")}
+        <span class="faint">${groupRows[g].length} features</span></span></button></td></tr>`;
+    }
+    if (!open) continue;
+    const m = r.title.match(/^(.*?)( \[.*\])?$/);
+    body += `<tr class="row" data-feature="${esc(r.feature)}"><td class="feat" title="${esc(r.feature)}"><span class="t">${esc(m[1])}${m[2] ? `<span class="p">${esc(m[2])}</span>` : ""}</span></td>`;
+    for (const d of domains) body += cellHTML(r.cells[d], d, last, r.tier);
+    body += "</tr>";
+  }
+  const wrap = $("#matrix"), scroll = [wrap.scrollTop, wrap.scrollLeft];
+  wrap.innerHTML = `<table class="matrix">${head}<tbody>${body}</tbody></table>`;
+  [wrap.scrollTop, wrap.scrollLeft] = scroll;
+  $("#legend").innerHTML = STATUSES.map(s => `<span class="s-${s}">${glyph(s)} <b>${S[s].label}</b> ${esc(S_HINT[s])}</span>`).join("")
+    + `<span><span class="chg down" style="position:static">▼</span> worse than the previous run</span><span><span class="chg up" style="position:static">▲</span> better</span>`;
+}
+function scopeOf(tier) {
+  return (versionFile(state.version)?.scopes || {})[tier];
+}
+function cellHTML(recs, domain, last, tier) {
+  if (!recs) {
+    // Outside the scope of the tier (unit: offline only...), or recorded before the scopes existed
+    const why = scopeOf(tier)?.reason || "No test of this feature on " + (DOMAINS[domain]?.label || domain);
+    return `<td class="c"><span class="empty" title="${esc(why)}">·</span></td>`;
+  }
+  const st = cellStatus(recs);
+  const total = recs.reduce((a, r) => a + (r.duration || 0), 0);
+  const ch = cellChange(recs);
+  const old = state.dim && last && recs.every(r => r.run !== last.id);
+  const msg = recs.map(r => r.message).filter(Boolean)[0] || "";
+  const tip = `<b>${S[st].label}</b> · ${esc(DOMAINS[domain]?.label || domain)}${recs.length > 1 ? ` · ${recs.length} tests` : ""}${total ? " · " + dur(total) : ""}`
+    + (msg ? `<br>${esc(msg.slice(0, 220))}` : "") + (ch ? `<br>was ${esc(S[recs.find(r => change(r))?.previous.status]?.label || "")} in the previous run` : "");
+  const text = {not_applicable: "n/a", not_run: "skip", not_covered: "untested", missing: "missing"}[st] || (st === "not_implemented" && recs.every(declared) ? "gap" : dur(total));
+  return `<td class="c"><button class="cell s-${st}${old ? " old" : ""}" data-domain="${esc(domain)}" data-tip="${esc(tip)}" aria-label="${S[st].label}">${glyph(st)}<span>${text}</span>${recs.length > 1 ? `<span class="n">×${recs.length}</span>` : ""}${ch ? `<span class="chg ${ch > 0 ? "up" : "down"}">${ch > 0 ? "▲" : "▼"}</span>` : ""}</button></td>`;
+}
+
+/* ---------------- drawer ---------------- */
+function openDrawer(feature, focusDomain) {
+  state.drawer = {feature, focusDomain};
+  renderDrawer();
+  $("#drawer").classList.add("open");
+  $("#drawer").setAttribute("aria-hidden", "false");
+}
+function closeDrawer() {
+  state.drawer = null;
+  $("#drawer").classList.remove("open");
+  $("#drawer").setAttribute("aria-hidden", "true");
+}
+function renderDrawer() {
+  if (!state.drawer) return;
+  const {feature, focusDomain} = state.drawer;
+  const row = buildRows(records(state.version)).find(r => r.feature === feature);
+  const el = $("#drawer");
+  if (!row) { el.innerHTML = `<header><div class="h"><h2>Not recorded in ${esc(state.version)}</h2></div><button class="iconbtn" data-close>✕</button></header>`; return; }
+  const domains = domainsOf([row]).sort((a, b) => (b === focusDomain) - (a === focusDomain));
+  const runnable = Object.values(row.cells).flat().filter(r => !declared(r)).map(r => r.nodeid);
+  const vs = versions();
+  const hist = vs.map(v => [v, buildRows(records(v)).find(r => r.feature === feature)]).filter(x => x[1]);
+  el.innerHTML = `
+    <header><div class="h"><div class="muted" style="font-size:12px"><span class="mono" style="color:var(--accent)">${esc(row.tier)}</span> · ${esc(row.area)}</div>
+      <h2>${esc(row.title)}</h2><div class="key">${esc(row.feature)}</div></div>
+      <button class="iconbtn" data-close aria-label="Close">✕</button></header>
+    <div class="body">
+      <section class="what"><h3>What this test checks</h3>
+        ${row.doc ? `<p>${esc(row.doc)}</p>` : `<p class="faint">No description yet: give <code>${esc(row.feature.split("::").pop().split("[")[0])}</code> a docstring.</p>`}
+        ${row.area_doc ? `<p class="area"><b>${esc(row.area)}</b> · ${esc(row.area_doc)}</p>` : ""}</section>
+      ${whyAbsent(row)}
+      ${state.connected && runnable.length ? `<div class="acts" style="display:flex;gap:8px"><button class="btn small" data-run='${esc(JSON.stringify(runnable))}'>Run on every domain (${runnable.length})</button></div>` : ""}
+      ${domains.map(d => {
+        const recs = row.cells[d], st = cellStatus(recs);
+        return `<div class="dom-card"><div class="hd">${badge(st)}<span class="dname">${esc(DOMAINS[d]?.label || d)}</span><span class="faint" style="font-size:12px">${esc(DOMAINS[d]?.sub || "")}</span></div>
+          ${recs.map(r => `<div class="rec">
+            <div class="nid">${esc(r.nodeid)}</div>
+            ${recs.length > 1 ? `<div>${badge(r.status)}</div>` : ""}
+            ${r.message ? (S_WHY[r.status] && r.status !== "failing" ? `<div class="why"><b>${esc(S_WHY[r.status].title)}</b>${esc(r.message)}</div>` : `<div class="msg">${esc(r.message)}</div>`) : ""}
+            ${(r.flags || []).length ? `<div class="kv">${r.flags.map(f => `<span class="dtag">${esc(f)}</span>`).join(" ")}</div>` : ""}
+            ${declared(r) ? "" : `<div class="kv"><span>total <b>${dur(r.duration)}</b></span><span>setup <b>${dur(r.setup)}</b></span><span>call <b>${dur(r.call)}</b></span>
+              <span>${esc(date(r.when))} · <span class="mono">${esc(r.commit || "")}</span></span></div>`}
+            ${r.previous ? `<div class="kv"><span>previous run: ${badge(r.previous.status)}</span><span><b>${dur(r.previous.duration)}</b>${r.previous.duration && r.duration ? ` → ${pct(r.duration, r.previous.duration)}` : ""}</span><span>${esc(date(r.previous.when))} · <span class="mono">${esc(r.previous.commit || "")}</span></span></div>` : ""}
+            ${r.details ? `<details><summary>traceback</summary><pre class="trace">${esc(r.details)}</pre></details>` : ""}
+            ${state.connected && !declared(r) ? `<div><button class="btn small" data-run='${esc(JSON.stringify([r.nodeid]))}'>Run this test</button></div>` : ""}
+          </div>`).join("")}</div>`;
+      }).join("")}
+      ${hist.length > 1 ? `<div><h2 style="margin-bottom:6px">Across versions</h2><table class="hist"><thead><tr><th>version</th>${domains.map(d => `<th>${esc(DOMAINS[d]?.label || d)}</th>`).join("")}</tr></thead><tbody>
+        ${hist.reverse().map(([v, hr]) => `<tr><td class="mono">${esc(v)}</td>${domains.map(d => {
+          const c = hr.cells[d];
+          if (!c) return `<td class="faint">·</td>`;
+          return `<td>${badge(cellStatus(c), dur(c.reduce((a, r) => a + (r.duration || 0), 0)) || S[cellStatus(c)].label)}</td>`;
+        }).join("")}</tr>`).join("")}</tbody></table></div>` : ""}
+    </div>`;
+}
+// The domains a feature doesn't run on, grouped by reason: one line per reason instead of one card per domain
+function whyAbsent(row) {
+  const groups = new Map();
+  for (const [d, recs] of Object.entries(row.cells)) {
+    for (const r of recs) {
+      if (!(r.status in S_WHY) || r.status === "failing" || (r.status === "not_implemented" && !declared(r) && !r.message)) continue;
+      const key = r.status + "\u0000" + (r.message || "");
+      const g = groups.get(key) || {status: r.status, reason: r.message, domains: []};
+      if (!g.domains.includes(d)) g.domains.push(d);
+      groups.set(key, g);
+    }
+  }
+  if (!groups.size) return "";
+  const order = Object.keys(DOMAINS);
+  const rank = ["missing", "not_implemented", "not_applicable", "not_covered", "not_run"];
+  const planned = g => g.domains.every(d => d.startsWith("aarch64_"));  // the Raspberry Pi columns: same reason everywhere
+  const list = [...groups.values()].sort((a, b) => planned(a) - planned(b) || rank.indexOf(a.status) - rank.indexOf(b.status)
+    || order.indexOf(a.domains[0]) - order.indexOf(b.domains[0]));
+  return `<section class="absent"><h3>Where it doesn't run, and why</h3>${list.map(g => `<div class="ab">
+      <div class="ab-hd">${badge(g.status)}<span class="doms">${g.domains.sort((a, b) => order.indexOf(a) - order.indexOf(b)).map(d => `<span class="dtag">${esc(DOMAINS[d]?.label || d)}</span>`).join("")}</span></div>
+      <div class="ab-why">${esc(g.reason || "no reason given")}</div>
+      <div class="ab-mean faint">${esc(S_WHY[g.status].text)}</div></div>`).join("")}</section>`;
+}
+function pct(now, before) {
+  const p = (now - before) / before * 100;
+  const cls = Math.abs(p) >= 25 && Math.abs(now - before) > .05 ? (p > 0 ? "slow" : "fast") : "";
+  return `<span class="delta ${cls}">${p > 0 ? "+" : ""}${p.toFixed(0)}%</span>`;
+}
+
+/* ---------------- evolution ---------------- */
+function renderEvolution() {
+  const vs = versions();
+  const dsel = $("#evo-domain");
+  const allDomains = domainsOf(vs.flatMap(v => buildRows(records(v))));
+  dsel.innerHTML = `<option value="all">all domains</option>` + allDomains.map(d => `<option value="${esc(d)}">${esc(DOMAINS[d]?.label || d)}</option>`).join("");
+  dsel.value = allDomains.includes(state.evo.domain) ? state.evo.domain : "all";
+  const inDomain = r => state.evo.domain === "all" || r.domain === state.evo.domain;
+  const perVersion = vs.map(v => records(v).filter(r => inDomain(r) && !declared(r)));
+
+  // chart 1: status counts per version
+  statusChart($("#chart-status"), vs, perVersion.map(recs => countBy(recs.map(r => r.status))));
+  // chart 2: time of the tests common to every version (otherwise a bigger suite looks slower)
+  const keys = perVersion.map(recs => new Set(recs.filter(r => r.duration != null).map(r => r.nodeid)));
+  const common = keys.length ? [...keys[0]].filter(k => keys.every(s => s.has(k))) : [];
+  const commonSet = new Set(common);
+  const times = perVersion.map(recs => recs.filter(r => commonSet.has(r.nodeid)).reduce((a, r) => a + r.duration, 0));
+  $("#time-caption").textContent = vs.length > 1 ? `Sum of the ${common.length} tests recorded in every version shown.` : "Sum of every recorded test.";
+  timeChart($("#chart-time"), vs, times);
+
+  // table
+  const rows = new Map();
+  vs.forEach((v, i) => {
+    for (const r of perVersion[i]) {
+      const key = r.nodeid;
+      let row = rows.get(key);
+      if (!row) rows.set(key, row = {key, title: r.title, feature: r.feature, domain: r.domain, tier: r.tier, area: r.area, by: {}});
+      row.by[v] = r;
+    }
+  });
+  const q = state.evo.search.toLowerCase();
+  let list = [...rows.values()].filter(r => !q || [r.title, r.feature, r.area].some(x => (x || "").toLowerCase().includes(q)));
+  for (const r of list) {
+    const present = vs.filter(v => r.by[v]);
+    r.statusChanged = new Set(present.map(v => r.by[v].status)).size > 1;
+    const timed = present.filter(v => r.by[v].duration != null);
+    r.delta = null;
+    if (timed.length > 1) {
+      const a = r.by[timed[timed.length - 2]].duration, b = r.by[timed[timed.length - 1]].duration;
+      r.delta = a > 0 ? (b - a) / a : null;
+      r.deltaAbs = b - a;
+    }
+    r.timeChanged = r.delta != null && Math.abs(r.delta) >= .25 && Math.abs(r.deltaAbs) > .05;
+  }
+  if (state.evo.changed && vs.length > 1) list = list.filter(r => r.statusChanged || r.timeChanged);
+  const sorters = {
+    feature: (a, b) => a.feature.localeCompare(b.feature) || a.domain.localeCompare(b.domain),
+    delta: (a, b) => (b.delta ?? -Infinity) - (a.delta ?? -Infinity),
+    status: (a, b) => b.statusChanged - a.statusChanged || a.feature.localeCompare(b.feature),
+  };
+  list.sort(sorters[state.evo.sort]);
+  const shown = list.slice(0, 800);
+  const wrap = $("#evo-table");
+  if (vs.length < 2) {
+    wrap.innerHTML = `<div class="blank"><h3>One version recorded so far</h3>Evolution needs a second version: bump <code>version</code> in pyproject.toml, or record a run under another name with <code>pytest tests --record-as=7.6.0-dev</code>.<br>Within a version, the matrix already compares every test with its previous run (▲ ▼).</div>`;
+    return;
+  }
+  if (!list.length) { wrap.innerHTML = `<div class="blank"><h3>No changes between versions</h3>Untick “only status changes” to see every test.</div>`; return; }
+  wrap.innerHTML = `<table class="evo"><thead><tr><th>feature</th><th>domain</th>${vs.map(v => `<th>${esc(v)}</th>`).join("")}<th>Δ time</th></tr></thead><tbody>
+    ${shown.map(r => `<tr><td class="f" data-feature="${esc(r.feature)}" data-domain="${esc(r.domain)}" title="${esc(r.key)}">${esc(r.title)} <span class="faint" style="font-size:11px">${esc(r.tier)} · ${esc(r.area)}</span></td>
+      <td><span class="dtag">${esc(DOMAINS[r.domain]?.label || r.domain)}</span></td>
+      ${vs.map(v => { const x = r.by[v]; return `<td class="vc">${x ? badge(x.status, ["not_run", "not_applicable", "not_covered"].includes(x.status) ? S[x.status].label : dur(x.duration)) : `<span class="faint">·</span>`}</td>`; }).join("")}
+      <td>${r.delta == null ? "" : `<span class="delta ${r.timeChanged ? (r.delta > 0 ? "slow" : "fast") : ""}">${r.delta > 0 ? "+" : ""}${(r.delta * 100).toFixed(0)}%</span>`}</td></tr>`).join("")}
+    ${list.length > shown.length ? `<tr><td colspan="${vs.length + 3}" class="muted">${list.length - shown.length} more rows: filter to narrow down</td></tr>` : ""}
+  </tbody></table>`;
+}
+function svgFrame(n) {
+  const W = 560, H = 210, L = 40, R = 8, T = 18, B = 26;
+  const bw = Math.min(56, (W - L - R) / Math.max(n, 1) * .62);
+  const x = i => L + (W - L - R) / n * (i + .5);
+  return {W, H, L, R, T, B, bw, x};
+}
+function niceMax(v) {
+  if (v <= 0) return 1;
+  const p = 10 ** Math.floor(Math.log10(v)), m = v / p;
+  return (m <= 1 ? 1 : m <= 2 ? 2 : m <= 5 ? 5 : 10) * p;
+}
+function axis(f, max, fmt) {
+  let s = "";
+  for (let k = 0; k <= 4; k++) {
+    const val = max * k / 4, y = f.H - f.B - (f.H - f.T - f.B) * k / 4;
+    s += `<line class="grid" x1="${f.L}" x2="${f.W - f.R}" y1="${y}" y2="${y}"/><text x="${f.L - 6}" y="${y + 4}" text-anchor="end">${fmt(val)}</text>`;
+  }
+  return s;
+}
+function statusChart(el, vs, counts) {
+  const f = svgFrame(vs.length);
+  const max = niceMax(Math.max(1, ...counts.map(c => STATUSES.reduce((a, s) => a + c[s], 0))));
+  const sy = v => (f.H - f.T - f.B) * v / max;
+  let s = axis(f, max, v => Math.round(v));
+  vs.forEach((v, i) => {
+    let y = f.H - f.B, segsSvg = "";
+    const order = ["working", "not_implemented", "failing", "missing", "not_run", "not_covered", "not_applicable"];
+    const total = order.reduce((a, st) => a + counts[i][st], 0);
+    for (const st of order) {
+      const h = sy(counts[i][st]);
+      if (!h) continue;
+      const gap = h > 3 ? 2 : 0;  // 2px surface gap between stacked segments
+      segsSvg += `<rect class="bar s-${st}" x="${f.x(i) - f.bw / 2}" y="${y - h + gap}" width="${f.bw}" height="${Math.max(h - gap, 1)}" rx="3" style="fill:var(--c)"/>`;
+      y -= h;
+    }
+    const tip = `<b>${esc(v)}</b> · ${total} tests<br>` + order.filter(st => counts[i][st]).map(st => `${S[st].glyph} ${S[st].label}: ${counts[i][st]}`).join("<br>");
+    s += `<g class="col" data-tip="${esc(tip)}">${segsSvg}<rect class="hit" x="${f.x(i) - f.bw / 2 - 6}" y="${f.T}" width="${f.bw + 12}" height="${f.H - f.T - f.B}"/>
+      <text class="val" x="${f.x(i)}" y="${y - 5}" text-anchor="middle">${counts[i].working}/${total}</text>
+      <text x="${f.x(i)}" y="${f.H - 8}" text-anchor="middle">${esc(v)}</text></g>`;
+  });
+  el.innerHTML = vs.length ? `<svg viewBox="0 0 ${f.W} ${f.H}" role="img" aria-label="Results per version">${s}</svg>
+    <div class="legend">${["working", "not_implemented", "failing", "missing", "not_run", "not_covered", "not_applicable"].map(st => `<span class="s-${st}">${glyph(st)} ${S[st].label}</span>`).join("")}</div>` : `<div class="blank">No data</div>`;
+}
+function timeChart(el, vs, times) {
+  const f = svgFrame(vs.length);
+  const max = niceMax(Math.max(.001, ...times));
+  const sy = v => (f.H - f.T - f.B) * v / max;
+  let s = axis(f, max, v => v ? dur(v).replace(/\.00s$/, "s") : "0");
+  vs.forEach((v, i) => {
+    const h = sy(times[i]);
+    const prev = i ? times[i - 1] : null;
+    const tip = `<b>${esc(v)}</b> · ${dur(times[i])}` + (prev ? `<br>${times[i] >= prev ? "+" : ""}${((times[i] - prev) / prev * 100).toFixed(0)}% vs ${esc(vs[i - 1])}` : "");
+    s += `<g class="col" data-tip="${esc(tip)}"><rect class="bar" x="${f.x(i) - f.bw / 2}" y="${f.H - f.B - h}" width="${f.bw}" height="${Math.max(h, 1)}" rx="3" style="fill:var(--accent-bright)"/>
+      <rect class="hit" x="${f.x(i) - f.bw / 2 - 6}" y="${f.T}" width="${f.bw + 12}" height="${f.H - f.T - f.B}"/>
+      <text class="val" x="${f.x(i)}" y="${f.H - f.B - h - 5}" text-anchor="middle">${dur(times[i])}</text>
+      <text x="${f.x(i)}" y="${f.H - 8}" text-anchor="middle">${esc(v)}</text></g>`;
+  });
+  el.innerHTML = vs.length ? `<svg viewBox="0 0 ${f.W} ${f.H}" role="img" aria-label="Test time per version">${s}</svg>` : `<div class="blank">No data</div>`;
+}
+
+/* ---------------- runs ---------------- */
+function renderRuns() {
+  const form = $("#run-form");
+  form.querySelectorAll("button,input,select").forEach(x => x.disabled = !state.connected);
+  const live = state.live, runner = state.runner;
+  const running = live?.running || runner?.running;
+  $("#run-start").disabled = $("#run-failing").disabled = !state.connected || runner?.running;
+  $("#run-stop").disabled = !state.connected || !runner?.running;
+  let status = state.isStatic ? "Static export: start the server (python3 tests/dashboard/server.py) to run the suite."
+    : !state.connected ? "Server offline." : "Idle.";
+  let pctDone = 0;
+  if (live && (running || live.finished)) {
+    pctDone = live.total ? live.done / live.total * 100 : 0;
+    const c = live.counts || {};
+    status = running ? `Running ${live.done}/${live.total} · ${esc(currentTest(live))}`
+      : `Last run finished ${ago(live.finished)} · ${live.done}/${live.total}`;
+    status += ` <span class="counts">${STATUSES.filter(s => c[s]).map(s => `<span class="s-${s}">${S[s].glyph}${c[s]}</span>`).join("")}</span>`;
+  }
+  const others = (state.lives || []).filter(l => l.running && l.pid !== live?.pid);
+  if (others.length) status += `<div style="margin-top:6px">${others.map(l => `Also running (pid ${l.pid}): ${l.done}/${l.total} · <span class="mono">${esc(currentTest(l))}</span>`).join("<br>")}</div>`;
+  $("#run-status").innerHTML = status;
+  $("#run-bar").style.width = pctDone + "%";
+  const log = $("#run-log");
+  if (runner?.log?.length) {
+    const stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 30;
+    log.textContent = runner.log.join("\n");
+    if (stick) log.scrollTop = log.scrollHeight;
+  }
+  const runs = state.data.versions.flatMap(f => f.runs || []).sort((a, b) => b.started - a.started);
+  $("#history").innerHTML = runs.length ? `<table><thead><tr><th>started</th><th>version</th><th>commit</th><th>flavor</th><th>results</th><th></th><th>time</th><th>arguments</th><th>host</th></tr></thead><tbody>
+    ${runs.map(r => {
+      const c = Object.assign(Object.fromEntries(STATUSES.map(s => [s, 0])), r.counts || {});
+      const unfinished = !r.finished;
+      return `<tr><td>${esc(date(r.started))}</td><td class="mono">${esc(r.version)}</td><td class="mono">${esc(r.commit || "")}</td><td>${esc(r.flavor || "")}</td>
+        <td><div class="mini">${segs(c)}</div></td>
+        <td><span class="counts">${STATUSES.filter(s => c[s]).map(s => `<span class="s-${s}" title="${S[s].label}">${S[s].glyph}${c[s]}</span>`).join("")}</span>${r.stopped ? ` <span class="dtag s-failing" style="color:var(--ci)" title="${esc(r.stopped)}">hung at ${r.done}/${r.total}: ${esc(r.stopped.split("::").pop())}</span>`
+          : unfinished ? ` <span class="dtag">${(state.lives || []).some(l => l.running && l.run === r.id) ? "running" : "interrupted"} ${r.done}/${r.total}</span>` : ""}</td>
+        <td class="mono">${dur(r.duration)}</td><td class="mono faint" title="${esc((r.args || []).join(" "))}">${esc(((r.args || []).join(" ") || "(all)").slice(0, 48))}</td><td class="faint">${esc(r.host || "")}</td></tr>`;
+    }).join("")}</tbody></table>` : `<div class="blank">No runs recorded yet.</div>`;
+}
+
+const currentTest = live => (live.current && typeof live.current === "object" ? live.current.nodeid : live.current) || "";
+
+/* ---------------- server ---------------- */
+async function api(path, body) {
+  const options = body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json", "X-Dashboard-Token": TOKEN}, body: JSON.stringify(body)};
+  const response = await fetch(path, options);
+  const json = await response.json();
+  if (!response.ok) throw new Error(json.error || response.statusText);
+  return json;
+}
+async function startRun(request) {
+  try {
+    const st = await api("api/run", Object.assign({flavor: state.flavor}, request));
+    state.live = st.live; state.lives = st.lives; state.runner = st.runner;
+    toast("Run started: follow it in the Runs tab");
+    render();
+    schedulePoll(800);
+  } catch (e) { toast(e.message); }
+}
+async function poll() {
+  try {
+    const st = await api("api/state");
+    const wasRunning = state.live?.running || state.runner?.running;
+    state.live = st.live; state.lives = st.lives || []; state.runner = st.runner; state.connected = true;
+    const stamp = st.stamp;
+    if (stamp !== state.liveStamp) {
+      state.liveStamp = stamp;
+      await reload();
+    } else {
+      renderHeader();
+      if (state.view === "runs") renderRuns();
+    }
+    const running = state.live?.running || state.runner?.running;
+    if (wasRunning && !running) toast("Run finished");
+    schedulePoll(running ? 1200 : 4000);
+  } catch {
+    state.connected = false; renderHeader(); if (state.view === "runs") renderRuns();
+    schedulePoll(6000);
+  }
+}
+function schedulePoll(ms) { clearTimeout(poll.timer); poll.timer = setTimeout(poll, ms); }
+async function reload() {
+  state.data = await api("api/data");
+  pickDefaults();
+  render();
+}
+function pickDefaults() {
+  const vs = versions();
+  if (!vs.includes(state.version)) state.version = vs.includes(state.data.current) ? state.data.current : vs[vs.length - 1] ?? null;
+  const fl = flavors();
+  if (!fl.includes(state.flavor)) state.flavor = fl[0] || "vanilla";
+}
+
+/* ---------------- wiring ---------------- */
+function render() {
+  renderHeader();
+  if (state.view === "matrix") renderMatrix();
+  if (state.view === "evolution") renderEvolution();
+  if (state.view === "runs") renderRuns();
+  renderDrawer();
+}
+function bind() {
+  $$(".tabs button").forEach(b => b.onclick = () => { state.view = b.dataset.view; store.set("view", state.view); render(); });
+  $("#version").onchange = e => { state.version = e.target.value; render(); };
+  $("#flavor").onchange = e => { state.flavor = e.target.value; render(); };
+  $("#search").oninput = e => { state.search = e.target.value; renderMatrix(); };
+  $("#changed").onchange = e => { state.changed = e.target.checked; renderMatrix(); };
+  $("#dim").onchange = e => { state.dim = e.target.checked; renderMatrix(); };
+  $("#tier-chips").innerHTML = TIERS.map(t => `<button class="chip" data-tier="${t}" aria-pressed="${state.tiers.has(t)}">${t}</button>`).join("");
+  $("#tier-chips").onclick = e => {
+    const t = e.target.closest("[data-tier]")?.dataset.tier; if (!t) return;
+    state.tiers.has(t) ? state.tiers.delete(t) : state.tiers.add(t);
+    if (!state.tiers.size) state.tiers.add(t);
+    store.set("tiers", [...state.tiers]);
+    e.target.setAttribute("aria-pressed", state.tiers.has(t));
+    renderMatrix();
+  };
+  $("#summary").onclick = e => {
+    const s = e.target.closest("[data-status]")?.dataset.status; if (!s) return;
+    // first click isolates a status, then clicks toggle; clicking the only selected one resets
+    if (state.statuses.size === STATUSES.length) state.statuses = new Set([s]);
+    else if (state.statuses.has(s) && state.statuses.size === 1) state.statuses = new Set(STATUSES);
+    else state.statuses.has(s) ? state.statuses.delete(s) : state.statuses.add(s);
+    renderMatrix();
+  };
+  const groups = () => [...new Set(buildRows(records(state.version)).map(r => r.tier + "/" + r.area))];
+  $("#expand").onclick = () => { state.collapsed.clear(); store.set("collapsed", []); renderMatrix(); };
+  $("#collapse").onclick = () => { state.collapsed = new Set(groups()); store.set("collapsed", [...state.collapsed]); renderMatrix(); };
+  $("#run-visible").onclick = () => {
+    const rows = buildRows(records(state.version)).filter(rowVisible);
+    const ids = rows.flatMap(r => Object.values(r.cells).flat().filter(x => !declared(x)).map(x => x.nodeid));
+    if (!ids.length) return toast("Nothing to run");
+    if (ids.length > 50 && !confirm(`Run ${ids.length} tests?`)) return;
+    startRun({targets: ids});
+  };
+  $("#matrix").onclick = e => {
+    const g = e.target.closest("[data-group]");
+    if (g) {
+      const k = g.dataset.group;
+      state.collapsed.has(k) ? state.collapsed.delete(k) : state.collapsed.add(k);
+      store.set("collapsed", [...state.collapsed]);
+      return renderMatrix();
+    }
+    const tr = e.target.closest("tr.row"); if (!tr) return;
+    openDrawer(tr.dataset.feature, e.target.closest(".cell")?.dataset.domain);
+  };
+  $("#evo-table").onclick = e => {
+    const td = e.target.closest("td.f"); if (!td) return;
+    openDrawer(td.dataset.feature, td.dataset.domain);
+  };
+  $("#evo-search").oninput = e => { state.evo.search = e.target.value; renderEvolution(); };
+  $("#evo-domain").onchange = e => { state.evo.domain = e.target.value; renderEvolution(); };
+  $("#evo-sort").onchange = e => { state.evo.sort = e.target.value; renderEvolution(); };
+  $("#evo-changed").onchange = e => { state.evo.changed = e.target.checked; renderEvolution(); };
+  $("#drawer").onclick = e => {
+    if (e.target.closest("[data-close]")) return closeDrawer();
+    const run = e.target.closest("[data-run]");
+    if (run) startRun({targets: JSON.parse(run.dataset.run)});
+  };
+  document.addEventListener("keydown", e => { if (e.key === "Escape") closeDrawer(); });
+
+  // runs form
+  $("#run-tiers").innerHTML = TIERS.map(t => `<label class="toggle"><input type="checkbox" value="${t}" checked> ${t}</label>`).join("");
+  $("#run-start").onclick = () => {
+    const tiers = $$("#run-tiers input:checked").map(i => i.value);
+    if (!tiers.length) return toast("Pick at least one tier");
+    startRun({
+      targets: tiers.length === TIERS.length ? [] : tiers,
+      keyword: $("#run-k").value.trim(), markers: $("#run-m").value.trim(),
+      flavor: $("#run-flavor").value, record_as: $("#run-as").value.trim(), extra: $("#run-extra").value.trim(),
+    });
+  };
+  $("#run-failing").onclick = () => {
+    const ids = records(state.version).filter(r => r.status === "failing").map(r => r.nodeid);
+    if (!ids.length) return toast(`Nothing is failing in ${state.version} (${state.flavor})`);
+    startRun({targets: ids, flavor: state.flavor});
+  };
+  $("#run-stop").onclick = async () => {
+    try { const st = await api("api/stop", {}); state.live = st.live; state.lives = st.lives; state.runner = st.runner; renderRuns(); } catch (e) { toast(e.message); }
+  };
+
+  // theme
+  const themes = ["auto", "light", "dark"];
+  const applyTheme = t => { t === "auto" ? document.documentElement.removeAttribute("data-theme") : document.documentElement.setAttribute("data-theme", t); $("#theme").title = "Theme: " + t; };
+  let theme = store.get("theme", "auto"); applyTheme(theme);
+  $("#theme").onclick = () => { theme = themes[(themes.indexOf(theme) + 1) % 3]; store.set("theme", theme); applyTheme(theme); toast("Theme: " + theme); };
+
+  // tooltip for cells and chart columns
+  const tip = $("#tip");
+  document.addEventListener("mouseover", e => {
+    const t = e.target.closest("[data-tip]");
+    if (!t) return tip.classList.remove("on");
+    tip.innerHTML = t.dataset.tip; tip.classList.add("on");
+  });
+  document.addEventListener("mousemove", e => {
+    if (!tip.classList.contains("on")) return;
+    const r = tip.getBoundingClientRect();
+    let x = e.clientX + 14, y = e.clientY + 16;
+    if (x + r.width > innerWidth - 8) x = e.clientX - r.width - 14;
+    if (y + r.height > innerHeight - 8) y = e.clientY - r.height - 12;
+    tip.style.left = x + "px"; tip.style.top = y + "px";
+  });
+}
+
+async function init() {
+  const embedded = $("#embedded-data").textContent.trim();
+  bind();
+  if (embedded) {
+    state.isStatic = true;
+    state.data = JSON.parse(embedded);
+  } else {
+    try {
+      state.data = await api("api/data");
+      state.connected = true;
+    } catch {
+      document.querySelector("main").innerHTML = `<div class="card blank"><h3>The dashboard needs its server</h3>
+        Start it from the repository with <code>python3 tests/dashboard/server.py --open</code>,<br>or export a standalone page with <code>python3 tests/dashboard/server.py --export report.html</code>.</div>`;
+      return;
+    }
+  }
+  pickDefaults();
+  render();
+  if (state.connected) poll();
+}
+init();
+</script>
+</body>
+</html>

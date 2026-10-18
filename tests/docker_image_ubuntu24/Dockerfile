@@ -3,7 +3,7 @@ FROM ubuntu:24.04
 # System updates and core tools
 RUN apt update \
     && DEBIAN_FRONTEND=noninteractive apt install -y \
-        python3 ipython3 python3-pip python3-venv git gdb gdb-multiarch gdbserver qemu-user binfmt-support tmux wget nano libclang-dev \
+        python3 ipython3 python3-pip python3-venv git gdb gdb-multiarch gdbserver qemu-user binfmt-support tmux wget nano libclang-dev build-essential gcc-multilib \
         libc6-i386-cross \
         libc6-armel-cross \
         libc6-arm64-cross \
@@ -24,7 +24,7 @@ RUN apt update \
 # Activate virtual environment and install Python packages
 ENV VIRTUAL_ENV=/opt/venv
 ENV PATH="$VIRTUAL_ENV/bin:$PATH"
-RUN pip install --upgrade pip timeout_decorator \
+RUN pip install --upgrade pip timeout_decorator pytest pytest-xdist pyflakes \
        git+https://github.com/Angelo942/libdebug.git sortedcontainers pyserial pyelftools \
        zstandard urllib3 unix-ar unicorn six pysocks pygments pycparser psutil plumbum packaging \
        MarkupSafe intervaltree idna charset-normalizer certifi capstone bcrypt rpyc ropgadget \

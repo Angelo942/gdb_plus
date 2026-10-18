@@ -3,7 +3,7 @@ FROM ubuntu:22.04
 # System updates and core tools
 RUN apt update \
     && DEBIAN_FRONTEND=noninteractive apt install -y \
-       python3 ipython3 python3-pip git gdb gdbserver qemu-user qemu-user-static binfmt-support gdb-multiarch tmux wget nano libclang-dev \
+       python3 ipython3 python3-pip git gdb gdbserver qemu-user qemu-user-static binfmt-support gdb-multiarch tmux wget nano libclang-dev build-essential gcc-multilib \
         libc6-i386-cross \
         libc6-armel-cross \
         libc6-arm64-cross \
@@ -12,7 +12,7 @@ RUN apt update \
         binutils-multiarch \
         software-properties-common \
         binutils-aarch64-linux-gnu binutils-arm-linux-gnueabi binutils-arm-linux-gnueabihf binutils-mips64el-linux-gnuabi64 binutils-mipsel-linux-gnu binutils-mips-linux-gnu binutils-x86-64-linux-gnu binutils-riscv64-linux-gnu \
-    && python3 -m pip install --upgrade pip timeout_decorator git+https://github.com/Angelo942/libdebug.git sortedcontainers pyserial pyelftools zstandard urllib3 unix-ar unicorn six pysocks pygments pycparser psutil plumbum packaging MarkupSafe intervaltree idna charset-normalizer certifi capstone bcrypt rpyc ropgadget requests python-dateutil mako colored_traceback cffi pynacl cryptography paramiko pwntools clang==14.0.0
+    && python3 -m pip install --upgrade pip timeout_decorator pytest pytest-xdist pyflakes git+https://github.com/Angelo942/libdebug.git sortedcontainers pyserial pyelftools zstandard urllib3 unix-ar unicorn six pysocks pygments pycparser psutil plumbum packaging MarkupSafe intervaltree idna charset-normalizer certifi capstone bcrypt rpyc ropgadget requests python-dateutil mako colored_traceback cffi pynacl cryptography paramiko pwntools clang==14.0.0
 
 # Create non-root home dir
 RUN mkdir -p /home/root \
