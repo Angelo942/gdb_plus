@@ -1,7 +1,17 @@
+from __future__ import annotations
 from threading import Event, Lock
+from typing import TYPE_CHECKING
 from time import sleep
 from pwn import log
 from gdb_plus.utils.logger import DEBUG, _logger
+from inspect import signature
+from functools import wraps
+
+if TYPE_CHECKING:
+    from types import TracebackType
+    from gdb_plus.gdb_plus import Debugger
+    from typing import TYPE_CHECKING, Callable, ParamSpec
+    P = ParamSpec("P")
 
 # Warning. Calling wait() before clear() returns immediately!
 # TODO add a counter on when to stop treating return False as continues
@@ -115,3 +125,36 @@ class MyLock:
             # What about if we want to interrupt a continue until ? [21/06/23]
             if self.counter == 0:
                 self.event.set()
+
+class DoneEvent(Event):
+    """
+    Event set by the thread behind a blocking action (finish, continue_until...) when it ends.
+    If the thread failed, wait() raises its exception in the thread that waits instead of blocking forever.
+    """
+    def __init__(self) -> None:
+        super().__init__()
+        self.error: BaseException | None = None
+
+    def wait(self, timeout: float | None = None) -> bool:
+        finished = super().wait(timeout)
+        if finished and self.error is not None:
+            raise self.error
+        return finished
+
+def set_done_if_panic(func: Callable[P, None]) -> Callable[P, None]:
+    """
+    For the body of the thread behind a blocking action: `done` is set whatever happens, so the waiter wakes up,
+    and an exception is handed to it (see DoneEvent) instead of being lost with the thread.
+    The decorated function must have a parameter called `done`.
+    """
+    position = list(signature(func).parameters).index("done")
+    @wraps(func)
+    def wrapper(*args: P.args, **kwargs: P.kwargs) -> None:
+        done = kwargs["done"] if "done" in kwargs else args[position]
+        try:
+            func(*args, **kwargs)
+        except Exception as e:
+            done.error = e
+        finally:
+            done.set()
+    return wrapper

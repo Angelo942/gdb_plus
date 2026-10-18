@@ -806,15 +806,18 @@ class Debugger:
     # We want all of them to set gdb.stopped both to let know the debugger the process stopped, or to kill the loop thread when we detach
     # You may not want to do it when you detach from a child process that is already at a stop though so we should disable the callback before splitting 
     # If the main process exits then we should close the debugger
-    def __exit_handler(self, event):
+    @context_decorator
+    def __exit_handler(self, event: ExitedEvent) -> None:
         # Should I kill all children ? []
         # Waiiiiit, this is called even if we detach from the child in split()! [25/07/23] 
         # Yes, fuck [14/08/23]
-        # Okay, we disable this handler before splitting processes, but we could also check that the pid of the event.inferior is not the one of the main debugger (would require to warn user that he can't detach main process) [08/07/24]
-        if event.inferior.pid == self.pid:
+        # NOTE Okay, we disable this handler before splitting processes, but we could also check that the pid of the event.inferior is not the one of the main debugger (would require to warn user that he can't detach main process) [08/07/24]
+        # Under QEMU self.pid is the pid of the emulator while gdb calls the guest "process 1": the main process is the first inferior
+        if event.inferior.pid == self.pid or (not context.native and event.inferior.num == 1):
             if DEBUG: self.logger.debug("setting stop because process exited")
-            self.__set_stop(f"process exited", exit=True)
+            # Set _closed before waking up the waiters: they check it to know that the process is gone
             self._closed.set()
+            self.__set_stop(f"process exited", exit=True)
             self._ptrace_has_stopped.set()
         else:
             if DEBUG: self.logger.debug("%s has been disconnected", event.inferior.pid)
@@ -874,8 +877,9 @@ class Debugger:
                 if self._kill_threads.is_set() or self._closed.is_set():
                     if DEBUG: self.logger.debug("exiting loop handler")
                     break
-                context.Thread(target=self.__stop_handler_gdb, name=f"[{self.pid}] stop_handler_gdb").start()
-        context.Thread(target=loop_handler, name=f"[{self.pid}] loop_stop_handler_gdb").start()
+                context.Thread(target=self.__stop_handler_gdb, name=f"[{self.pid}] stop_handler_gdb", daemon=True).start()
+        # daemon: python joins non-daemon threads before running atexit, so this wait would block the exit and pwntools would never close the gdb terminal
+        context.Thread(target=loop_handler, name=f"[{self.pid}] loop_stop_handler_gdb", daemon=True).start()
         
         # We should consider setting again a events.stop to have access to event.inferior_thread.inferior instead of needing current_inferior()
 
@@ -939,8 +943,8 @@ class Debugger:
                 if self._kill_threads.is_set() or self._closed.is_set():
                     if DEBUG: self.logger.debug("exiting loop handler")
                     break
-                context.Thread(target=self.__stop_handler_new_libdebug, name=f"[{self.pid}] stop_handler_new_libdebug").start()
-        context.Thread(target=loop_handler, name=f"[{self.pid}] loop_stop_handler_new_libdebug").start()
+                context.Thread(target=self.__stop_handler_new_libdebug, name=f"[{self.pid}] stop_handler_new_libdebug", daemon=True).start()
+        context.Thread(target=loop_handler, name=f"[{self.pid}] loop_stop_handler_new_libdebug", daemon=True).start()
 
     # È già successo che wait ritorni -1 e crashi libdebug [08/05/23]
     # Legacy callbacks won't be transferred over... It's really time to get rid of them [21/05/23]
@@ -1121,7 +1125,7 @@ class Debugger:
                     break
                 else:
                     log.warn(f"{timeout}s timeout isn't enough to reach the code... Retrying...")
-        context.Thread(target=action, name=f"[{self.pid}] debug_from").start()
+        context.Thread(target=action, name=f"[{self.pid}] debug_from", daemon=True).start()
         return self
 
     # Still useful for cases where we don't have the binary to locate the entry point.
@@ -1534,7 +1538,8 @@ class Debugger:
         else:
             raise NotImplementedError(f"__hidden_continue is not implemented for the given debugger")
 
-    def __continue_gdb(self, force, wait, done):
+    @set_done_if_panic
+    def __continue_gdb(self, force: bool, wait: bool, done: DoneEvent) -> None:
         # Do I check the address instead ? Like hidden_continue [09/06/23]
         with self._ptrace_lock.log("__continue_gdb"):
             priority = self._raise_priority("avoid race condition in continue")
@@ -1565,7 +1570,8 @@ class Debugger:
         # The problem is that this has to be set after wait() [29/07/23 21:45]
         self._lower_priority("avoid race condition in continue")
 
-    def __continue_libdebug(self, force, wait, done, signal):
+    @set_done_if_panic
+    def __continue_libdebug(self, force: bool, wait: bool, done: DoneEvent, signal: int) -> None:
         # Continue in libdebug is already stepping [21/05/23]
         # Maybe keep the step if force = True [22/O5/23]
         #self.step(force=force)
@@ -1579,7 +1585,8 @@ class Debugger:
         self._priority_wait(comment="continue")
         done.set()
 
-    def __continue_new_libdebug(self, force, wait, done, signal):
+    @set_done_if_panic
+    def __continue_new_libdebug(self, force: bool, wait: bool, done: DoneEvent, signal: int) -> None:
         with self._ptrace_lock.log("__continue_new_libdebug"):
             if signal:
                 self.new_libdebug.signal = signal
@@ -1604,7 +1611,7 @@ class Debugger:
             return
 
         # I have to use an event instead of priority_wait() because I may have to stop after the step [22/05/23]
-        done = Event()
+        done = DoneEvent()
 
         if self.gdb is not None:
             # It would be better to close cleanly the thread when we close the debugger, but for now I just set daemon=True to at least not block the script.
@@ -1628,7 +1635,8 @@ class Debugger:
 
     cont = c
 
-    def __continue_until_gdb(self, address, done, force):
+    @set_done_if_panic
+    def __continue_until_gdb(self, address: int, done: DoneEvent, force: bool) -> None:
         #Force = True is not needed since once we step the sigint will be caught and continue won't stop. I disable the warning since the user can do nothing about it [08/05/23]
         #Force = True IS needed if you have a callback on that address... [10/05/23]
         # I will keep the step this way to warn the user
@@ -1655,7 +1663,8 @@ class Debugger:
         self._lower_priority("avoid race condition in continue until")
         done.set()
 
-    def __continue_until_libdebug(self, address, done, force):
+    @set_done_if_panic
+    def __continue_until_libdebug(self, address: int, done: DoneEvent, force: bool) -> None:
         self.cont(wait=True, force=force)
         if self.instruction_pointer != address:
             log.warn(f"[{self.pid}] stopped at {self.reverse_lookup(self.instruction_pointer)} with status {hex(self.libdebug.stop_status)} instead of {self.reverse_lookup(address)}")
@@ -1663,7 +1672,8 @@ class Debugger:
             log.error("error in continue until")
         done.set()
     
-    def __continue_until_new_libdebug(self, address, done, force):
+    @set_done_if_panic
+    def __continue_until_new_libdebug(self, address: int, done: DoneEvent, force: bool) -> None:
         self.cont(wait=True, force=force)
         if self.instruction_pointer != address:
             log.warn(f"[{self.pid}] stopped at {self.reverse_lookup(self.instruction_pointer)} instead of {self.reverse_lookup(address)}")
@@ -1687,7 +1697,7 @@ class Debugger:
             force: gdb may bug and keep you at the same address after a jump or if the stack frame as been edited. If you notice this problem use force to bypass it. If you don't worry about a callback being called twice don't bother
         """
         with self._ptrace_lock.log("continue_until"):
-            done = Event()
+            done = DoneEvent()
 
             if not self.debugging:
                 done.set()
@@ -1700,14 +1710,14 @@ class Debugger:
                 if DEBUG: self.logger.debug("continuing until %s", self.reverse_lookup(address))
 
                 if self.gdb is not None:
-                    context.Thread(target=self.__continue_until_gdb, args=(address, done, force), name=f"[{self.pid}] continue_until").start()
+                    context.Thread(target=self.__continue_until_gdb, args=(address, done, force), name=f"[{self.pid}] continue_until", daemon=True).start()
                 elif self.libdebug is not None:
-                    context.Thread(target=self.__continue_until_libdebug, args=(address, done, force), name=f"[{self.pid}] continue_until").start()
+                    context.Thread(target=self.__continue_until_libdebug, args=(address, done, force), name=f"[{self.pid}] continue_until", daemon=True).start()
                 elif self.new_libdebug is not None:
                     if address == self.instruction_pointer:
                         if DEBUG: self.logger.debug("new_libdebug needs to step to loop.")
                         self.si()
-                    context.Thread(target=self.__continue_until_new_libdebug, args=(address, done, force), name=f"[{self.pid}] continue_until").start()
+                    context.Thread(target=self.__continue_until_new_libdebug, args=(address, done, force), name=f"[{self.pid}] continue_until", daemon=True).start()
                 else:
                     raise NotImplementedError(f"continue until is not implemented for the given debugger")
                 # Wait for the next lock to be set
@@ -2197,7 +2207,8 @@ class Debugger:
             log.warn_once(f"I made {limit} steps and haven't reached the end of the function...")
             return -1
 
-    def __next(self, repeat, done, hw):
+    @set_done_if_panic
+    def __next(self, repeat: int, done: DoneEvent, hw: bool) -> None:
         for _ in range(repeat):
             next_inst = self.next_inst
             if next_inst.is_call:
@@ -2208,15 +2219,15 @@ class Debugger:
 
     # May not want to wait if you are going over a functions that need user interaction
     @context_decorator
-    def next(self, wait:bool=True, repeat:int=1, hw=False):
-        done = Event()
+    def next(self, wait: bool = True, repeat: int = 1, hw: bool = False) -> Debugger | Event:
+        done = DoneEvent()
 
         if not self.debugging:
             done.set()
             log.warn_once(DEBUG_OFF)
             return done
         
-        context.Thread(target=self.__next, args=(repeat, done, hw), name=f"[{self.pid}] next").start()
+        context.Thread(target=self.__next, args=(repeat, done, hw), name=f"[{self.pid}] next", daemon=True).start()
         if wait:
             done.wait()
             return self
@@ -2248,7 +2259,8 @@ class Debugger:
             log.warn_once(f"I made {limit} steps and haven't reached the end of the function...")
             return -1
 
-    def __finish(self, repeat, force, done, hw):
+    @set_done_if_panic
+    def __finish(self, repeat: int, force: bool, done: DoneEvent | None, hw: bool) -> None:
         # Should be possible to take immediately the corresponding stack frame instead of using a loop [28/04/23]
         for _ in range(repeat):
             ip = self.__saved_ip
@@ -2265,15 +2277,15 @@ class Debugger:
 
     # May be dependent on the stack frame and cause problems after a jump [27/04/23]
     @context_decorator
-    def finish(self, *, wait:bool=True, repeat = 1, force = False, hw = False):
-        done = Event()    
+    def finish(self, *, wait: bool = True, repeat: int = 1, force: bool = False, hw: bool = False) -> Debugger | Event:
+        done = DoneEvent()    
         
         if not self.debugging:
             done.set()
             log.warn_once(DEBUG_OFF)
             return done
         
-        context.Thread(target=self.__finish, args=(repeat, force, done, hw), name=f"[{self.pid}] finish").start()
+        context.Thread(target=self.__finish, args=(repeat, force, done, hw), name=f"[{self.pid}] finish", daemon=True).start()
         if wait:
             done.wait()
             return self
@@ -2474,7 +2486,7 @@ class Debugger:
         self.jump(address)
         
         return_value = Queue()
-        context.Thread(target=self.__continue_call, args=(backup, to_free, heap, return_address, return_value, alignment), name=f"[{self.pid}] call").start()
+        context.Thread(target=self.__continue_call, args=(backup, to_free, heap, return_address, return_value, alignment), name=f"[{self.pid}] call", daemon=True).start()
         if wait:
             return return_value.get()
         else:
