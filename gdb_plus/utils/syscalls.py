@@ -1,12 +1,17 @@
-from pwn import constants, context
+from __future__ import annotations
 import functools
+from typing import TYPE_CHECKING
+from pwn import constants, context
+
+if TYPE_CHECKING:
+    from typing import Callable, Sequence
 
 # Argument kinds:
 #   d  signed 32-bit int        l  signed register-sized int    u  unsigned decimal
 #   x  hex                      o  octal                        p  pointer
 #   s  C string                 v  NULL-terminated char*[]      m  mmap/mprotect prot
 #   bN buffer whose length is argument number N (shown before the syscall runs)
-SIGNATURES = {
+SIGNATURES: dict[str, str] = {
     # files
     "read": "fd:d buf:p count:u",
     "write": "fd:d buf:b2 count:u",
@@ -112,13 +117,13 @@ SIGNATURES = {
 }
 
 @functools.cache
-def syscall_names(arch):
+def syscall_names(arch: str) -> dict[int, str]:
     """{syscall number: name} for `arch`, taken from pwntools' SYS_* constants."""
     try:
         table = vars(getattr(constants.linux, arch))
     except AttributeError:
         return {}
-    names = {}
+    names: dict[int, str] = {}
     for key, value in table.items():
         name = key[4:]
         # i386 also defines SYS_SOCKET / SYS_socketcall_socket, which are
@@ -130,23 +135,23 @@ def syscall_names(arch):
             names[number] = name
     return names
 
-MAX_BYTES = 0x40
-MAX_ARGV = 8
+MAX_BYTES: int = 0x40
+MAX_ARGV: int = 8
 
-def _signed(value, bits):
+def _signed(value: int, bits: int) -> int:
     value &= (1 << bits) - 1
     return value - (1 << bits) if value >> (bits - 1) else value
 
-def _quote(data, truncated=False):
+def _quote(data: bytes, truncated: bool = False) -> str:
     return repr(data)[1:] + ("..." if truncated else "")
 
-def _read_string(read_string, address):
+def _read_string(read_string: Callable[..., bytes], address: int) -> bytes | None:
     try:
         return read_string(address, limit=MAX_BYTES)
     except Exception:
         return None
 
-def _format_argument(kind, value, values, read, read_string):
+def _format_argument(kind: str, value: int, values: Sequence[int], read: Callable[[int, int], bytes | None], read_string: Callable[..., bytes]) -> str:
     if kind == "d":
         return str(_signed(value, 32))
     if kind == "l":
@@ -176,7 +181,7 @@ def _format_argument(kind, value, values, read, read_string):
         if data is not None:
             return _quote(data, truncated=length > MAX_BYTES)
     elif kind == "v":
-        strings = []
+        strings: list[str] = []
         word = context.bits // 8
         for i in range(MAX_ARGV):
             raw = read(value + i * word, word)
@@ -190,7 +195,7 @@ def _format_argument(kind, value, values, read, read_string):
         return "[" + ", ".join(strings) + "]"
     return hex(value)
 
-def describe_syscall(number, values, read, read_string):
+def describe_syscall(number: int, values: Sequence[int], read: Callable[[int, int], bytes | None], read_string: Callable[..., bytes]) -> tuple[str, str]:
     """Format a syscall as 'name(arg=value, ...)' for the current context.arch.
     `read(address, size)` returns None on unreadable memory, `read_string(address, limit=...)` may raise.
     Returns (name, description)."""

@@ -2,7 +2,6 @@ from gdb_plus import *
 from gdb_plus.extra.setup_clang import load_clang, clang
 import copy
 import struct
-import re
 
 # Mapping from Clang TypeKind to Python types
 # Would be nice to handle signed values, but too complex for now
@@ -121,7 +120,7 @@ class Structure:
         self._name = name
         self._symbols = {}
         self._content = {}
-        self._address = address
+        self._address = 0
         
         if isinstance(header, str):
             self._sizes, self._types = parse_header_file(name, header)

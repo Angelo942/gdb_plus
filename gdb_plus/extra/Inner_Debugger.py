@@ -1,6 +1,5 @@
 from gdb_plus import *
 from os import kill
-from time import sleep
 from functools import partial
 from capstone import Cs, CS_ARCH_X86
 from gdb_plus.utils import Inner_Breakpoint

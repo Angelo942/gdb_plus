@@ -16,24 +16,29 @@ if TYPE_CHECKING:
 # Warning. Calling wait() before clear() returns immediately!
 # TODO add a counter on when to stop treating return False as continues
 class MyEvent(Event):
-    def __init__(self):
+    def __init__(self) -> None:
         super().__init__()
-        self.cleared = Event()
+        self.cleared: Event = Event()
         #self.secret = Event()
-        self.priority = 0
-        self.pid = 0 # here to handle multiple processes under the same debugger.
-        self.flag_enforce_stop = None
+        self.priority: int = 0
+        self.pid: int = 0 # here to handle multiple processes under the same debugger.
+        self.flag_enforce_stop: int | None = None
+        self.aborted: bool = False
 
     # I still need a standard wait for actions not initiated by dbg.cont and dbg.next
     # There seems to be a rare bug where multiple priorities are cleared at the same time [11/06/23]
     # If timeout is met we don't want to lower the priority
-    def priority_wait(self, comment = "", priority=None, *, timeout=None):
+    def priority_wait(self, comment: str = "", priority: int | None = None, *, timeout: float | None = None) -> bool:
         if priority is None:
             priority = self.priority
         if DEBUG: _logger.debug(f"[{self.pid}] waiting with priority {priority} for {comment}")
         while True:
             # Unfortunately you can not use the number of threads waiting to find the max priority [18/06/23]
             finished = super().wait(timeout)
+            # TODO make extra sure that this doesn't break anything [18/10/26]
+            if self.aborted:
+                if DEBUG: _logger.debug(f"[{self.pid}] wait [{priority}] aborted for {comment}")
+                return False
             if DEBUG: _logger.debug(f"wait [{priority}] finished" + ("" if finished else " for timeout"))
             if priority == self.priority:
                 if finished:
@@ -54,7 +59,7 @@ class MyEvent(Event):
         return finished
 
     # I move the priority -= 1 in here to avoid a race condition on the check priority == self.priority. I hope it won't break because I missed a clear somewhere, but with the cleared.wait; cleared.clear it should already break anyway [13/06/23]
-    def clear(self, comment):
+    def clear(self, comment: str = "") -> None:
         #self.secret.clear()
         if self.is_set():
             super().clear()
@@ -65,11 +70,17 @@ class MyEvent(Event):
     #        super().clear()
     #        self.cleared.set()
 
-    def raise_priority(self, comment):
+    # Wake every waiter, whatever its priority, and make the next waits return immediately
+    def abort(self) -> None:
+        self.aborted = True
+        super().set()
+        self.cleared.set()
+
+    def raise_priority(self, comment: str) -> None:
         if DEBUG: _logger.info(f"[{self.pid}] raising priority [{self.priority}] -> [{self.priority + 1}] for {comment}")
         self.priority += 1
 
-    def lower_priority(self, comment):
+    def lower_priority(self, comment: str) -> None:
         if DEBUG: _logger.info(f"[{self.pid}] lowering priority [{self.priority - 1}] <- [{self.priority}] for {comment}")
         self.priority -= 1
         if self.priority < 0:
@@ -83,7 +94,7 @@ class MyEvent(Event):
     # If we enforce a stop because we are using gdb manually, a return False on level 7 should stop because we don't want to loose control, but not on level 3
     # Wait, I'm not convinced...
     @property
-    def enforce_stop(self):
+    def enforce_stop(self) -> bool:
         if self.flag_enforce_stop is None:
             return False
         else:
@@ -91,10 +102,10 @@ class MyEvent(Event):
             return self.priority >= self.flag_enforce_stop
 
 class MyLock:
-    def __init__(self, event, owner):
+    def __init__(self, event: Event, owner: Debugger) -> None:
         self.owner = owner
         self.event = event
-        self.counter = 0
+        self.counter: int = 0
         # prevent bugs with the counter ? [12/06/23]
         self.__lock = Lock()
         # Block from ptrace (strict interrupt)
@@ -103,11 +114,11 @@ class MyLock:
         #self.can_run.set()
 
 
-    def log(self, function_name):
+    def log(self, function_name: str) -> MyLock:
         if DEBUG: self.owner.logger.info(f"[{self.owner.pid}] wrapping {function_name}")
         return self
 
-    def __enter__(self):
+    def __enter__(self) -> None:
         if not self.owner.debugging:
             return
         #self.can_run.wait()
@@ -116,7 +127,7 @@ class MyLock:
             self.counter += 1
             if DEBUG: self.owner.logger.debug(f"[{self.owner.pid}] entering lock with level {self.counter}")
 
-    def __exit__(self, exc_type, exc_value, exc_traceback):
+    def __exit__(self, exc_type: type[BaseException] | None, exc_value: BaseException | None, exc_traceback: TracebackType | None) -> None:
         if not self.owner.debugging:
             return
         with self.__lock:
