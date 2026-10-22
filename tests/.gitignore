@@ -1,0 +1,7 @@
+.watchdog-*.txt
+.results/live/
+.results/.lock
+.results/*.tmp*
+.results/catalog.json
+fixtures/.build.lock
+.results/coverage/
