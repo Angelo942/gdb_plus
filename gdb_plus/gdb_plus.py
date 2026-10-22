@@ -147,6 +147,7 @@ class Debugger:
 
         self.pid = None
         self._context_params = context.copy() # NOTE: Be careful to check that you are using the right context arch for the binary before calling gdb
+        self._context_params.setdefault("log_level", context.log_level) # Creating a child in local content silent would overwrite it otherwise
         self.silent = silent
         self.download_libraries = download
 
@@ -303,6 +304,8 @@ class Debugger:
         if self.debugging:
 
             self.__setup_gdb()
+            # TODO: find the best place for this line
+            if self._exe is not None: self._set_range(self._exe)
 
             # NOTE: Start debugging from a specific address. Wait timeout seconds for the program to reach that address. Is blocking so you may need to use context.Thread() in some cases
             # NOTE: WARNING don't use 'continue' in your gdbscript when using debug_from ! [17/04/23]
@@ -601,13 +604,16 @@ class Debugger:
         if DEBUG: _logger.debug("[%d] stopped at address: %s for %s", self.current_inferior.pid, self.reverse_lookup(ip), self._stop_reason)
             
         # Warn that if a parent has to listen for a signal you must tell your handler to stop the execution [22/07/23]
+        # NOTE under ptrace emulation the signal should always be passed first to the parent and we should run the callbacks only if the parent passes it. This means that we should also be careful about hot it's passed back, probably in PTRACE_CONT [20/10/26]
+        # NOTE Should we handle PASS / NOPASS from the callback ? Right now the signals are just ignored, right ? 
         if self._stop_reason in SIGNALS and SIGNALS[self._stop_reason] in self._handled_signals:
             should_stop = self._handled_signals[SIGNALS[self._stop_reason]](self)
             if should_stop == False:
                 self.__hidden_continue()
             else:
                 if self._ptrace_emulated:
-                    if DEBUG: self.logger.debug("stop will be handle by waitpid")
+                    self.logger.info(f"stop signal {self._stop_reason} will be handled by waitpid")
+                    print(f"stop signal {self._stop_reason} will be handled by waitpid")
                     self._ptrace_has_stopped.set()
                 else:
                     self.__set_stop(f"signal {self._stop_reason} handled")
@@ -701,10 +707,11 @@ class Debugger:
                 self._interrupted = False
                 self.__set_stop(f"interrupted")
             
+            # Are we able to distinguish this from normal interactions with gdb ? Are there cases where instead a signal is seen as a normal interaction ?
             elif self._stop_reason in SIGNALS:
                 # I hope that the case where we step and still end up on a breakpoint won't cause problems because we would not reset stepped... [29/04/23]
                 if self._ptrace_emulated:
-                    if DEBUG: self.logger.debug("stop will be handle by waitpid")
+                    log.info(f"stop signal {self._stop_reason} will be handled by waitpid")
                     self._ptrace_has_stopped.set()
                 else:
                     self.__set_stop(f"signal: {self._stop_reason}")
@@ -2174,8 +2181,7 @@ class Debugger:
         priority = self._raise_priority("interrupt")
         
         if not self.debugging:
-            # Who cares, right ?
-            #self._lower_priority("no process to interrupt")
+            self._lower_priority("no process to interrupt")
             log.warn_once(DEBUG_OFF)
             return
 
@@ -2195,9 +2201,9 @@ class Debugger:
         if self.gdb is not None:
             return self.__interrupt_gdb(priority)
         elif self.libdebug is not None:
-            return self.__interrupt_gdb(priority)
+            raise NotImplementedError(f"interrupt is not implemented for libdebug")
+            return self.__interrupt_libdebug(priority)
         elif self.new_libdebug is not None:
-            raise NotImplementedError(f"interrupt is not implemented for the given debugger")
             return self.__interrupt_new_libdebug(priority)
         else:
             raise NotImplementedError(f"interrupt is not implemented for the given debugger")
@@ -4346,6 +4352,7 @@ class Debugger:
     libc_address = base_libc
 
     # If we don't have the binary we may consider iterating over the libraries to find a name that doesn't start with lib or ld- [05/02/25]
+    # I can not affort do get out of __init__ without all the files properly identified [19/10/26]
     @property
     def exe(self) -> EXE | None:
         if self.gdb is not None and self._exe is not None and self._exe.address == 0:
@@ -4371,10 +4378,11 @@ class Debugger:
     # Previously I would delete those symbols from the ELF itself, but just to be clean let's make our own copy until we see that the performances are too bad.
     # Once every library has been loaded we can just cache all symbols. I don't cache intermediate steps because I assume they are all loaded around the same time. Assumption not valid when using dlopen. 
     # What do we do about global variables such as stdin and stdout that may overshadow each other ? So far I'm taking them of to be sure.
+    # BUG: changing address of binaries doesn't update the symbol address. I can not give that responsibility to EXE though, so I must detect here a change in a clean way.
     @property
     def symbols(self) -> dict[str, int]:
         symbols = {}
-        if self._symbols is None:
+        if self._symbols is None: # TODO add something like "or any(changed(self.files, address)"
             for name, address in self._exe.symbols.items():
                 if name[:4] in ["got.", "plt."]:
                     continue
@@ -4468,6 +4476,7 @@ class Debugger:
     # I just discovered "gdb.events.new_inferior"... I can take the pid from event.inferior.pid, but can I do more ?
     # interrupt is not working as well as we would like. With a callback on the event we have to call interrupt when we notice the fork, but the program will have continued for a while [22/12/23] 
     # We should move to catch fork and catch clone if we want to allow interrupt [22/12/23]
+    # BUG: interrupt may be confused during a split.
     @context_decorator
     def set_split_on_fork(self, off: bool = False, c: bool = False, keep_breakpoints: bool = False, interrupt: bool = False, script: str = "") -> Debugger:
         """
@@ -4651,6 +4660,23 @@ class Debugger:
             constants.PTRACE_DETACH: self._PTRACE_DETACH,
             constants.PTRACE_SETOPTIONS: self._PTRACE_SETOPTIONS,
             constants.PTRACE_SINGLESTEP: self._PTRACE_SINGLESTEP,}
+
+        ptrace_names = {
+            constants.PTRACE_TRACEME : "PTRACE_TRACEME",
+            constants.PTRACE_POKEDATA : "PTRACE_POKEDATA",
+            constants.PTRACE_POKETEXT : "PTRACE_POKETEXT",
+            constants.PTRACE_PEEKTEXT : "PTRACE_PEEKTEXT",
+            constants.PTRACE_PEEKDATA : "PTRACE_PEEKDATA",
+            constants.PTRACE_GETREGS : "PTRACE_GETREGS",
+            constants.PTRACE_SETREGS : "PTRACE_SETREGS",
+            constants.PTRACE_ATTACH : "PTRACE_ATTACH",
+            constants.PTRACE_SEIZE : "PTRACE_SEIZE",
+            constants.PTRACE_INTERRUPT : "PTRACE_INTERRUPT",
+            constants.PTRACE_CONT : "PTRACE_CONT",
+            constants.PTRACE_DETACH : "PTRACE_DETACH",
+            constants.PTRACE_SETOPTIONS : "PTRACE_SETOPTIONS",
+            constants.PTRACE_SINGLESTEP : "PTRACE_SINGLESTEP"
+        }
         
         if not syscall:
             # Disable functions (Is it needed compared to a simple return in the callback ? I'm worried about the user manually going over the breakpoint) 
@@ -4741,7 +4767,7 @@ class Debugger:
         if syscall:
             self.catch_syscall(wait_syscall, callback_wait)
         else:
-            self._ptrace_breakpoints.append(self.b(wait_fun + "+1", callback=callback_wait, user_defined=False))
+            self._ptrace_breakpoints.append(self.b(wait_fun + f"+{len(nop[context.arch])}", callback=callback_wait, user_defined=False))
 
         # I still lose control if I hit the breakpoint on ptrace with a dbg.si()... [18/01/25]
         def ptrace_callback(dbg: Debugger, entry: bool | None = None) -> bool | int:
@@ -4756,14 +4782,14 @@ class Debugger:
                 arg1 = args[2]
                 arg2 = args[3]
                 
-                log.info(f"[{dbg.pid}] ptrace {pid} -> {ptrace_command}: ({hex(arg1)}, {hex(arg2)})")
+                log.info(f"[{dbg.pid}] ptrace {pid} -> {ptrace_command}[{ptrace_names.get(ptrace_command, 'UNKNOWN PTRACE')}]: ({hex(arg1)}, {hex(arg2)})")
                 action = ptrace_dict[ptrace_command]
 
                 if ptrace_command == constants.PTRACE_TRACEME:
                     tracer = dbg if dbg._parent is None else dbg._parent
                     
                     if dbg.pid not in tracer._slaves:
-                        log.info(f"TRACEME: [{dbg.pid}] will be trace by [{tracer.pid}]")
+                        log.debug(f"TRACEME: [{dbg.pid}] will be trace by [{tracer.pid}]")
                         should_stop = action(tracer, manual=manual)
 
                     else:
@@ -4833,7 +4859,7 @@ class Debugger:
 
     # We could do a return False or True depending on if we interrupted the process or not. A small indication if we are debugging manually or not [08/06/23]
     def _PTRACE_ATTACH(self, pid: int, _: int, *, slave: Debugger, **kwargs: bool) -> bool:
-        log.info(f"pretending to attach to process {pid}")
+        log.debug(f"pretending to attach to process {pid}")
         self._slaves[pid] = slave
         #if slave.running:
         #    log.info(f"attach will interrupt the slave")
@@ -4846,7 +4872,7 @@ class Debugger:
         return False
 
     def _PTRACE_SEIZE(self, pid: int, options: int, *, slave: Debugger, **kwargs: bool) -> bool:
-        log.info(f"pretending to seize process {slave.pid}")
+        log.debug(f"pretending to seize process {slave.pid}")
         self._PTRACE_SETOPTIONS(pid, options, slave=slave)
         self._slaves[pid] = slave
         self.return_value = 0x0
@@ -4854,9 +4880,9 @@ class Debugger:
 
     # Only function called by the slave
     def _PTRACE_TRACEME(self, tracer: Debugger, *, manual: bool = False, **kwargs: bool) -> bool:
-        log.info("slave wants to be traced")
+        log.debug("slave wants to be traced")
         tracer._slaves[self.pid] = self
-        log.info(f"setting {self.pid} as slave for {tracer.pid}")
+        log.debug(f"setting {self.pid} as slave for {tracer.pid}")
         self.return_value = 0
         # dirt left by ptrace that could be checked
         # Only do it if we don't handle the syscall... [26/07/23]
@@ -4878,7 +4904,7 @@ class Debugger:
         return manual
 
     def _PTRACE_DETACH(self, _: int, __: int, *, slave: Debugger, manual: bool = False, **kwargs: bool) -> bool:
-        log.info(f"ptrace detached from {slave.pid}")
+        log.debug(f"ptrace detached from {slave.pid}")
         self._slaves.pop(slave.pid)
         slave._ptrace_can_continue.set()
         if not manual:
@@ -4888,7 +4914,7 @@ class Debugger:
         return manual
 
     def _PTRACE_POKETEXT(self, address: int, data: int, *, slave: Debugger, manual: bool = False, **kwargs: bool) -> bool:
-        log.info(f"poking {hex(data)} into process {slave.pid} at address {hex(address)}")
+        log.debug(f"poking {hex(data)} into process {slave.pid} at address {hex(address)}")
         slave.write(address, pack(data))
         self.return_value = 0 # right ?
         return manual
@@ -4897,10 +4923,10 @@ class Debugger:
     def _PTRACE_PEEKTEXT(self, address: int, _: int, *, slave: Debugger, manual: bool = False, **kwargs: bool) -> bool:
         try:
             data = unpack(slave.read(address, context.bytes))
-            log.info(f"peeking {hex(data)} from process {slave.pid} at address {hex(address)}")
+            log.debug(f"peeking {hex(data)} from process {slave.pid} at address {hex(address)}")
         except Exception:
             data = -1
-            log.info(f"invalid address {hex(address)} to peek from process {slave.pid}. Returning -1")
+            log.warning(f"invalid address {hex(address)} to peek from process {slave.pid}. Returning -1")
 
         self.return_value = data
         return manual
