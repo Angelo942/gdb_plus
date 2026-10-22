@@ -40,6 +40,8 @@ if TYPE_CHECKING:
     from libdebug_legacy import Debugger as LegacyLibdebugDebugger
     from multiprocessing.queues import Queue as MPQueue
     from multiprocessing.synchronize import Event as MPEvent
+    P = ParamSpec("P")
+    R = TypeVar("R")
 
 # Logs to debug the library can be enabled by setting DEBUG = True in gdb_plus/utils/logger.py
 _logger = logging.getLogger("gdb_plus")
@@ -58,9 +60,7 @@ SKIP_SYSCALL = 0b10
 INTERRUPT_SENT = 0b1 # We sent the signal
 INTERRUPT_HIT_BREAKPOINT = 0b10 # The process stopped for a breakpoint instead of our signal.
 
-
-P = ParamSpec("P")
-R = TypeVar("R")
+_NEW_LIBDEBUG_REGISTERS = {"orig_rax": "syscall_number", "orig_eax": "syscall_number"}
 
 def lock_decorator(func: Callable[Concatenate[Debugger, P], R]) -> Callable[Concatenate[Debugger, P], R]:
     def parse(self: Debugger, *args: P.args, **kwargs: P.kwargs) -> R:
@@ -5217,7 +5217,7 @@ class Debugger:
                 # BUG libdebug can not parse lower registers [19/11/23]
                 res = getattr(self.libdebug, name)
             elif self.new_libdebug is not None:
-                res = getattr(self.new_libdebug.regs, name)
+                res = getattr(self.new_libdebug.regs, _NEW_LIBDEBUG_REGISTERS.get(name, name))
             else:
                 raise NotImplementedError(f"register access is not implemented for the given debugger")
             return res
@@ -5273,7 +5273,7 @@ class Debugger:
             elif self.libdebug is not None:
                 setattr(self.libdebug, name, value % 2**context.bits) # I don't remember if libdebug accepts negative values
             elif self.new_libdebug is not None:
-                setattr(self.new_libdebug.regs, name, value % 2**context.bits) # doesn't support negative values
+                setattr(self.new_libdebug.regs, _NEW_LIBDEBUG_REGISTERS.get(name, name), value % 2**context.bits) # doesn't support negative values
             else:
                 raise NotImplementedError(f"setting registers is not implemented for the given debugger")
         elif name in self._long_registers:
