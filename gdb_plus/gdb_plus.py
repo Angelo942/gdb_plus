@@ -3502,10 +3502,16 @@ class Debugger:
         address = self._parse_address(address)
         chunk = 0x100
         data = b""
-        i = 0
+        current = address
         while data.count(b"\x00") < n and len(data) < limit:
-            data += self.read(address + chunk*i, chunk)
-            i += 1
+            # Never read past the end of the page: the next one may not be mapped
+            size = min(chunk, 0x1000 - current % 0x1000)
+            try:
+                data += self.read(current, size)
+            except:
+                log.warn("read_strings hit non accessible area")
+                break
+            current += size
         return data.split(b"\x00")[:n]
         
     def read_string(self, address: int | str, *, limit: float = inf) -> bytes:
