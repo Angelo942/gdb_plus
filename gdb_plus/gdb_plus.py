@@ -1170,9 +1170,12 @@ class Debugger:
             self._pwndbg = False
             self._detached  = False
             self.libdebug = lib_Debugger(multithread=False)
+            counter = 0
             while not self.libdebug.attach(self.pid, options=False):
+                if counter == 3:
+                    log.error("Could not connect to libdebug")
                 log.warn("error attaching with libdebug... Retrying...")
-                continue
+                counter += 1
             assert not self.libdebug.running
             self.__setup_libdebug()
             # Catch SIGSTOP
