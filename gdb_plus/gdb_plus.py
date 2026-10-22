@@ -1050,6 +1050,10 @@ class Debugger:
         self.gdb.events.register_changed.connect(clear_cache)
         #self.execute("set write on")
 
+        def clear_stop(event: ContinueEvent) -> None:
+            self._myStopped.clear("process resumed")
+        self.gdb.events.cont.connect(clear_stop)
+
         # I still don't know how to disable it to let ptrace_emulate work in peace [26/07/23]
         def callback_ptrace(self: Debugger, entry: bool) -> bool:
             if entry:
