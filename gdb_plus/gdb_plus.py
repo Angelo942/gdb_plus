@@ -50,6 +50,7 @@ _logger.addHandler(ch)
 if DEBUG: _logger.level = 10
 
 DEBUG_OFF = "Debug is off, commands won't be executed"
+IMPORTANT_DEBUG_OFF = "Tried to get information while debug is off. Make sure to ignore the output"
 
 SHOULD_STOP = 0b1
 SKIP_SYSCALL = 0b10
@@ -467,7 +468,10 @@ class Debugger:
         if gdb_file_path_exists:
             return gdb_file_path
 
-        if not self.debugging or self.local_debugging and path.exists():
+        if not self.debugging:
+            return path if path.exists() else None
+
+        if self.local_debugging and path.exists():
             return path
         
         # This is only when debugging a remote gdbserver
@@ -502,6 +506,9 @@ class Debugger:
         unexpected(f"can not find path {path}", log)
 
     def download(self, source: str | Path, destination: str | Path) -> None:
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+            return
         assert not self.local_debugging, "why are you trying to download files that are already on your system ?"
         assert self.gdb is not None
         if self.gdbserver_qemu is not None:
@@ -1511,6 +1518,9 @@ class Debugger:
 
     @property
     def inferiors(self) -> dict[int, Inferior]:
+        if not self.debugging:
+            log.warn_once(IMPORTANT_DEBUG_OFF)
+            return {}
         return {inferior.num: inferior for inferior in self.gdb.inferiors()}
         #return (None,) + self.gdb.inferiors()
 
@@ -1574,10 +1584,16 @@ class Debugger:
 
     @property
     def sys_num(self) -> int:
+        if not self.debugging:
+            log.warn_once(IMPORTANT_DEBUG_OFF)
+            return 0
         return self.syscall_args.sys_num
 
     @sys_num.setter
     def sys_num(self, value: int):
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+            return
         self.syscall_args.sys_num = value
 
     # Taken from GEF to handle slave interruption
@@ -1641,6 +1657,9 @@ class Debugger:
 
     @property
     def stop_signal(self) -> int:
+        if not self.debugging:
+            log.warn_once(IMPORTANT_DEBUG_OFF)
+            return None
         if self.gdb is not None:
             reason = self._stop_reason
             if reason == "SINGLE STEP":
@@ -1965,6 +1984,8 @@ class Debugger:
     # Inside a callback checking running doesn't make sense since in that instant the program is interrupted, but we define it as running for interrupt() to still stop the program when we finish the callback. 
     @property
     def running(self) -> bool:
+        if not self.debugging:
+            return False
         with context.silent:
             if self.gdb is not None:
                 try:
@@ -2278,6 +2299,9 @@ class Debugger:
 
     # I should catch SIGSTOP, but not other exceptions
     def __broken_step(self) -> None:
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+            return
         old_ip = self.instruction_pointer
         callback = None
 
@@ -2547,6 +2571,9 @@ class Debugger:
     # For some reasons we get int3 some times
     # Now it's even worse. SIGABORT after that...
     def gdb_call(self, function: str, args: list[int], *, cast: str = "long") -> int | None:
+        if not self.debugging:
+            log.warn_once(IMPORTANT_DEBUG_OFF)
+            return None
         if not self._exe.statically_linked:
             try:
                 ans = self.execute(f"call ({cast}) {function} ({', '.join([hex(arg) for arg in args])})")
@@ -2746,6 +2773,10 @@ class Debugger:
             USE ONLY IF SIGNAL WILL MODIFY THE NEXT INSTRUCTION AND YOU CAN'T USE A HARDWARE BREAKPOINT
             Pointer to the last instruction of the signal handler. Will be used to set a breakpoint after the code has been modified
         """
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+            return self
+
 
         # To send a signal ptrace has to resume the execution of the process so we put a breakpoint and wait for the handler to finish executing
         # If the code is self modifying you must use handler otherwise the breakpoint will be overwritten with bad code [26/02/23]
@@ -2808,11 +2839,15 @@ class Debugger:
 
 
         """
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+            return
+
         page_address = address - address % 0x1000
         page_size = (size // 0x1000 + 1) * 0x1000
 
         if "mprotect" in self.symbols:
-            if self._gdb is not None:
+            if self.gdb is not None:
                 self.execute(f"call (void)mprotect({page_address}, {page_size}, 0x7)")
             else:
                 self.call("mprotect", [page_address, page_size, 7])
@@ -2911,6 +2946,10 @@ class Debugger:
 
     # If you allow multiple callbacks on the same event you have to figure out a way to delete a specific catchpoint from the callback itself (ex ptrace detection) [18/01/25] 
     def catch_event(self, name: str, callback: Callable[..., bool | int | None] = lambda *args, **kwargs: True) -> Debugger:
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+            return self
+        
         if self.gdb is None:
             raise Exception("not implemented in libdebug")
 
@@ -3309,6 +3348,9 @@ class Debugger:
         result.put(None)
 
     def bruteforce(self, _to: int | str, check: Callable[[Debugger, int], bool], _from: int | str | None = None, setup: Callable[[Debugger, int], object] | None = None, init: Callable[[Debugger], object] | None = None, limit: int = 1000, backup: list[tuple[int, int]] = [], libdebug: bool = False, n_threads: int = 1, n_processes: int = cpu_count()) -> int | None:
+        if not self.debugging:
+            log.warn_once(IMPORTANT_DEBUG_OFF)
+            return None
         log.warn_once("Bruteforce is experimental! Function may break and names may change")
         parallel = n_threads * n_processes
         result = p_Queue()
@@ -3638,6 +3680,10 @@ class Debugger:
         -------
         pointer
         """
+        if not self.debugging:
+            log.warn_once(IMPORTANT_DEBUG_OFF)
+            return 0        
+
         if heap and "malloc" not in self.symbols:
             log.warn_once("Can not find malloc. Data will be allocated on the BSS!")
             heap = False
@@ -3661,7 +3707,10 @@ class Debugger:
         return ret
 
     def dealloc(self, pointer: int, len: int = 0, heap: bool = True) -> None:
-        
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+            return
+
         if heap:    
             if self.gdb is not None:
                 self.gdb_call("free", [pointer], cast="void")
@@ -3922,6 +3971,10 @@ class Debugger:
     @stack_pointer.setter
     @context_decorator
     def stack_pointer(self, value: int) -> None:
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+            return
+
         # May move this line to push and pop if someone can argue a good reason to.
         if context.arch == "amd64":
             self.rsp = value
@@ -4098,6 +4151,9 @@ class Debugger:
 
     @property
     def return_pointer(self) -> int:
+        if not self.debugging:
+            log.warn_once(IMPORTANT_DEBUG_OFF)
+            return 0
         return self.__saved_ip
 
    ########################## FILES ##########################
@@ -5251,6 +5307,8 @@ class Debugger:
 
         if self._closed.is_set():
             msg = "<exited>"
+        elif not self.debugging:
+            msg = "<not debugged>"
         elif self.running:
             msg = "<running>"
         else:
