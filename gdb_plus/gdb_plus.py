@@ -1507,6 +1507,13 @@ class Debugger:
         return {inferior.num: inferior for inferior in self.gdb.inferiors()}
         #return (None,) + self.gdb.inferiors()
 
+    def inferior_from_pid(self, pid: int) -> Inferior | None:
+        for inferior in self.inferiors.values():
+            if inferior.pid == pid:
+                return inferior
+        self.logger.warning(f"can't find inferior for pid {pid}")
+        return None
+
     # TODO if possible allow for an optimisation "single inferior" or something similar where we never waste time calling the inferior [08/10/24]
     @property
     def current_inferior(self) -> Inferior | None:
@@ -3418,7 +3425,9 @@ class Debugger:
         # BUG: GDB may write in the wrong inferior...
         # BUG: GDB with QEMU can not write in non writable pages
         if self.gdb is not None:
-            self.__write_gdb(address, data)
+            if inferior is None and pid is not None:
+                inferior = self.inferior_from_pid(pid)
+            self.__write_gdb(address, data, inferior = inferior)
             return address
 
         elif self.new_libdebug is not None:
