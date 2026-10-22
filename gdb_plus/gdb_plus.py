@@ -5178,7 +5178,12 @@ class Debugger:
                 return
             elif self.gdb is not None:
                 if DEBUG: self.logger.debug(" setting %s to %x", name, value)
-                self.execute(f"set {name}.uint128={value}")
+                # gdb can't parse 128 bit constants: write the two 64 bit halves
+                value %= 2**128
+                for i, half in enumerate([value % 2**64, value // 2**64]):
+                    if half >= 2**63:
+                        half -= 2**64
+                    self.execute(f"set ${name}.v2_int64[{i}] = {half}")
             else:
                 raise Exception("Not supported")
         elif (library_name := self._library_fullname(name)) is not None:
