@@ -1,4 +1,6 @@
 """Typed read/write helpers, strings, stack, bss allocation, nop and canary on fake memory."""
+import os
+
 import pytest
 from pwn import context, pack
 
@@ -199,6 +201,32 @@ def test_auxiliary_vector_when_gdb_fails(dbg):
     """When gdb can't give `info auxv`, the auxiliary vector is None instead of an error."""
     dbg.execute_results["info auxv"] = "The program has no auxiliary information now. failed"
     assert dbg._auxiliary_vector is None
+
+
+def test_page_size_comes_from_at_pagesz(dbg):
+    """dbg.page_size is AT_PAGESZ from the auxiliary vector."""
+    dbg.execute_results["info auxv"] = AUXV.replace("4096", "16384")
+    assert dbg.page_size == 0x4000
+
+
+def test_page_size_when_gdb_fails(dbg):
+    """Without an auxiliary vector dbg.page_size falls back to 0x1000."""
+    dbg.execute_results["info auxv"] = "The program has no auxiliary information now. failed"
+    assert dbg.page_size == 0x1000
+
+
+def test_page_size_without_debugger():
+    """With debugging=False dbg.page_size is 0x1000."""
+    with context.local(arch="amd64"):
+        assert offline_debugger(debugging=False).page_size == 0x1000
+
+
+def test_auxiliary_vector_from_proc(dbg):
+    """With libdebug the auxiliary vector is read from /proc/<pid>/auxv (here the one of the test process)."""
+    dbg.libdebug = object()
+    dbg.pid = os.getpid()
+    assert dbg._auxiliary_vector["AT_PAGESZ"] == os.sysconf("SC_PAGE_SIZE")
+    assert dbg._auxiliary_vector["AT_RANDOM"] != 0
 
 
 def test_canary_can_be_set_after_a_leak(dbg):

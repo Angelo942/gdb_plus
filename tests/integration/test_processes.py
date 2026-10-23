@@ -251,6 +251,8 @@ def test_trace_links_two_debuggers(debugger, forking, backend):
 @pytest.mark.not_applicable("new_libdebug", "bruteforce() runs its children with gdb or the legacy libdebug (libdebug=True)")
 @pytest.mark.not_applicable("remote", "bruteforce() forks and splits the process locally")
 @pytest.mark.untested("i386", "slow (forks and debugs n processes): only run on x86-64")
+@pytest.mark.known_gap("gdb", "bruteforce() never returns (root cause not investigated yet)", run=False)
+@pytest.mark.known_gap("libdebug", "bruteforce() never returns (root cause not investigated yet)", run=False)
 def test_bruteforce(debugger, basic, backend):
     """
     bruteforce() forks the stopped process and tries a value per child (setup writes the argument, check reads

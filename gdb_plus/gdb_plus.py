@@ -23,6 +23,7 @@ except ImportError:
     CS_ARCH_AARCH64 = CS_ARCH_ARM64
 from elftools.elf.sections import SymbolTableSection
 from pwn import ELF, args, constants, context, gdb, log, p32, pack, process, remote, sleep, unpack
+from pwnlib.elf.datatypes import AT_CONSTANTS
 from pwnlib.exception import PwnlibException
 from rpyc import BgServingThread
 
@@ -3002,18 +3003,19 @@ class Debugger:
             log.warn_once(DEBUG_OFF)
             return
 
-        page_address = address - address % 0x1000
-        page_size = (size // 0x1000 + 1) * 0x1000
+        page_size = self.page_size
+        page_address = address - address % page_size
+        length = ceil((address + size - page_address) / page_size) * page_size
 
         if "mprotect" in self.symbols:
             if self.gdb is not None:
-                self.execute(f"call (void)mprotect({page_address}, {page_size}, 0x7)")
+                self.execute(f"call (void)mprotect({page_address}, {length}, 0x7)")
             else:
-                self.call("mprotect", [page_address, page_size, 7])
-        elif context.arch not in ["riscv32", "riscv64"]: 
-            self.syscall(constants.SYS_mprotect.real, [page_address, page_size, constants.PROT_EXEC | constants.PROT_READ | constants.PROT_WRITE], syscall_address = syscall_address)
+                self.call("mprotect", [page_address, length, 7])
+        elif context.arch not in ["riscv32", "riscv64"]:
+            self.syscall(constants.SYS_mprotect.real, [page_address, length, constants.PROT_EXEC | constants.PROT_READ | constants.PROT_WRITE], syscall_address = syscall_address)
         else: # pwntools doesn't have constants yet for RISCV yet [18/01/25]
-            self.syscall(226, [page_address, page_size, 7], syscall_address = syscall_address)
+            self.syscall(226, [page_address, length, 7], syscall_address = syscall_address)
         
     # BUG: QEMU prevents overwriting code section even after mprotect [18/10/26] May be fixed in ubuntu 24+ (QEMU 8+)
     @context_decorator
@@ -3929,25 +3931,51 @@ class Debugger:
         self.write(address, nop[context.arch] * (size // len(nop[context.arch])))
         return backup
 
+    def __auxiliary_vector_gdb(self) -> dict[str, int] | None:
+        auxv_info = self.execute("info auxv")
+        if "failed" in auxv_info:
+            unexpected(auxv_info, log)
+            return None
+        auxiliary_vector = {}
+        for line in auxv_info.splitlines():
+            line = line.split('"')[0].strip()  # remove the ending string (if any)
+            line = line.split()  # split the string by whitespace(s)
+            if len(line) < 4:
+                continue
+            __av_type = line[1]
+            __av_value = line[-1]
+            auxiliary_vector[__av_type] = int(__av_value, base=0)
+        return auxiliary_vector
+
+    # libdebug has no `info auxv`, but the kernel gives us the raw vector: pairs of (type, value) words [23/10/26]
+    def __auxiliary_vector_libdebug(self) -> dict[str, int]:
+        with open(f"/proc/{self.pid}/auxv", "rb") as fd:
+            data = fd.read()
+        words = [unpack(data[i:i+context.bytes]) for i in range(0, len(data), context.bytes)]
+        auxiliary_vector = {}
+        for av_type, av_value in zip(words[::2], words[1::2]):
+            auxiliary_vector[AT_CONSTANTS.get(av_type, str(av_type))] = av_value
+        return auxiliary_vector
+
     # taken from GEF to locate the canary
     @property
     def _auxiliary_vector(self) -> dict[str, int] | None:
         if not self._saved_auxiliary_vector:
-            auxiliary_vector = {}
-            auxv_info = self.execute("info auxv")
-            if "failed" in auxv_info:
-                unexpected(auxv_info, log)
-                return None
-            for line in auxv_info.splitlines():
-                line = line.split('"')[0].strip()  # remove the ending string (if any)
-                line = line.split()  # split the string by whitespace(s)
-                if len(line) < 4:
-                    continue
-                __av_type = line[1]
-                __av_value = line[-1]
-                auxiliary_vector[__av_type] = int(__av_value, base=0)
-            self._saved_auxiliary_vector = auxiliary_vector
+            if self.libdebug is not None or self.new_libdebug is not None:
+                self._saved_auxiliary_vector = self.__auxiliary_vector_libdebug()
+            else:
+                self._saved_auxiliary_vector = self.__auxiliary_vector_gdb()
         return self._saved_auxiliary_vector
+
+    @property
+    def page_size(self) -> int:
+        """
+        Size of a memory page in the process. 0x1000 almost everywhere, but aarch64 and mips kernels can use 16K or 64K pages.
+        """
+        if not self.debugging:
+            return 0x1000
+        auxiliary_vector = self._auxiliary_vector or {}
+        return auxiliary_vector.get("AT_PAGESZ", 0x1000)
 
     # The canary is constant right ? This way you can also set it after a leak and access it from anywhere
     @property

@@ -30,8 +30,9 @@ sys.path.insert(1, str(TESTS))
 from support import environment  # noqa: E402
 
 # Saves every result in tests/.results/ for the dashboard (python3 tests/dashboard/server.py);
-# --affected runs only the tests that reach the changed code (support/affected.py)
-pytest_plugins = ["support.results", "support.affected"]
+# --affected runs only the tests that reach the changed code (support/affected.py);
+# -n N hands out the slowest tests first (support/schedule.py)
+pytest_plugins = ["support.results", "support.affected", "support.schedule"]
 
 # The legacy suite lives next to us until it is deleted. Don't collect it (test_performances runs at import).
 collect_ignore = ["test.py", "test_old.py", "test_Structure.py", "test_new_libdebug.py", "test_performances.py"]

@@ -1,4 +1,5 @@
 """Registers, arguments, memory access, allocation and code patching on a live process."""
+import os
 import re
 from pathlib import Path
 
@@ -356,7 +357,6 @@ def test_nop_a_call(dbg):
     assert b"counter 0" in dbg.p.recvall(timeout=5)
 
 
-@pytest.mark.known_gap("libdebugs", "the canary is found with gdb's `info auxv`")
 def test_canary(dbg):
     """
     dbg.canary reads the stack canary of the process: one word whose first byte is 0 and, on amd64, the value at fs_base
@@ -389,6 +389,25 @@ def test_make_page_rwx(dbg):
     pointer = dbg.alloc(0x20)
     dbg.make_page_rwx(pointer)
     assert _permissions(dbg.pid, pointer).startswith("rwx")
+
+
+@GUEST_PERMISSIONS
+def test_make_page_rwx_across_pages(dbg):
+    """make_page_rwx(address, size) also changes the next page when the data crosses the end of the first one."""
+    pointer = dbg.alloc(0x20)
+    end_of_page = pointer - pointer % dbg.page_size + dbg.page_size
+    if _permissions(dbg.pid, end_of_page) is None:
+        pytest.skip("the page after the allocation is not mapped")
+    dbg.make_page_rwx(end_of_page - 0x10, 0x20)
+    assert _permissions(dbg.pid, end_of_page - 0x10).startswith("rwx")
+    assert _permissions(dbg.pid, end_of_page).startswith("rwx")
+
+
+def test_page_size(dbg):
+    """dbg.page_size is the page size of the process: 4K, 16K or 64K."""
+    assert dbg.page_size in (0x1000, 0x4000, 0x10000)
+    if context.native:
+        assert dbg.page_size == os.sysconf("SC_PAGE_SIZE")
 
 
 @call_hangs
