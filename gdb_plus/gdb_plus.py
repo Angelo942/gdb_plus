@@ -12,7 +12,7 @@ from math import ceil, inf
 from queue import Queue
 from threading import Event, enumerate as enumerate_threads
 from multiprocessing import Process, Event as p_Event, Queue as p_Queue, cpu_count
-from typing import TYPE_CHECKING, ParamSpec, TypeVar
+from typing import TYPE_CHECKING
 
 from capstone import Cs, CS_ARCH_X86, CS_ARCH_ARM, CS_ARCH_RISCV, CS_MODE_32, CS_MODE_64, CS_MODE_ARM, CS_MODE_RISCV32, CS_MODE_RISCV64, CS_MODE_RISCVC, CS_ARCH_MIPS, CS_MODE_MIPS32, CS_MODE_MIPS64, CS_MODE_BIG_ENDIAN, CS_MODE_LITTLE_ENDIAN
 # Migrate to capstone v6, but keep support for v5
@@ -31,7 +31,7 @@ from gdb_plus.utils.exe import EXE
 from gdb_plus.setup import identify_executable
 
 if TYPE_CHECKING:
-    from typing import Any, Callable, Concatenate, Iterator, Sequence
+    from typing import Any, Callable, Concatenate, Iterator, ParamSpec, Sequence, TypeVar
     from capstone import CsInsn
     from gdb import Inferior, ExitedEvent, ContinueEvent, RegisterChangedEvent, NewInferiorEvent
     from pwnlib.gdb import Gdb, Breakpoint as GdbBreakpoint
@@ -59,6 +59,8 @@ SKIP_SYSCALL = 0b10
 # Constants for interrupt
 INTERRUPT_SENT = 0b1 # We sent the signal
 INTERRUPT_HIT_BREAKPOINT = 0b10 # The process stopped for a breakpoint instead of our signal.
+# Return values of a syscall stopped by a signal that the kernel restarts: ERESTARTSYS, ERESTARTNOINTR, ERESTARTNOHAND, ERESTART_RESTARTBLOCK
+_RESTART_SYSCALL = (512, 513, 514, 516)
 
 _NEW_LIBDEBUG_REGISTERS = {"orig_rax": "syscall_number", "orig_eax": "syscall_number"}
 
@@ -180,17 +182,13 @@ class Debugger:
         self._free_bss = None #Used to allocate data in the bss if you can't use the heap
         # NOTE: Do we want to save temporary breakpoints too ? [17/04/23]
         self.breakpoints = defaultdict(list)
-        # Let's try to reduce race conditions [19/06/23]
-        self._stops_to_enforce = 0
-        self._breakpoint_handled = Event()
 
         self._handled_signals = {}
         self.gdbscript = script # For non blocking debug_from
         self.debug_from_done = Event()
 
-        # MyEvent allows calls to wait in parallel
-        self._myStopped = MyEvent() # Include original event
-        self._myStopped.set() # we call __setup_gdb after an attach so the process isn't running. Make just sure this doesn't cause troubles [17/04/23]
+        # Which thread receives each stop of the process (see PriorityManager)
+        self._priority = PriorityManager()
         self._gdb_died = False
         self._gdb_server = None # TODO find a better name for the thread
         self._gdb_finalizer: weakref.finalize | None = None
@@ -548,7 +546,7 @@ class Debugger:
                 # Must be set for each breakpoint for the library functions to work [05/06/23]
                 # Check that the priorities can't be broken by a breakpoint set by the user... [05/06/23]
                 set_stop.append(f"No callback")
-            else:           
+            else:
                 should_stop = breakpoint.callback(self)
                 should_stop = True if should_stop is None else should_stop
                 if should_stop:
@@ -570,27 +568,35 @@ class Debugger:
         self._callback_return_overwritten = callback_return_overwritten and not should_continue
             
 
-        # Be sure to be in the last stop
-        if address == self.instruction_pointer:
-            if DEBUG: self.logger.debug("saving remaining stops: %d", len(set_stop))
-            self._stops_to_enforce = len(set_stop)
-
-        # Come funziona ancora questo ? Deve controllare i breakpoint multipli ed evitare che mandiamo un segnale sbagliato, però se nessuno aspetta dopo devo andare avanti...
-        for i, stop_reason in enumerate(set_stop):
-            self._breakpoint_handled.clear()
-            self.__set_stop(stop_reason)
-            # Se stai gestendo l'ultimo vai avanti e basta
-            if i + 1 < len(set_stop):
-                self._breakpoint_handled.wait()
-            #self.__enforce_stop(stop_reason)
-
-        # TODO IMPROVE THIS [06/06/23]
-        # We have a problem. If I do a next() and hit a breakpoint with a finish(); return False, How should I know not to continue after the finish ?
-        # If this is the only breakpoint that stop we can continue [19/06/23]
-        if should_continue and self._stops_to_enforce <= 1:#not self._myStopped.enforce_stop: 
+        # Each breakpoint that asked to stop gives one stop. The first one goes now to the last action waiting, the others replace the
+        # next auto-resumes so that they reach the actions below it (see PriorityManager.expect_more_stops)
+        if set_stop:
+            if DEBUG: self.logger.debug("stops at this address: %d", len(set_stop))
+            self._priority.expect_more_stops(len(set_stop) - 1)
+            self.__set_stop(set_stop[0])
+        elif should_continue:
             self.__hidden_continue()
-        if DEBUG: self.logger.debug("setting breakpoint handled")
-        self._breakpoint_handled.set()
+
+    def __spawn_handler(self, target: Callable[..., None], *args: object, name: str, handler_context: HandlerContext | None = None) -> None:
+        """
+        Start a thread that handles a stop, inside the HandlerContext of that stop (see PriorityManager).
+        handler_context: the context opened when the stop was detected. Without it the new thread handles the same stop as
+        the current thread (the thread of the breakpoint callbacks, started by the stop handler).
+        """
+        manager = self._priority
+        if handler_context is None:
+            handler_context = manager.current_context()
+            if handler_context is None:
+                handler_context = manager.open_context(name)
+            else:
+                manager.share(handler_context)
+        def run() -> None:
+            manager.enter(handler_context)
+            try:
+                target(*args)
+            finally:
+                manager.leave(handler_context)
+        context.Thread(target=run, name=name, daemon=True).start()
 
     # We stopped using gdb's implementation of temporary breakpoints so that we can differentiate an interruption caused by my debugger and cause by the manual use of gdb 
     # Event could tell me which breakpoint has been hit or which signal cause the interruption
@@ -643,9 +649,6 @@ class Debugger:
                     self.__set_stop("returned from syscall")
                     return
 
-                # Make sure we don't miss the return
-                # Put above to avoid race condition after the jump
-                self._raise_priority("handling syscall")
                 saved_return_value = self.return_value
                 should_skip = callback(self, entry=True)
                 if should_skip is not None and should_skip & SKIP_SYSCALL:
@@ -657,7 +660,8 @@ class Debugger:
                     # Apparently the jump works only by a side effect because it sets orig_*ax to -1
                     # On arm it wouldn't work TODO check
                     # RISCV and MIPS want us to set a7, v0 to -1
-                    self.jump(self.instruction_pointer)
+                    # internal=True: the jump is part of handling this stop, so it runs even if interrupt() suspended this stop
+                    self.__jump_gdb(self.instruction_pointer, internal=True)
                     # This will not save you from manual interactions unfortunately, but it's still better than anything
                     if not should_skip & SHOULD_STOP and len(breakpoints) == 0:
                         if DEBUG: self.logger.info("resuming execution")
@@ -670,18 +674,22 @@ class Debugger:
                         #else:
                         #    # TODO TEST IT [26/07/23]
                         self.__set_stop("stopped after skipping syscall")
-                    self._lower_priority("syscall skipped")
                 else:
                     self._syscall_return = True
                     # address = self.instruction_pointer
                     if DEBUG: self.logger.info("executing syscall")
-                    with context.silent:
-                        self.si() # Consider implementing a self.c(force=False) that doesn't step
-                    # if address != self.instruction_pointer:
-                    #     log.warn("The execution of the syscall didn't go as planned.")
-                    should_stop = callback(self, entry=False)
-                    self._lower_priority("syscall handled")
-                    self._syscall_return = False
+                    try:
+                        with context.silent:
+                            self._step(internal=True) # Consider implementing a self.c(force=False) that doesn't step
+                            # A signal (the SIGINT of interrupt()) stopped the syscall before it ended: the kernel runs it again
+                            # with the next step. Not internal: if interrupt() suspended this stop, it waits for resume()
+                            while self.__syscall_restarts():
+                                self._step()
+                        # if address != self.instruction_pointer:
+                        #     log.warn("The execution of the syscall didn't go as planned.")
+                        should_stop = callback(self, entry=False)
+                    finally:
+                        self._syscall_return = False
                     if should_stop == False and len(breakpoints) == 0:
                         if DEBUG: self.logger.info("resuming execution")
                         self.__hidden_continue()
@@ -690,10 +698,8 @@ class Debugger:
                             log.warn_once("You didn't specify a behaviour leaving the syscall. By default I will stop.")
                         self.__set_stop("returned from syscall")
             else:
-                self._raise_priority("handling event")
                 should_stop = callback(self)
                 should_stop = True if should_stop is None else should_stop
-                self._lower_priority("event handled")
                 if should_stop:
                     should_continue = False
                     self.__set_stop("event callback returned True or None")
@@ -711,8 +717,7 @@ class Debugger:
             #    self.__exit_handler(...)
             # I put the signal first because I may have PTRACE_CONT be called on a SIGILL and I must tell the master that we stopped. I hope it won't cause problems with the different SIGSTOP that gdb puts in the way. [23/06/23]
             if self._interrupted and self._stop_reason == "SIGINT":
-                self._interrupted = False
-                self.__set_stop(f"interrupted")
+                self.__interrupted_stop()
             
             # Are we able to distinguish this from normal interactions with gdb ? Are there cases where instead a signal is seen as a normal interaction ?
             elif self._stop_reason in SIGNALS:
@@ -730,11 +735,11 @@ class Debugger:
                 if DEBUG: self.logger.debug("stopped for a manual interaction")
                 self.__enforce_stop("manual interaction")
             return
-            
+
         # Doesn't handle the case where we use ni and hit the breakpoint though... [17/04/23] TODO!
         # Doesn't even handle the case where I step, but I'm waiting in continue until
         # Damn, gdb detects the breakpoint even if we don't run over the INT3... so this doesn't work. We never have reason SINGLE STEP with a breakpoint. We need another indication [10/05/23]
-        context.Thread(target=self.__handle_breakpoints, args = (breakpoints,), name=f"[{self.pid}] handle breakpoint {hex(ip)}", daemon=True).start()
+        self.__spawn_handler(self.__handle_breakpoints, breakpoints, name=f"[{self.pid}] handle breakpoint {hex(ip)}")
 
     # INT3 while enumerating ptrace doesn't set ptrace_has_stopped [24/12/23]
     # The handler is not called at all! Is it because libdebug thinks it's an internal interruption ?
@@ -768,7 +773,7 @@ class Debugger:
                     self._ptrace_has_stopped.set()
                 else:
                     self.__set_stop(f"signal {self._stop_reason} handled")
-            return  
+            return
         # I hope I won't touch a breakpoint at the same time
         # Usually if I hit a breakpoint it should stop again. At least with step we have the step and then the sigchld 
         # Will be a problem while stepping, but amen
@@ -890,8 +895,7 @@ class Debugger:
 
         if len(breakpoints) == 0:
             if self._interrupted:
-                self._interrupted = False
-                self.__set_stop(f"interrupted")
+                self.__interrupted_stop()
             elif self._stepped:
                 self._stepped = False
                 self.__set_stop("stepped")
@@ -907,7 +911,7 @@ class Debugger:
                 self.__enforce_stop("manual interaction")
             return
 
-        context.Thread(target=self.__handle_breakpoints, args = (breakpoints,), name=f"[{self.pid}] handle breakpoint {hex(ip)}", daemon=True).start()
+        self.__spawn_handler(self.__handle_breakpoints, breakpoints, name=f"[{self.pid}] handle breakpoint {hex(ip)}")
 
     # 02/05/25
     # By default this callback is executed every time a process exits, but that includes both our program finishing, and inferior finishing and us detaching from a process
@@ -925,7 +929,7 @@ class Debugger:
             if DEBUG: self.logger.debug("setting stop because process exited")
             # Set _closed before waking up the waiters: they check it to know that the process is gone
             self._closed.set()
-            self.__set_stop(f"process exited", exit=True)
+            self._priority.deliver_all("process exited")
             self._ptrace_has_stopped.set()
         else:
             if DEBUG: self.logger.debug("%s has been disconnected", event.inferior.pid)
@@ -1027,7 +1031,7 @@ class Debugger:
         self._closed.set()
         gdb.stopped.set() # Let loop_stop_handler_gdb exit
         self._ptrace_has_stopped.set()
-        self._myStopped.abort() # Wake whoever is waiting, at any priority
+        self._priority.abort() # Wake whoever is waiting, at any priority
 
     @context_decorator
     def __setup_gdb(self) -> None:
@@ -1046,7 +1050,9 @@ class Debugger:
                 if self._kill_threads.is_set() or self._closed.is_set():
                     if DEBUG: self.logger.debug("exiting loop handler")
                     break
-                context.Thread(target=self.__stop_handler_gdb, name=f"[{self.pid}] stop_handler_gdb", daemon=True).start()
+                # Open the context here, before the thread starts: interrupt() must never see a stop that nobody handles yet
+                stop = self._priority.stop_detected("gdb stop")
+                self.__spawn_handler(self.__stop_handler_gdb, name=f"[{self.pid}] stop_handler_gdb", handler_context=stop)
         # daemon: python joins non-daemon threads before running atexit, so this wait would block the exit and pwntools would never close the gdb terminal
         context.Thread(target=loop_handler, name=f"[{self.pid}] loop_stop_handler_gdb", daemon=True).start()
         self.__watch_gdb()
@@ -1064,9 +1070,10 @@ class Debugger:
         self.gdb.events.register_changed.connect(clear_cache)
         #self.execute("set write on")
 
-        def clear_stop(event: ContinueEvent) -> None:
-            self._myStopped.clear("process resumed")
-        self.gdb.events.cont.connect(clear_stop)
+        # Track the commands typed in gdb that resume the process. Our own resumes are already marked as running
+        def resumed(event: ContinueEvent) -> None:
+            self._priority.resumed_externally()
+        self.gdb.events.cont.connect(resumed)
 
         # I still don't know how to disable it to let ptrace_emulate work in peace [26/07/23]
         def callback_ptrace(self: Debugger, entry: bool) -> bool:
@@ -1083,8 +1090,9 @@ class Debugger:
 
         self._closed.clear()
         self._kill_threads.clear()
-        self._myStopped.pid = self.pid
-        self._myStopped.aborted = False # What is the aborted for ? [18/10/26]
+        self._priority.pid = self.pid
+        self._priority.aborted = False # Only set once gdb died
+        self._priority.running = False # We just attached: the process is stopped
         self._gdb_died = False
 
         self.__test_debugger()
@@ -1099,7 +1107,15 @@ class Debugger:
                 self.execute("set follow-fork-mode parent")      
 
     def __setup_libdebug(self) -> None:
-        self.libdebug.handle_stop = self.__stop_handler_libdebug
+        # libdebug calls handle_stop in its own thread, so the context of the stop is opened there
+        def handle_stop() -> None:
+            stop = self._priority.stop_detected("libdebug stop")
+            self._priority.enter(stop)
+            try:
+                self.__stop_handler_libdebug()
+            finally:
+                self._priority.leave(stop)
+        self.libdebug.handle_stop = handle_stop
 
         self.libdebug.handle_exit = self.__exit_handler
         
@@ -1120,7 +1136,8 @@ class Debugger:
                 if self._kill_threads.is_set() or self._closed.is_set():
                     if DEBUG: self.logger.debug("exiting loop handler")
                     break
-                context.Thread(target=self.__stop_handler_new_libdebug, name=f"[{self.pid}] stop_handler_new_libdebug", daemon=True).start()
+                stop = self._priority.stop_detected("new_libdebug stop")
+                self.__spawn_handler(self.__stop_handler_new_libdebug, name=f"[{self.pid}] stop_handler_new_libdebug", handler_context=stop)
         context.Thread(target=loop_handler, name=f"[{self.pid}] loop_stop_handler_new_libdebug", daemon=True).start()
 
     # È già successo che wait ritorni -1 e crashi libdebug [08/05/23]
@@ -1699,27 +1716,41 @@ class Debugger:
    ########################## CONTROL FLOW ##########################
 
     # For commands that will make the process run and should handle priority
-    def execute_action(self, command: str | Callable[[], object], sender: str | None = None) -> int | None:
+    def execute_action(self, command: str | Callable[[], object], sender: str | None = None, *, internal: bool = False, step: bool = False) -> PriorityEvent | None:
         """
-        Wrapper around execute to handle commands that will require a wait
+        Wrapper around execute to handle commands that will require a wait.
+        Returns the PriorityEvent to pass to _priority_wait(): the stop that follows the command is handed to it.
+        While an interrupt() is in effect (see PriorityManager.begin_action): a callback, or a task it started, sends the
+        command only after resume(); a task of the script started before the interrupt raises Interrupted; the script
+        raises Suspended.
+        internal: the command is a step the stop handler needs to finish handling the current stop (the jump that skips a
+                  syscall): it is sent even if interrupt() suspended that stop.
+        step: the command executes a single instruction (resume() executes it again if interrupt() stops it)
         """
         if not self.debugging:
             log.warn_once(DEBUG_OFF)
             return
 
-        priority = self._raise_priority(sender)
+        name = sender if sender is not None else str(command)
+        event = self._priority.begin_action(name, resumes=command != "", internal=internal, step=step)
         self._callback_return_overwritten = False # Not needed for gdb since it's set by events.cont, but this keeps a better readability
-        self.__clear_stop(sender if sender is not None else command)
-        if self.gdb is not None:
-            self.execute(command)
-        elif self.libdebug is not None and command != "":
-            command()
-        elif self.new_libdebug is not None and command != "":
-            command()
-            self.new_libdebug._resumed.set()
-        else:
-            raise NotImplementedError(f"execute_action is not implemented for the given debugger")
-        return priority
+        try:
+            if self.gdb is not None:
+                self.execute(command)
+            elif self.libdebug is not None and command != "":
+                # The legacy libdebug returns from the command only once the process stops, and has no interrupt() to lose
+                self._priority.task_resumed()
+                command()
+            elif self.new_libdebug is not None and command != "":
+                command()
+                self.new_libdebug._resumed.set()
+            else:
+                raise NotImplementedError(f"execute_action is not implemented for the given debugger")
+        except BaseException:
+            self._priority.cancel_action(event, name)
+            raise
+        self._priority.task_resumed()
+        return event
 
     # Simplify continue after callback so that it can still work after migrating inside the callback
     # It has to do everything like execute action continue, except raising the priority
@@ -1732,24 +1763,51 @@ class Debugger:
         #    if address == self.instruction_pointer:
         #        log.debug(f"[{self.pid}] I think I stopped my step for a good reason so I won't continue")
         #        return
+        refused = self._priority.auto_resume()
+        if refused == SUSPENDED:
+            # interrupt() suspended this stop: nobody is woken, resume() will resume the process
+            if DEBUG: self.logger.debug("not resuming: %s", refused)
+            return
+        if refused is not None:
+            # The process must stay stopped (interrupt() called by a callback, or another breakpoint at this address stops):
+            # give the stop to the action waiting for it instead of resuming
+            if DEBUG: self.logger.debug("not resuming: %s", refused)
+            self.__set_stop(refused)
+            return
         if DEBUG: self.logger.debug("hidden continue")
         sleep(0.02)
+        self.__resume_process()
+
+    def __resume_process(self, step: bool = False) -> None:
+        """
+        Send the command that resumes the process without creating a PriorityEvent: the actions already waiting receive the
+        next stop. Shared by the auto-resumes of the stop handlers (__hidden_continue) and by resume(). The caller has
+        already counted the process as running (PriorityManager.auto_resume() / PriorityManager.resume()).
+        step: execute a single instruction instead of continuing
+        """
         self._callback_return_overwritten = False
         if self.gdb is not None:
-            self.gdb.execute("continue")
+            self.gdb.execute("si" if step else "continue")
         elif self.libdebug is not None:
-            self.libdebug.cont(blocking=False)
+            if step:
+                self.libdebug.step()
+            else:
+                self.libdebug.cont(blocking=False)
         elif self.new_libdebug is not None:
-            self.new_libdebug.c() # TODO check if this is valid [20/06/25]
+            if step:
+                self.new_libdebug.step()
+            else:
+                self.new_libdebug.c() # TODO check if this is valid [20/06/25]
             self.new_libdebug._resumed.set()
         else:
-            raise NotImplementedError(f"__hidden_continue is not implemented for the given debugger")
+            raise NotImplementedError(f"__resume_process is not implemented for the given debugger")
 
     @set_done_if_panic
     def __continue_gdb(self, force: bool, wait: bool, done: DoneEvent) -> None:
         # Do I check the address instead ? Like hidden_continue [09/06/23]
+        # done is set by set_done_if_panic when the function returns. Until then the continue counts as a task (DoneEvent),
+        # also between the step and the continue, when no PriorityEvent is waiting
         with self._ptrace_lock.log("__continue_gdb"):
-            priority = self._raise_priority("avoid race condition in continue")
             self.step(force=True)
 
             if self._stop_reason == "RUNNING":
@@ -1765,17 +1823,10 @@ class Debugger:
                     if DEBUG: self.logger.debug("step in continue already reached the breakpoint")
                 else:
                     log.warn(f"unknown interruption! {self._stop_reason}")
-                self._lower_priority("avoid race condition in continue")
-                done.set()
                 return
-            self.execute_action("continue", sender="continue")
-        # Damn, I may not want to wait at all... [22/05/23]
-        # Keep priority intact, so I have to wait
-        #if wait:
-        self._priority_wait(comment="continue", priority = priority + 1)
-        done.set()
-        # The problem is that this has to be set after wait() [29/07/23 21:45]
-        self._lower_priority("avoid race condition in continue")
+            event = self.execute_action("continue", sender="continue")
+        self._priority_wait(comment="continue", priority=event)
+        done.interrupted = (event.reason or "").startswith("interrupted")
 
     @set_done_if_panic
     def __continue_libdebug(self, force: bool, wait: bool, done: DoneEvent, signal: int) -> None:
@@ -1787,19 +1838,18 @@ class Debugger:
         #    return
         # I don't need the thread, right ? And this way I can lock the step [12/06/23]
         with self._ptrace_lock.log("__continue_libdebug"):
-            self.execute_action(lambda: self.libdebug.cont(blocking=False, signal=signal), sender="continue")
-        #if wait:
-        self._priority_wait(comment="continue")
-        done.set()
+            event = self.execute_action(lambda: self.libdebug.cont(blocking=False, signal=signal), sender="continue")
+        self._priority_wait(comment="continue", priority=event)
+        done.interrupted = (event.reason or "").startswith("interrupted")
 
     @set_done_if_panic
     def __continue_new_libdebug(self, force: bool, wait: bool, done: DoneEvent, signal: int) -> None:
         with self._ptrace_lock.log("__continue_new_libdebug"):
             if signal:
                 self.new_libdebug.signal = signal
-            self.execute_action(lambda: self.new_libdebug.cont(), sender="continue")
-        self._priority_wait(comment="continue")
-        done.set()
+            event = self.execute_action(lambda: self.new_libdebug.cont(), sender="continue")
+        self._priority_wait(comment="continue", priority=event)
+        done.interrupted = (event.reason or "").startswith("interrupted")
         
     # TODO make the option to have "until" be non blocking with an event when we reach the address [28/04/23] In other words migrate wait=False to wait=Event()
     @context_decorator
@@ -1817,16 +1867,18 @@ class Debugger:
             log.warn_once(DEBUG_OFF)
             return
 
+        self._priority.check_can_resume("continue")
         # I have to use an event instead of priority_wait() because I may have to stop after the step [22/05/23]
-        done = DoneEvent()
+        # The continue counts as a task from now until its thread ends: wait() and interrupt() see it before the thread resumes the process
+        done = DoneEvent(self._priority)
 
         if self.gdb is not None:
             # It would be better to close cleanly the thread when we close the debugger, but for now I just set daemon=True to at least not block the script.
-            context.Thread(target=self.__continue_gdb, args=(force, wait, done), name=f"[{self.pid}] continue", daemon=True).start() 
+            context.Thread(target=self._priority.inherit(self.__continue_gdb, done), args=(force, wait, done), name=f"[{self.pid}] continue", daemon=True).start()
         elif self.libdebug is not None:
-            context.Thread(target=self.__continue_libdebug, args=(force, wait, done, signal), name=f"[{self.pid}] continue", daemon=True).start() 
+            context.Thread(target=self._priority.inherit(self.__continue_libdebug, done), args=(force, wait, done, signal), name=f"[{self.pid}] continue", daemon=True).start()
         elif self.new_libdebug is not None:
-            context.Thread(target=self.__continue_new_libdebug, args=(force, wait, done, signal), name=f"[{self.pid}] continue", daemon=True).start() 
+            context.Thread(target=self._priority.inherit(self.__continue_new_libdebug, done), args=(force, wait, done, signal), name=f"[{self.pid}] continue", daemon=True).start()
         else:
             raise NotImplementedError(f"continue is not implemented for the given debugger")
 
@@ -1838,37 +1890,48 @@ class Debugger:
             # I would like to return done too, but I'm sure the average user will try dbg.wait instead of done.wait 
             # dbg.wait() would bring priority to -1, but it is still more intuitive than done.wait() so I will try to change _continue_* to allow the user to use wait() [29/07/23 21:30]
             # Nope, too many problems with priority so I get back to the event. Later we will think about separating wait and priority_wait [29/07/23 21:40]
+            # Return once the thread resumed the process: an interrupt() right after this call finds it running
+            done.wait_resumed()
             return done
 
     cont = c
 
+    def __forget_breakpoint(self, address: int, breakpoint: Breakpoint | None) -> None:
+        "Delete the temporary breakpoint of an action that interrupt() ended, if it is still there"
+        if breakpoint is not None and breakpoint in self.breakpoints[address]:
+            self.delete_breakpoint(breakpoint)
+
     @set_done_if_panic
-    def __continue_until_gdb(self, address: int, done: DoneEvent, force: bool) -> None:
+    def __continue_until_gdb(self, address: int, done: DoneEvent, force: bool, breakpoint: Breakpoint | None = None) -> None:
         #Force = True is not needed since once we step the sigint will be caught and continue won't stop. I disable the warning since the user can do nothing about it [08/05/23]
         #Force = True IS needed if you have a callback on that address... [10/05/23]
         # I will keep the step this way to warn the user
-        priority = self._raise_priority("avoid race condition in continue until")
-        self.cont(wait=True, force=force)
-        # Should we take into consideration the inferior too ? [29/04/23]
-        
-        def has_callback() -> bool:
-            for bp in self.breakpoints[self.instruction_pointer]:
-                if bp.callback is not None:
-                    return True
-            return False
+        try:
+            inner = self.cont(wait=False, force=force)
+            inner.wait()
+            # Should we take into consideration the inferior too ? [29/04/23]
 
-        while self.instruction_pointer != address:
-            log.warn(f"[{self.pid}] stopped at {self.reverse_lookup (self.instruction_pointer)} for '{self._stop_reason}' instead of {self.reverse_lookup(address)}")
-            if self._stop_reason == "BREAKPOINT" and has_callback(): # It would maybe be best to ban return None and force the user to set True or False. [23/01/25]
-                log.warn_once("The process stopped on a breakpoint with callback. If you wanted it to continue remember to make your callback return False")
-            else:
-                log.warn_once("I assume this happened because you are using gdb manually. Finish what you are doing and let the process run. I will handle the rest")
-            wont_use_this_priority = self.execute_action("", sender="continue just to reset the wait")
-            # I don't trust the previous priority, while the first one should be safe
-            self._priority_wait(comment="continue_until", priority = priority + 1)
-            # TODO check that the process didn't exit. [21/10/23]
-        self._lower_priority("avoid race condition in continue until")
-        done.set()
+            def has_callback() -> bool:
+                for bp in self.breakpoints[self.instruction_pointer]:
+                    if bp.callback is not None:
+                        return True
+                return False
+
+            while self.instruction_pointer != address:
+                if inner.interrupted:
+                    raise Interrupted("continue_until")
+                log.warn(f"[{self.pid}] stopped at {self.reverse_lookup (self.instruction_pointer)} for '{self._stop_reason}' instead of {self.reverse_lookup(address)}")
+                if self._stop_reason == "BREAKPOINT" and has_callback(): # It would maybe be best to ban return None and force the user to set True or False. [23/01/25]
+                    log.warn_once("The process stopped on a breakpoint with callback. If you wanted it to continue remember to make your callback return False")
+                else:
+                    log.warn_once("I assume this happened because you are using gdb manually. Finish what you are doing and let the process run. I will handle the rest")
+                event = self.execute_action("", sender="continue just to reset the wait")
+                self._priority_wait(comment="continue_until", priority=event)
+                # TODO check that the process didn't exit. [21/10/23]
+        except Interrupted:
+            # Ended by interrupt(): remove the temporary breakpoint, otherwise it would stop the next action of the script
+            self.__forget_breakpoint(address, breakpoint)
+            raise
 
     @set_done_if_panic
     def __continue_until_libdebug(self, address: int, done: DoneEvent, force: bool) -> None:
@@ -1880,8 +1943,13 @@ class Debugger:
         done.set()
     
     @set_done_if_panic
-    def __continue_until_new_libdebug(self, address: int, done: DoneEvent, force: bool) -> None:
-        self.cont(wait=True, force=force)
+    def __continue_until_new_libdebug(self, address: int, done: DoneEvent, force: bool, breakpoint: Breakpoint | None = None) -> None:
+        inner = self.cont(wait=False, force=force)
+        inner.wait()
+        if inner.interrupted:
+            # Ended by interrupt(): remove the temporary breakpoint, otherwise it would stop the next action of the script
+            self.__forget_breakpoint(address, breakpoint)
+            raise Interrupted("continue_until")
         if self.instruction_pointer != address:
             log.warn(f"[{self.pid}] stopped at {self.reverse_lookup(self.instruction_pointer)} instead of {self.reverse_lookup(address)}")
             log.error("error in continue until")
@@ -1904,31 +1972,31 @@ class Debugger:
             force: gdb may bug and keep you at the same address after a jump or if the stack frame as been edited. If you notice this problem use force to bypass it. If you don't worry about a callback being called twice don't bother
         """
         with self._ptrace_lock.log("continue_until"):
-            done = DoneEvent()
-
             if not self.debugging:
+                done = DoneEvent()
                 done.set()
                 log.warn_once(DEBUG_OFF)
                 return done
 
+            self._priority.check_can_resume("continue_until")
+            # The action counts as a task from now until its thread ends: wait() and interrupt() see it before the thread resumes the process
+            done = DoneEvent(self._priority)
             address = self._parse_address(location)
             if address != self.instruction_pointer or loop:
-                self.b(address, temporary=True, user_defined=False, hw=hw)
+                breakpoint = self.b(address, temporary=True, user_defined=False, hw=hw)
                 if DEBUG: self.logger.debug("continuing until %s", self.reverse_lookup(address))
 
                 if self.gdb is not None:
-                    context.Thread(target=self.__continue_until_gdb, args=(address, done, force), name=f"[{self.pid}] continue_until", daemon=True).start()
+                    context.Thread(target=self._priority.inherit(self.__continue_until_gdb, done), args=(address, done, force, breakpoint), name=f"[{self.pid}] continue_until", daemon=True).start()
                 elif self.libdebug is not None:
-                    context.Thread(target=self.__continue_until_libdebug, args=(address, done, force), name=f"[{self.pid}] continue_until", daemon=True).start()
+                    context.Thread(target=self._priority.inherit(self.__continue_until_libdebug, done), args=(address, done, force), name=f"[{self.pid}] continue_until", daemon=True).start()
                 elif self.new_libdebug is not None:
                     if address == self.instruction_pointer:
                         if DEBUG: self.logger.debug("new_libdebug needs to step to loop.")
                         self.si()
-                    context.Thread(target=self.__continue_until_new_libdebug, args=(address, done, force), name=f"[{self.pid}] continue_until", daemon=True).start()
+                    context.Thread(target=self._priority.inherit(self.__continue_until_new_libdebug, done), args=(address, done, force, breakpoint), name=f"[{self.pid}] continue_until", daemon=True).start()
                 else:
                     raise NotImplementedError(f"continue until is not implemented for the given debugger")
-                # Wait for the next lock to be set
-                sleep(0.02)
 
             else:
                 log.warn(f"I'm already at {self.reverse_lookup(address)}")
@@ -1941,32 +2009,37 @@ class Debugger:
             done.wait()
             return self
         else:
+            done.wait_resumed()
             return done
 
     until = continue_until
 
-    # If we are already stopped should the user be able to call wait ? It would just mess with the priority
-    def wait(self, timeout: float | None = None, legacy: bool = False) -> None:
+    def wait(self, timeout: float | None = None, legacy: bool = False) -> bool:
         """
-        Wait for the process to stop after an action.
-        Won't return until all future actions have been handled so that you can use it at the same time in your script and in a breakpoint
+        Wait until the process is stopped and every action in flight has been handled: yours (c(wait=False)...), the ones of the callbacks
+        and the commands typed in gdb. The actions suspended by interrupt() don't count: they only go on after resume().
+        Never changes the priority.
+        Returns False on timeout. legacy is ignored (kept for compatibility)
         """
-        if not self.debugging:
-            log.warn_once(DEBUG_OFF)
-            return
-
-        if legacy:
-            self._myStopped.wait(timeout)
-        else:
-            self._priority_wait("standard wait")
-
-    # This should only be used under the hood, but how do we let the other one to the user without generating problems ? [14/04/23]
-    def _priority_wait(self, comment: str = "?", priority: int | None = None, timeout: float | None = None) -> bool:
         if not self.debugging:
             log.warn_once(DEBUG_OFF)
             return True
 
-        finished = self._myStopped.priority_wait(comment, priority, timeout=timeout)
+        if self._priority.in_handler():
+            log.warn("wait() inside a callback would wait for the callback itself. Returning immediately")
+            return False
+        return self._priority.wait_idle(timeout)
+
+    # This should only be used under the hood, but how do we let the other one to the user without generating problems ? [14/04/23]
+    def _priority_wait(self, comment: str = "?", priority: PriorityEvent | None = None, timeout: float | None = None) -> bool:
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+            return True
+
+        if priority is None:
+            unexpected(f"{comment} has nothing to wait for", log)
+            return True
+        finished = self._priority.wait(priority, comment, timeout=timeout)
         if self._gdb_died:
             raise GdbDiedError(f"GDB died while waiting for {comment}")
         return finished
@@ -2006,33 +2079,8 @@ class Debugger:
 
     @property
     def priority(self) -> int:
-        return self._myStopped.priority
-
-    @priority.setter
-    def priority(self, value: int) -> None:
-        self._myStopped.priority = value
-
-    def _raise_priority(self, comment: str | None) -> int:
-        self._myStopped.raise_priority(comment)
-        return self.priority
-
-    def _lower_priority(self, comment: str) -> int:
-        self._myStopped.lower_priority(comment)
-        return self.priority
-
-    def __clear_stop(self, name: str = "someone", /) -> None:
-        if self.gdb is not None:
-            pid = self.current_inferior.pid
-        elif self.libdebug is not None:
-            pid = self.pid # Handle thread
-        elif self.new_libdebug is not None:
-            pid = self.new_libdebug.pid
-        else:
-            raise NotImplementedError(f"__clear_stop is not implemented for the given debugger")
-
-        if self._myStopped.is_set():
-            #if DEBUG: self.logger.debug("[%d] stopped has been cleared by %s", pid, name)
-            self._myStopped.clear(name)
+        "Number of actions waiting for a stop of the process, the ones suspended by interrupt() included"
+        return self._priority.priority
 
     #def __hidden_stop(self, name="someone", /):
     #    if self.gdb is not None:
@@ -2060,14 +2108,35 @@ class Debugger:
                 if DEBUG: self.logger.debug("[%d] setting stopped in 0x%x for %s", pid, self.instruction_pointer, comment) # no reverse lookup ? [13/08/23]
             else:
                 if DEBUG: self.logger.debug("[%d] setting stopped in 0x%x", pid, self.instruction_pointer)
-        # handle case where no action are performed after the end of a callback with high priority 
-        self._myStopped.pid = pid
-        self.__clear_stop(comment)
-        self._myStopped.set()
+        self._priority.pid = pid
+        self._priority.deliver(comment)
 
     def __enforce_stop(self, comment: str) -> None:
-        self._myStopped.flag_enforce_stop = self._myStopped.priority
-        if DEBUG: self.logger.debug("enforcing stop from level %d for reason: %s", self._myStopped.flag_enforce_stop, comment)
+        """
+        The process stopped for a reason no action asked for (a command typed in gdb).
+        Nobody is woken up: the actions keep waiting for their own stop.
+        """
+        self._priority.stopped_externally()
+        if DEBUG: self.logger.debug("stopped for %s: nobody is woken up", comment)
+
+    def __syscall_restarts(self) -> bool:
+        "The syscall the process just stepped over was stopped by a signal, and the kernel runs it again when the process resumes"
+        if self._closed.is_set():
+            return False
+        mask = 2**context.bits
+        return self.return_value % mask in {-code % mask for code in _RESTART_SYSCALL}
+
+    def __interrupted_stop(self) -> None:
+        """
+        The SIGINT sent by __kick() stopped the process. Called by the stop handlers.
+        If interrupt() suspended the actions running the process nobody is woken (see PriorityManager.absorb_interrupt),
+        otherwise the stop goes to the action waiting for it, like any other stop.
+        """
+        self._interrupted = False
+        if self._priority.absorb_interrupt():
+            if DEBUG: self.logger.debug("interrupted: the suspended actions keep waiting")
+            return
+        self.__set_stop("interrupted")
 
     #def wait_fork(self):
     #    self.gdb.forked.wait()
@@ -2127,140 +2196,210 @@ class Debugger:
 
         return stopped
 
-    def __interrupt_gdb(self, priority: int) -> int:
-        # SIGSTOP is too common in gdb
-        if DEBUG: self.logger.debug("sending SIGINT")
-        if self.local_debugging and context.native:
-            os.kill(self.pid, signal.SIGINT)
-        else:
-            self.execute("interrupt") # shouldn't the first one be an execute action ? For some reason we decided instead to split in with the raise priority immediately as we call it.
-        # counter = 0
-        # while self.running:
-        #     if counter > 5:
-        #         log.error("can not interrupt program!")
-        #     print("interrupting again")
-        #     self.execute("interrupt")
-        #     sleep(0.2)
-        #     counter += 1
-        # if counter:
-        #     address = dbg.instruction_pointer
-        #     with context.silent: dbg.step(repeat=counter)
-        #     if address != self.instruction_pointer or self._stop_reason != "SIGINT":
-        #         log.warn("Oups, I made a mistake trying to catch the SIGINT after a syscall...")
-        self._priority_wait(comment="interrupt", priority = priority)
-        # For now it will be someone else problem the fact that we sent the SIGINT when we arrived on a breakpoint or something similar. [21/07/23] Think about how to catch it without breaking the other threads that are waiting
-        # TODO check that we did indeed took over the control [17/10/23] (BUG interrupt while reading doesn't work)
-        
-        res = INTERRUPT_SENT
-        if self._stop_reason != "SIGINT":
-            # Catch del SIGINT
-            if DEBUG: self.logger.warning("We hit a breakpoint before the SIGINT... I will continue stepping to catch them.")
-            
-            # I must make sure the callbacks aren't called each time!
-            address = self.instruction_pointer
-            saved_callbacks = []
-            for bp in self.breakpoints[address]:
-                saved_callbacks.append(bp.callback)
-                bp.callback = None
-            
-            # After this we finally reached the signal, so we are good to continue
-            with context.silent:
-                res = self.step_until_condition(lambda dbg: dbg._stop_reason == "SIGINT", limit=5)
-            if address != self.instruction_pointer:
-                log.warn("Oups, I made a mistake trying to catch the SIGINT...")
-            elif res == -1:
-                log.warn("What the fuck happened with the SIGINT ? I never found it...")
+    def __kick(self) -> None:
+        "Send the signal that stops the running process"
+        self._interrupted = True
+        if DEBUG: self.logger.debug("interrupting [pid:%d]", self.pid)
+        if self.gdb is not None:
+            # SIGSTOP is too common in gdb
+            if self.local_debugging and context.native:
+                os.kill(self.pid, signal.SIGINT)
             else:
-                if DEBUG: self.logger.info(f"found SIGINT in {res} steps.")
+                self.execute("interrupt")
+        elif self.new_libdebug is not None:
+            self.new_libdebug.interrupt()
+        else:
+            raise NotImplementedError(f"interrupt is not implemented for the given debugger")
+
+    def __catch_pending_sigint(self) -> int:
+        """
+        The process stopped for something else (a breakpoint) before our SIGINT arrived: the signal is still pending and would stop the next action.
+        Step until gdb reports it, without calling again the callbacks of the current address.
+        """
+        if self.gdb is None:
+            self._interrupted = False
+            return 0
+        if DEBUG: self.logger.warning("We hit a breakpoint before the SIGINT... I will continue stepping to catch them.")
+        address = self.instruction_pointer
+        saved_callbacks = []
+        for bp in self.breakpoints[address]:
+            saved_callbacks.append(bp.callback)
+            bp.callback = None
+        steps = -1
+        try:
+            with context.silent:
+                for i in range(5):
+                    self._step(internal=True) # internal=True: split() calls it while handling a stop that interrupt() may suspend
+                    if self._stop_reason == "SIGINT":
+                        steps = i
+                        break
+        finally:
             for bp, callback in zip(self.breakpoints[address], saved_callbacks):
                 bp.callback = callback
-            res |= INTERRUPT_HIT_BREAKPOINT
-        # Inform eventual continue that we interrupted the program
-        self.__set_stop("interrupted")
+        if address != self.instruction_pointer:
+            log.warn("Oups, I made a mistake trying to catch the SIGINT...")
+        elif steps == -1:
+            log.warn("What the fuck happened with the SIGINT ? I never found it...")
+        else:
+            if DEBUG: self.logger.info(f"found SIGINT in {steps} steps.")
+        self._interrupted = False # Never leave it set: the next SIGINT of the program would be taken for ours
+        return INTERRUPT_HIT_BREAKPOINT
+
+    def __interrupt_inner(self) -> int:
+        """
+        Stop the running process with a SIGINT and wait for that stop, for split() and step(timeout=).
+        Unlike interrupt(), the other actions keep waiting and the process may be resumed afterwards.
+        Returns 0 if the process wasn't running, otherwise INTERRUPT_SENT (| INTERRUPT_HIT_BREAKPOINT)
+        """
+        event = self._priority.claim_if_running("interrupt")
+        if event is None:
+            return 0
+        self.__kick()
+        self._priority_wait(comment="interrupt", priority=event)
+        res = INTERRUPT_SENT
+        if self._interrupted:
+            res |= self.__catch_pending_sigint()
         return res
 
-    def __interrupt_libdebug(self) -> None:
-        pass
-    
-    def __interrupt_new_libdebug(self, priority: int) -> int:
-        self.new_libdebug.interrupt()
-        self._priority_wait(comment="interrupt", priority = priority)
-        self.__set_stop("interrupted")
-        return INTERRUPT_SENT
-
-    # Maybe should be the one returning if the process did stop due to the interrupt or not [13/06/23]
-    # Breakpoint callbacks should be handled before the interruption to simplify the logic and I guess that if we reach a breakpoint and still send a SIGINT the signal will arrive later 
+    # Breakpoint callbacks should be handled before the interruption to simplify the logic and I guess that if we reach a breakpoint and still send a SIGINT the signal will arrive later
     # how do I interrupt in case of remote debugging ?
     # TODO support libdebug [19/06/25]
     @lock_decorator
     @context_decorator
-    def interrupt(self, *, strict: bool = False) -> int | bool | None:
+    def interrupt(self, *, strict: bool = False, timeout: float = 10) -> int | bool | None:
         """
-        In a callback it makes no sense to check if the process is running since for that instant it will be on halt. We therefore use strict to force the interrupt call.
+        Stop the process. When interrupt() returns the process is stopped and nothing will resume it by itself.
+        - Your actions in progress end: a c(wait=False), until(wait=False), next(wait=False) or finish(wait=False) is done
+          (done.interrupted is True) and dbg.priority goes back down. You continue with any action, like c().
+        - The callbacks don't know about it. If one is in the middle of an action (a finish(), an until(), a step over a
+          syscall of a catchpoint) or starts one, that action is suspended: dbg.priority still counts it, the process can't
+          be resumed (Suspended) and resume() lets it go on. When the callback is done the process stays stopped: the
+          action of the script it belonged to is over. A call() is suspended the same way.
+        - A callback that is running is waited for (up to timeout, then a warning is printed). If it returns False, the
+          process stays stopped.
+        Called from a callback, the process stays stopped once the callbacks of this stop are done: the stop goes to the
+        action waiting for it, and there is nothing to resume.
+        strict is ignored (kept for compatibility).
+
+        Returns False if nothing was running, otherwise INTERRUPT_SENT (| INTERRUPT_HIT_BREAKPOINT if the process stopped for a breakpoint first)
         """
-        # claim priority asap
-        priority = self._raise_priority("interrupt")
-        
         if not self.debugging:
-            self._lower_priority("no process to interrupt")
             log.warn_once(DEBUG_OFF)
             return
+
+        manager = self._priority
+        if self.libdebug is not None:
+            if not manager.busy():
+                return False # Nothing to stop: same answer as the other backends
+            raise NotImplementedError(f"interrupt is not implemented for libdebug")
 
         if not context.native:
             log.warn_once("Interrupting process under QEMU may not work!")
 
-        if not strict and not self.running:
-            self._lower_priority("release interrupt")
-            # Must go after the lower_priority() to let other threads see it [19/06/23]
-            # Do I really need a set stop ?? [26/07/23]
-            self.__set_stop("Release interrupt. I didn't have to stop")
-            return False
+        if manager.in_handler():
+            manager.request_stop()
+            return self.__interrupt_inner() or INTERRUPT_SENT
 
-        self._interrupted = True
-        if DEBUG: self.logger.debug("interrupting [pid:%d]", self.pid)
-
-        if self.gdb is not None:
-            return self.__interrupt_gdb(priority)
-        elif self.libdebug is not None:
-            raise NotImplementedError(f"interrupt is not implemented for libdebug")
-            return self.__interrupt_libdebug(priority)
-        elif self.new_libdebug is not None:
-            return self.__interrupt_new_libdebug(priority)
-        else:
-            raise NotImplementedError(f"interrupt is not implemented for the given debugger")
+        if not manager.hold():
+            # Another thread is interrupting: wait for it to finish
+            manager.wait_idle(timeout)
+            return INTERRUPT_SENT
+        try:
+            if not manager.busy():
+                return False
+            if not manager.suspend(self.__kick, timeout, set_aside=self.__set_aside):
+                log.warn(f"[{self.pid}] interrupt(): some callbacks are still running after {timeout}s")
+            res = INTERRUPT_SENT
+            if self._interrupted:
+                res |= self.__catch_pending_sigint()
+            return res
+        finally:
+            manager.release()
 
     manual = interrupt
 
+    @lock_decorator
+    @context_decorator
+    def resume(self) -> bool:
+        """
+        Let the actions of the callbacks (and the call()) that interrupt() suspended go on, as if the process had never been
+        stopped: they receive their stops where they expected them. The process is resumed with the command the interrupt
+        stopped (a continue, or a step blocked in a syscall), or by the callback that was waiting to act. Unlike c() it
+        doesn't start a new action. Once the callbacks are done the process stays stopped.
 
-    def _step(self, signal: int | str = 0x0, timeout: float | None = None) -> bool:
+        Returns False if there was nothing to resume: interrupt() didn't have to suspend anything
+        """
+        if not self.debugging:
+            log.warn_once(DEBUG_OFF)
+            return False
+
+        manager = self._priority
+        if not manager.suspended:
+            log.warn("resume(): there is no interrupt() to undo")
+            return False
+        if manager.busy():
+            log.warn("resume(): the process runs (it was resumed from gdb?). Wait for it to stop first")
+            return False
+        command = manager.resume(put_back=self.__put_back)
+        if command is None:
+            return True
+        try:
+            self.__resume_process(step=command == "step")
+        except BaseException:
+            # The command failed: the process didn't move
+            manager.stopped_externally()
+            raise
+        return True
+
+    def __set_aside(self) -> dict[str, object]:
+        """
+        Called by PriorityManager.suspend() once the suspended layer waits. Its stop handler may be in the middle of a step
+        (the step over a syscall of a catchpoint): its flags must not apply to the other stops until resume(), like the ones
+        of the steps of __catch_pending_sigint(). Returns them and resets them; __put_back() restores them.
+        """
+        state: dict[str, object] = {"stepped": self._stepped, "syscall_return": self._syscall_return}
+        self._stepped = False
+        self._syscall_return = False
+        return state
+
+    def __put_back(self, state: dict[str, object]) -> None:
+        "Called by PriorityManager.resume() before the suspended layer goes on: restore the flags __set_aside() took"
+        self._stepped = state["stepped"]
+        self._syscall_return = state["syscall_return"]
+
+
+    def _step(self, signal: int | str = 0x0, timeout: float | None = None, *, internal: bool = False) -> bool:
             address = self.instruction_pointer
 
             if DEBUG: self.logger.debug("stepping from 0x%x", self.instruction_pointer)
             self._stepped = True
-            if self.gdb is not None:
-                if signal:
-                    self.signal(signal, step=True, timeout=timeout) # This calls step again
-                    finished = True
+            try:
+                if self.gdb is not None:
+                    if signal:
+                        self.signal(signal, step=True, timeout=timeout) # This calls step again
+                        finished = True
+                    else:
+                        event = self.execute_action("si", sender="step", internal=internal, step=True)
+                        finished = self._priority_wait(comment="step", priority=event, timeout=timeout)
+                elif self.libdebug is not None:
+                    event = self.execute_action(lambda: self.libdebug.step(signal=signal), sender="step", internal=internal, step=True)
+                    finished = self._priority_wait(comment="step", priority=event, timeout=timeout)
+                elif self.new_libdebug is not None:
+                    if signal:
+                        self.new_libdebug.signal = signal
+                    event = self.execute_action(lambda: self.new_libdebug.step(), sender="step", internal=internal, step=True)
+                    finished = self._priority_wait(comment="step", priority=event, timeout=timeout)
                 else:
-                    priority = self.execute_action("si", sender="step")
-                    finished = self._priority_wait(comment="step", priority = priority, timeout = timeout)    
-            elif self.libdebug is not None:
-                priority = self.execute_action(lambda: self.libdebug.step(signal=signal), sender="step")
-                finished = self._priority_wait(comment="step", priority = priority, timeout = timeout)
-            elif self.new_libdebug is not None:
-                if signal:
-                    self.new_libdebug.signal = signal
-                priority = self.execute_action(lambda: self.new_libdebug.step(), sender="step")
-                finished = self._priority_wait(comment="step", priority = priority, timeout = timeout)
-            else:
-                raise NotImplementedError(f"step is not implemented for the given debugger")
-            
-            if not finished:
-                if DEBUG: self.logger.warning("Tried to stepped into a syscall. Interrupting...")
-                self.interrupt()
-                self._lower_priority("step interrupted.") # What do you do if interrupt said that you stopped already ?
+                    raise NotImplementedError(f"step is not implemented for the given debugger")
 
-            self._stepped = False
+                if not finished:
+                    if DEBUG: self.logger.warning("Tried to stepped into a syscall. Interrupting...")
+                    # Stop the process for this step only, without touching the other actions. The stop goes to the interrupt,
+                    # so the step then removes its own event
+                    self.__interrupt_inner()
+                    self._priority.lower_priority(event, "step interrupted")
+            finally:
+                self._stepped = False
             return address != self.instruction_pointer
 
 
@@ -2310,18 +2449,20 @@ class Debugger:
         for breakpoint in self.breakpoints[old_ip]:
             saved_callbacks.append(breakpoint.callback)
             breakpoint.callback = None
-        with context.silent:
-            # Let's talk... Usually the problem is with SIGSTOP, right ? There are cases where we jump on a signal, so we won't always have a SINGLE STEP. 
-            #n = self.step_until_condition(lambda self: self.instruction_pointer != old_ip or self._stop_reason == "SINGLE STEP", limit=5)
-            # I don't understand how you can have a stop for single step without changing, but it happens [12/06/23]
-            n = self.step_until_condition(lambda self: self.instruction_pointer != old_ip or self._stop_reason not in ["SIGSTOP", "SINGLE STEP", "BREAKPOINT"], limit=5, timeout=5) # 0.2 is too low when splitting processes # 2 is too low when handling some breakpoints
+        try:
+            with context.silent:
+                # Let's talk... Usually the problem is with SIGSTOP, right ? There are cases where we jump on a signal, so we won't always have a SINGLE STEP.
+                #n = self.step_until_condition(lambda self: self.instruction_pointer != old_ip or self._stop_reason == "SINGLE STEP", limit=5)
+                # I don't understand how you can have a stop for single step without changing, but it happens [12/06/23]
+                n = self.step_until_condition(lambda self: self.instruction_pointer != old_ip or self._stop_reason not in ["SIGSTOP", "SINGLE STEP", "BREAKPOINT"], limit=5, timeout=5) # 0.2 is too low when splitting processes # 2 is too low when handling some breakpoints
+        finally:
+            # Also when a step raises (Interrupted): the callbacks of this address must survive
+            for breakpoint, callback in zip(self.breakpoints[old_ip], saved_callbacks):
+                breakpoint.callback = callback
         if n == -1:
             raise Exception("Could not force step!")
         if n > 0:
             if DEBUG: self.logger.warning("Bug still present. Had to force %d time(s)", n)
-
-        for breakpoint, callback in zip(self.breakpoints[old_ip], saved_callbacks):
-            breakpoint.callback = callback
 
     # For backward compatibility
     exit_broken_function = __broken_step
@@ -2434,18 +2575,20 @@ class Debugger:
     # May not want to wait if you are going over a functions that need user interaction
     @context_decorator
     def next(self, wait: bool = True, repeat: int = 1, hw: bool = False) -> Debugger | Event:
-        done = DoneEvent()
-
         if not self.debugging:
+            done = DoneEvent()
             done.set()
             log.warn_once(DEBUG_OFF)
             return done
-        
-        context.Thread(target=self.__next, args=(repeat, done, hw), name=f"[{self.pid}] next", daemon=True).start()
+
+        self._priority.check_can_resume("next")
+        done = DoneEvent(self._priority)
+        context.Thread(target=self._priority.inherit(self.__next, done), args=(repeat, done, hw), name=f"[{self.pid}] next", daemon=True).start()
         if wait:
             done.wait()
             return self
         else:
+            done.wait_resumed()
             return done
 
     ni = next
@@ -2492,26 +2635,30 @@ class Debugger:
     # May be dependent on the stack frame and cause problems after a jump [27/04/23]
     @context_decorator
     def finish(self, *, wait: bool = True, repeat: int = 1, force: bool = False, hw: bool = False) -> Debugger | Event:
-        done = DoneEvent()    
-        
         if not self.debugging:
+            done = DoneEvent()
             done.set()
             log.warn_once(DEBUG_OFF)
             return done
-        
-        context.Thread(target=self.__finish, args=(repeat, force, done, hw), name=f"[{self.pid}] finish", daemon=True).start()
+
+        self._priority.check_can_resume("finish")
+        done = DoneEvent(self._priority)
+        context.Thread(target=self._priority.inherit(self.__finish, done), args=(repeat, force, done, hw), name=f"[{self.pid}] finish", daemon=True).start()
         if wait:
             done.wait()
             return self
         else:
+            done.wait_resumed()
             return done
 
-    def __jump_gdb(self, address: int) -> None:
-        # BUG setting rip this way may cause problems with si [30/04/23] 
+    def __jump_gdb(self, address: int, internal: bool = False) -> None:
+        # BUG setting rip this way may cause problems with si [30/04/23]
         #self.instruction_pointer = address
+        if not internal:
+            self._priority.check_can_resume("jump")
         self.b(address, temporary=True, user_defined=False)
-        priority = self.execute_action(f"jump *{hex(address)}", sender="jump")
-        self._priority_wait(comment="jump", priority = priority)
+        event = self.execute_action(f"jump *{hex(address)}", sender="jump", internal=internal)
+        self._priority_wait(comment="jump", priority=event)
 
     def __jump_libdebug(self, address: int) -> None:
         self.instruction_pointer = address
@@ -2650,7 +2797,8 @@ class Debugger:
     #         self.dealloc(pointer, len=n, heap=heap)
     #     return_value.put(res) # will be the event that tells me I finished
 
-    def __continue_call(self, backup: list[int], to_free: list[tuple[int, int]], heap: bool, end_pointer: int, return_value: Queue[int], alignment: int) -> None:
+    @set_done_if_panic
+    def __continue_call(self, backup: list[int], to_free: list[tuple[int, int]], heap: bool, end_pointer: int, return_value: Queue[int], alignment: int, done: DoneEvent) -> None:
         #if end_pointer == self.instruction_pointer: # We called the function while on the first instruction, let's just step and continue normally [21/05/23] Wait, why bother ?
         # But this only works for intel processors. Use loop=True instead and you won't care if you started on the first instruction
         self.continue_until(end_pointer, loop=True)
@@ -2698,6 +2846,8 @@ class Debugger:
             log.warn_once(DEBUG_OFF)
             return
 
+        # Before touching the registers: the call would have to resume the process
+        self._priority.check_can_resume("call")
         address = self._parse_address(function)
         if calling_convention is None: calling_convention = function_calling_convention[context.arch]
         if DEBUG: self.logger.debug("calling %s", self.reverse_lookup(address))
@@ -2742,10 +2892,15 @@ class Debugger:
         self.jump(address)
         
         return_value = Queue()
-        context.Thread(target=self.__continue_call, args=(backup, to_free, heap, return_address, return_value, alignment), name=f"[{self.pid}] call", daemon=True).start()
+        # own=True: interrupt() suspends the call like an action of a callback instead of ending it, so that the registers are
+        # restored only once the function has returned
+        done = DoneEvent(self._priority)
+        context.Thread(target=self._priority.inherit(self.__continue_call, done, own=True), args=(backup, to_free, heap, return_address, return_value, alignment, done), name=f"[{self.pid}] call", daemon=True).start()
         if wait:
+            done.wait()
             return return_value.get()
         else:
+            done.wait_resumed()
             log.warn_once("you decided not to wait for the call to finish. I return a queue to the return value of the function. When you need it use .get() to wait for the call to finish")
             return return_value
 
@@ -2777,6 +2932,7 @@ class Debugger:
             log.warn_once(DEBUG_OFF)
             return self
 
+        self._priority.check_can_resume("signal")
 
         # To send a signal ptrace has to resume the execution of the process so we put a breakpoint and wait for the handler to finish executing
         # If the code is self modifying you must use handler otherwise the breakpoint will be overwritten with bad code [26/02/23]
@@ -4583,24 +4739,25 @@ class Debugger:
                     pid = inferior.pid        
                     #self.to_split.put(pid)
                     def split(inferior: Inferior) -> None:
-                        # claim priority asap
-                        self._raise_priority("split")
-                        stopped = self.interrupt(strict=True)
+                        # Runs in its own HandlerContext, like a stop: interrupt() waits for it, and the stops it delivers go to
+                        # the action that was running when the fork happened
+                        stopped = self.__interrupt_inner()
                         log.info(f"splitting child: {inferior.pid}")
-                        # Am I the reason why the process stopped ?
                         self.children[pid] = self.__silence(self._split_child, inferior=inferior, script=script)
-                        # Should not continue if I reached the breakpoint before the split
-                        self._lower_priority("release split")
                         self.split.put(pid)
-                        if not interrupt and stopped & INTERRUPT_SENT and not stopped & INTERRUPT_HIT_BREAKPOINT:
-                            self.__hidden_continue()
-                        elif interrupt:
+                        if not stopped:
+                            # Someone else stopped the process and will decide what happens next
+                            return
+                        if interrupt:
                             self.__set_stop("forked")
-                        else:
+                        elif stopped & INTERRUPT_HIT_BREAKPOINT:
+                            # Our interrupt took the stop of a breakpoint: give it to the action waiting for it
                             self.__set_stop("We hit a breakpoint while interrupting the process. Handle it!")
-                                
+                        else:
+                            self.__hidden_continue()
+
                     ## Non puoi eseguire azioni dentro ad un handler degli eventi quindi lancio in un thread a parte
-                    context.Thread(target=split, args = (inferior,), name=f"[{self.pid}] split_fork", daemon=True).start()
+                    self.__spawn_handler(split, inferior, name=f"[{self.pid}] split_fork", handler_context=self._priority.open_context("split"))
 
                 self.fork_handler = fork_handler
                 self.gdb.events.new_inferior.connect(self.fork_handler)
