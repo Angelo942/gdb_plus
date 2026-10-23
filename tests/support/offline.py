@@ -101,7 +101,7 @@ def offline_debugger(*, exe=None, registers=None, memory=None, libraries=None, r
         _context_params=context.copy(), _cached_registers={}, _args=None, _sys_args=None, _free_bss=None,
         _canary=None, _saved_auxiliary_vector=None, _handled_signals={}, _capstone=None, children={},
         breakpoints={}, memory=memory if memory is not None else FakeMemory(), executed=[], execute_results={},
-        raw_maps=raw_maps, download_libraries=False, gdbserver_qemu=None, _closed=Event(),
+        raw_maps=raw_maps, download_libraries=False, gdbserver_qemu=None, _qemu_guest_base=0, _closed=Event(),
     )
     state.update(attributes)
     dbg.__dict__.update(state)

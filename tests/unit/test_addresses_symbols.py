@@ -216,6 +216,53 @@ def test_libs_under_qemu_ignore_the_emulator():
     assert list(libs) == ["/tmp/risky", "/usr/riscv64-linux-gnu/lib/libc.so.6"]
 
 
+def qemu_32bit_host_maps(path, load):
+    """/proc/<qemu pid>/maps of qemu-mips running `path` loaded at guest address `load`, with guest_base 0x10000."""
+    host = load + 0x10000
+    return f"""\
+00010000-{host:08x} ---p 00000000 00:00 0
+{host:08x}-{host + 0x1000:08x} r--p 00000000 08:02 1234                       {path}
+{host + 0x1000:08x}-{host + 0x10000:08x} ---p 00000000 00:00 0
+{host + 0x10000:08x}-{host + 0x12000:08x} r--p 00000000 08:02 1234                       {path}
+{host + 0x21000:08x}-{host + 0x22000:08x} rw-p 00001000 08:02 1234                       {path}
+{host + 0x22000:08x}-{host + 0x26000:08x} rw-p 00000000 00:00 0
+100010000-100020000 ---p 00000000 00:00 0
+5555555c0000-5555556c0000 r-xp 00000000 08:02 77                         /usr/bin/qemu-mips
+"""
+
+
+@pytest.mark.parametrize("load", [0x10000, 0x400000], ids=["exec", "moved"])
+def test_qemu_32bit_maps_are_translated_to_guest_addresses(load):
+    """
+    qemu-user places a 32-bit guest at guest_base (vm.mmap_min_addr) in its own memory: dbg.maps and dbg.libs translate
+    the host maps back to guest addresses, using AT_PHDR from the auxiliary vector to find guest_base, and drop what is
+    outside the guest address space.
+    """
+    path = str(TESTS / "fixtures" / "bin" / "basic_mips")
+    with context.local(arch="mips"):
+        exe = EXE(path, checksec=False)
+        auxv = f"3    AT_PHDR              Program headers for program    {load + 0x34:#x}\n"
+        dbg = offline_debugger(exe=exe, raw_maps=qemu_32bit_host_maps(path, load), execute_results={"info auxv": auxv},
+                               _qemu_guest_base=None)
+        assert dbg.libs == {path: [load, load + 0x22000]}
+        assert dbg._qemu_guest_base == 0x10000
+        assert 0 in dbg.maps  # qemu's reservation of the guest space starts at guest address 0
+        assert all(start + size <= 1 << 32 for start, size in dbg.maps.items())
+        dbg._set_range(exe)
+    assert exe.address == load
+    assert exe.end_address == load + 0x26000  # .bss included
+
+
+def test_qemu_maps_stay_untranslated_without_auxv():
+    """When the auxiliary vector can't be read the host maps are used as they are, and guest_base is searched again later."""
+    path = str(TESTS / "fixtures" / "bin" / "basic_mips")
+    with context.local(arch="mips"):
+        dbg = offline_debugger(exe=EXE(path, checksec=False), raw_maps=qemu_32bit_host_maps(path, 0x10000),
+                               _qemu_guest_base=None)
+        assert dbg.libs == {path: [0x20000, 0x42000]}
+        assert dbg._qemu_guest_base is None
+
+
 def test_set_range_finds_the_executable():
     """_set_range() finds the executable in the maps and sets its base and end address."""
     with context.local(arch="amd64"):
@@ -224,7 +271,7 @@ def test_set_range_finds_the_executable():
         dbg = offline_debugger(raw_maps=PROC_MAPS)
         dbg._set_range(exe)
     assert exe.address == 0x555555554000
-    assert exe.end_address == 0x555555556000
+    assert exe.end_address == exe.address + exe.mapped_size  # from the program headers, not the maps
 
 
 def test_loader_can_be_set():

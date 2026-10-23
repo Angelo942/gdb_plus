@@ -160,6 +160,7 @@ class Debugger:
         self.new_libdebug: NewLibdebugDebugger | None = None
 
         self.gdbserver_qemu = qemu_gdbserver # Debug remote qemu itself to access process maps
+        self._qemu_guest_base: int | None = None # See __qemu_guest_base
 
         # Additional informations on the debugging context.
         self._gef = False
@@ -4334,36 +4335,81 @@ class Debugger:
             # log.warn_once("can not access maps under QEMU.")
             return ""
         return maps_raw
-        
 
-    # Quick attempt to find maps
-    # How to handle QEMU ? 
-    @property
-    @context_decorator
-    def maps(self) -> dict[int, int]:
-        maps = {}
-        for line in self.__raw_maps().splitlines():
-            if not context.native and "/qemu-" in line:
-                if "-static" in line: # Qemu static can be located at the top of our memory, so we shouldn't stop. Since it  doesn't import libraries it is not a problem for us to read all maps [19/05/25]
+    def __parse_maps(self, maps_raw: str) -> list[tuple[int, int, str | None]]:
+        """
+        (start, end, path) of every mapping listed by /proc/pid/maps or `info proc map`, path None for anonymous ones.
+        Under QEMU the list stops at the qemu binary: what follows are the emulator's own libraries.
+        """
+        entries = []
+        for line in maps_raw.splitlines():
+            path = line[line.index('/'):].strip() if '/' in line else None # gdb 17 pads the File column of info proc map with a trailing space
+            if not context.native and path is not None and "/qemu-" in path:
+                if "-static" in path: # Qemu static can be located at the top of our memory, so we shouldn't stop. Since it  doesn't import libraries it is not a problem for us to read all maps [19/05/25]
                     continue
                 else:
                     break
-            start = end = None
             # /proc/pid/maps uses "start-end", while info proc map uses "start    end"
-            for part in line.replace("-", " ").split(" "):
-                if part:
-                    if start is None:
-                        start = part
-                    elif end is None:
-                        end = part
-                        break
-            if start is not None and end is not None:
-                try:
-                    maps[int(start, 16)] = int(end, 16) - int(start, 16)
-                except ValueError:
-                    # I don't want to bother parsing properly the first n lines of comments and headers
-                    pass
-        return maps
+            parts = line.replace("-", " ").split()
+            try:
+                entries.append((int(parts[0], 16), int(parts[1], 16), path))
+            except (IndexError, ValueError): # Headers of info proc map
+                continue
+        return entries
+
+    def __qemu_guest_base(self, entries: list[tuple[int, int, str | None]]) -> int:
+        """
+        Offset qemu-user adds to every guest address to place it in its own memory (guest_base): 0 for 64-bit guests,
+        usually vm.mmap_min_addr for 32-bit ones, whose whole 4 GB space qemu reserves starting from guest address 0.
+        Found by comparing where the host maps (`entries`, untranslated) place the executable with the guest address of
+        its program headers in the auxiliary vector (AT_PHDR). Cached, since qemu chooses it once for its lifetime.
+        Returns 0 with a warning when it can't be found.
+        """
+        if self._qemu_guest_base is not None:
+            return self._qemu_guest_base
+        exe = self._exe
+        host_start = phdr = segment = None
+        if exe is not None:
+            host_start = next((start for start, _, path in entries if path is not None and Path(path).name == exe.name), None)
+            try:
+                auxv = self.execute("info auxv")
+            except Exception:
+                auxv = ""
+            for line in auxv.splitlines():
+                parts = line.split()
+                if len(parts) > 2 and parts[1] == "AT_PHDR":
+                    phdr = int(parts[-1], 16)
+            loads = [seg.header for seg in exe.iter_segments_by_type("PT_LOAD")]
+            phoff = exe.header.e_phoff
+            segment = next((h for h in loads if h.p_offset <= phoff < h.p_offset + h.p_filesz), None)
+        if host_start is None or phdr is None or segment is None:
+            log.warn_once("can not find where QEMU places the guest memory: maps and libs may use host addresses")
+            return 0
+        # The program headers are loaded with the segment that contains them: this gives the load bias of a PIE (0 otherwise)
+        load_bias = phdr - (segment.p_vaddr + phoff - segment.p_offset)
+        guest_start = load_bias + (min(h.p_vaddr for h in loads) & ~0xfff)
+        self._qemu_guest_base = host_start - guest_start
+        return self._qemu_guest_base
+
+    def __maps_entries(self) -> list[tuple[int, int, str | None]]:
+        """
+        (start, end, path) of every mapping of the debugged program, in the program's own address space.
+        Under qemu-user the maps come from the emulator process, in host addresses: they are translated to guest
+        addresses and the mappings outside the guest address space are dropped.
+        """
+        entries = self.__parse_maps(self.__raw_maps())
+        # Only a remote gdbserver with a known pid lists the guest maps itself
+        if context.native or context.os == "baremetal" or not (self.local_debugging or self.pid is None) or not entries:
+            return entries
+        guest_base = self.__qemu_guest_base(entries)
+        guest_size = 1 << context.bits
+        return [(start - guest_base, end - guest_base, path) for start, end, path in entries if guest_base <= start and end - guest_base <= guest_size]
+
+    @property
+    @context_decorator
+    def maps(self) -> dict[int, int]:
+        """Start address -> size of every mapping of the debugged program."""
+        return {start: end - start for start, end, _ in self.__maps_entries()}
 
     # I copied it from pwntools to have access to it even if I attach directly to a pid 
     # We still need pwntools when we are not debugging the process. It is needed for example to access the libc while pwning a remote challenge. 
@@ -4371,7 +4417,6 @@ class Debugger:
     # The main advantage now though is just the speed of not having to run a new process every time we call the function if we are already debugging it.
     # If we are working under QEMU and not debugging the process pwntools implementations of elf.libs may fail. If you see this problem we will need to run a debugger ourselves.
     # The idea of using fake_terminal.py is terrible. Somehow it is 3 times slower, so it's not worth it just to prevent having a terminal popping up.
-    # TODO avoid code duplication from maps
     @property
     @context_decorator
     def libs(self) -> dict[str, list[int]]:
@@ -4393,80 +4438,29 @@ class Debugger:
                         return dbg.libs
             else:
                 return {}
-
-        maps_raw = self.__raw_maps()
-
-        # Enumerate all of the libraries actually loaded right now.
+        # Enumerate all of the libraries actually loaded right now: [first start, last end] of the pages of each file
         maps = {}
-        for line in maps_raw.splitlines():
-            if '/' not in line: continue
-            path = line[line.index('/'):].strip() # gdb 17 pads the File column of info proc map with a trailing space
-            if not context.native and "/qemu-" in path: # Everything after the QEMU binary is only libs for QEMU that we don't want. Be careful though if this breaks something [04/02/25]
-                if "-static" in path: # Qemu static can be located at the top of our memory, so we shouldn't stop. Since it  doesn't import libraries it is not a problem for us to read all maps [19/05/25]
-                    continue
-                else:
-                    break
-        
-            start = end = None
-            # /proc/pid/maps uses "start-end", while info proc map uses "start    end"
-            for part in line.replace("-", " ").split(" "):
-                if part:
-                    if start is None:
-                        start = part
-                    elif end is None:
-                        end = part
-                        break
+        for start, end, path in self.__maps_entries():
+            if path is None:
+                continue
             if path not in maps:
-                maps[path] = [int(start, 16)]
-            maps[path].append(int(end, 16))
-        
-        for path in maps:
-            maps[path] = [maps[path][0], maps[path][-1]] # Keep only start and end of the file in memory
-
+                maps[path] = [start, end]
+            maps[path][-1] = end
         return maps
 
     @context_decorator
     def _set_range(self, file: EXE) -> None:
+        """
+        Set the base address of `file` to the first page the program maps from it. The end of the range comes from the
+        program headers (EXE.end_address), so it includes the .bss that the maps list without a path.
+        """
         if not self.debugging:
             return
-
         for path, addresses in self.libs.items():
             if file.name == Path(path).name:
-                address = addresses[0]
-                file.end_address = addresses[-1]
-                break
-        else:
-            log.warn(f"can not find {file.name} in the binaries loaded in gdb")
-            return
-
-        # NOTE: Can not trust libs to find the correct page [06/01/25]
-        # BUG Sometimes with arm we have the same binary at both 0x10000 and 0x20000, vmmap detects the second one, while we should use the first for the offsets... [20/01/25]
-        if context.arch in ["riscv32", "riscv64", "arm", "mips", "mips64"]:
-            offset = file.size // 100 - (file.size // 100 % 8) # Random place to avoid the ELF part that could be common between multiple libraries
-            while file.data[offset:offset+8] == b"\x00" * 8:
-                offset += 8
-            if file.data[offset:offset+0x8] != self.read(address+offset, 8):
-                log.warn_once(f"QEMU messed up the {file.name} base. Trying to find correct address...")
-                for address in list(self.maps) + list(map(lambda x: x - 0x10000, self.maps)): # I test both address and address - 0x1000 which is the typical error in QEMU
-                    try:
-                        if file.data[offset:offset+0x8] == self.read(address+offset, 8):
-                            log.success(f"Found address {hex(address)}!")
-                            break
-                    except: # Some pages are not readable in QEMU...
-                        continue
-                else:
-                    log.failure(f"can't find {file.name} address. Consider disabling ASLR.")
-                    file.address = 0
-                    return
-        
-            try:
-                if file.data[offset:offset+0x8] == self.read(address+offset-0x10000, 8):
-                    log.warn_once(f"[{file.name}] We are not sure between {hex(address)} and {hex(address - 0x10000)}. We are assuming the second one")
-                    address -= 0x10000
-            except:
-                pass
-
-        file.address = address
+                file.address = addresses[0]
+                return
+        log.warn(f"can not find {file.name} in the binaries loaded in gdb")
 
     # How does this interact with remote debugging ? [26/03/25]
     # Let's introduce local_path hoping it's enough and call it a day for now. [26/03/25]
