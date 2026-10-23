@@ -1531,7 +1531,9 @@ class Debugger:
             inferior = self.current_inferior
             if DEBUG: self.logger.debug("I'm inferior %d, [pid: %d]", inferior.num, inferior.pid)
             sleep(0.1)
-        self.pid = self.current_inferior.pid
+        pid = self.current_inferior.pid
+        if pid not in (None, 1, 42000): # The gdbstub of qemu reports a fake pid: keep the one of the emulator
+            self.pid = pid
         return old_inferior
 
     @property
@@ -3594,23 +3596,53 @@ class Debugger:
         except Exception:
             return None
 
+    def __write_qemu_host(self, address: int, data: bytes) -> bool:
+        """
+        Write `data` at the guest `address` directly in the memory of the qemu-user process that emulates the program, at
+        guest address + guest_base: /proc/<pid>/mem for a local qemu, the gdb attached to qemu (gdbserver_qemu) for a
+        remote one. The protections of the guest pages don't apply there.
+        Returns False, without writing, when the emulator's memory or guest_base aren't known.
+        """
+        if context.native or context.os == "baremetal" or not (self.local_debugging or self.pid is None):
+            return False
+        guest_base = self.__qemu_guest_base(self.__parse_maps(self.__raw_maps()))
+        if self._qemu_guest_base is None: # Writing at a guessed address could corrupt qemu itself
+            return False
+        if self.local_debugging:
+            with open(f"/proc/{self.pid}/mem", "r+b", buffering=0) as mem:
+                mem.seek(address + guest_base)
+                mem.write(data)
+        else:
+            was_running = self.gdbserver_qemu.interrupt()
+            self.gdbserver_qemu.write(address + guest_base, data)
+            if was_running:
+                self.gdbserver_qemu.c(wait=False)
+        return True
+
     # qemu doesn't allow writing in non writable pages [23/08/24]
     @context_decorator
     def __write_gdb(self, address: int, data: bytes, *, inferior: Inferior | None = None) -> None:
-
-        if inferior == None:
+        """
+        Write `data` at `address` of `inferior` (the current one by default) through gdb.
+        Under qemu-user the gdbstub refuses to write a guest page that isn't writable, and qemu write-protects every page
+        it has translated code from, so mprotect isn't enough for the code being executed. The bytes of the current
+        inferior are then written in the emulator's own memory; only when that isn't accessible (a remote qemu without
+        gdbserver_qemu) does it try mprotect.
+        """
+        current = inferior is None or inferior == self.current_inferior
+        if inferior is None:
             inferior = self.current_inferior
-        
         try:
             inferior.write_memory(address, data)
         except Exception as e: #gdb.MemoryError
-            if not context.native:
-                log.warn_once("QEMU is preventing to write on the page. Changing permissions...") # Warn only once because QEMU will reset the protection at each step and it would spam the user of errors [16/01/25]
-                self.make_page_rwx(address, len(data))
-                inferior.write_memory(address, data)
-                log.warn_once("Successfully changed permissions.")
-            else:
+            if context.native:
                 raise
+            if current and self.__write_qemu_host(address, data):
+                return
+            log.warn_once("QEMU is preventing to write on the page. Changing permissions...") # Warn only once because QEMU will reset the protection at each step and it would spam the user of errors [16/01/25]
+            self.make_page_rwx(address, len(data))
+            inferior.write_memory(address, data)
+            log.warn_once("Successfully changed permissions.")
 
     # How to handle multiple processes ?
     def __write_libdebug(self, address: int, data: bytes, *, pid: int | None = None) -> None:
@@ -3628,7 +3660,6 @@ class Debugger:
         if DEBUG: self.logger.debug("writing %s at 0x%x", data.hex(), address)
         
         # BUG: GDB may write in the wrong inferior...
-        # BUG: GDB with QEMU can not write in non writable pages
         if self.gdb is not None:
             if inferior is None and pid is not None:
                 inferior = self.inferior_from_pid(pid)

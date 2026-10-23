@@ -14,13 +14,6 @@ CALL_HANGS = {
 }
 
 
-def _qemu_code_write(test):
-    """qemu-user refuses gdb's writes to the guest's code pages, even after mprotect (BUG note on gdb_plus.py:syscall)"""
-    for arch in ["aarch64", "riscv32", "riscv64"]:
-        test = pytest.mark.known_gap(arch, "syscall() writes its syscall instruction over the code at the instruction pointer: qemu-user refuses gdb's writes to the guest's code pages, even after mprotect")(test)
-    return test
-
-
 def call_hangs(test):
     for arch, reason in CALL_HANGS.items():
         test = pytest.mark.known_gap(arch, reason, run=False)(test)
@@ -241,7 +234,6 @@ def test_syscall_result_is_visible_to_the_program(dbg, sysno):
 
 @call_hangs
 @pytest.mark.known_gap("new_libdebug", "syscall() restores the registers with restore_backup(), which writes orig_rax: new libdebug has no such register")
-@_qemu_code_write
 def test_syscall_with_buffers_in_the_bss(dbg, sysno):
     """
     syscall(..., heap=False) copies its bytes arguments into the bss instead of the heap: write(1, buffer) still prints

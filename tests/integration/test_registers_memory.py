@@ -405,6 +405,8 @@ def test_inject_shellcode(dbg):
     assert dbg.call(address) == 0x1337
 
 
+@pytest.mark.known_gap("arm", "interrupt() never returns while the qemu-user guest spins in the injected loop (gdb_plus.py:interrupt)", run=False)
+@pytest.mark.known_gap("aarch64", "interrupt() never returns while the qemu-user guest spins in the injected loop (gdb_plus.py:interrupt)", run=False)
 def test_inject_sleep(dbg):
     """
     inject_sleep() writes an infinite loop over a function (used by debug_from and fork splitting to park a process);
@@ -450,12 +452,6 @@ def test_disassemble(dbg):
     assert dbg.next_inst.toString() == f"{dbg.next_inst.mnemonic} {dbg.next_inst.op_str}".strip()
 
 
-def _qemu_code_write(test):
-    for arch in ["arm", "aarch64", "riscv32", "riscv64", "mips", "mips64"]:
-        test = pytest.mark.known_gap(arch, "qemu-user refuses gdb's writes to the guest's code pages, even after mprotect (BUG note on gdb_plus.py:syscall)")(test)
-    return test
-
-
 def _return_through_injected_code(dbg, **options):
     """Overwrite inner() with a function returning 0x1337 and check that outer() gets it"""
     return_address = after_call(call_to(dbg, "outer", "inner"))
@@ -467,7 +463,6 @@ def _return_through_injected_code(dbg, **options):
     assert dbg.return_value == 0x1337
 
 
-@_qemu_code_write
 @pytest.mark.known_gap("libdebug", "make_page_rwx() tests self._gdb, an attribute Debugger doesn't have (only gdb's own attributes answer it through __getattr__)")
 @pytest.mark.known_gap("new_libdebug", "make_page_rwx() calls mprotect with call(), whose restore_backup() writes orig_rax: new libdebug has no such register")
 def test_inject_shellcode_over_a_function(dbg):
@@ -478,7 +473,6 @@ def test_inject_shellcode_over_a_function(dbg):
     _return_through_injected_code(dbg)
 
 
-@_qemu_code_write
 def test_inject_shellcode_without_mprotect(dbg):
     """
     inject_shellcode(address=, skip_mprotect=True) writes over inner() without changing the page permissions (the

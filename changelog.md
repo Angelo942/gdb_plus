@@ -1,6 +1,7 @@
 GDB+ 7.6.0 **New libdebug**
 * Significant speed-up for GDB
 * Fix race conditions in interrupt
+* Fix write in QEMU
 * Intruduce minimal support for new libdebug
 * address = dbg.write(None, data) allocates memory to store data
 * Improve callback handling for syscall catchpoints
