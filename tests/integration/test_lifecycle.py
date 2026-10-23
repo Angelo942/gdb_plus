@@ -142,6 +142,7 @@ def test_aslr(debugger, basic, backend):
     assert debugger(basic, aslr=False, backend=backend).libc.address != fixed[0]
 
 
+# BUG: The symbols don't get updated once we change the address
 @NO_LOCAL_PROCESS
 @NO_ATTACH_UNDER_QEMU
 def test_attach_to_process(debugger, basic, backend):
@@ -272,7 +273,7 @@ def test_repr(debugger, basic, backend):
     assert repr(dbg).startswith(f"Debugger [{dbg.pid}] <not running>")
 
 
-@pytest.mark.known_gap("new_libdebug", "interrupt() raises NotImplementedError")
+@pytest.mark.known_gap("libdebug", "interrupt() raises NotImplementedError for the legacy libdebug")
 @QEMU_BLOCKED_READ
 def test_running(debugger, basic, backend):
     """dbg.running is False while stopped, True after c(wait=False) and False again after interrupt()."""

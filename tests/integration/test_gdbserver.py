@@ -67,6 +67,22 @@ def test_executable_is_found_without_binary(debugger, server, basic):
     assert dbg.exe.name == "basic"
 
 
+@pytest.mark.xfail(strict=True, reason="pwnlib.gdb.attach((host, port)) without exe looks for the gdbserver with "
+                                       "proc.pidof((host, port)), which matches the processes connected to that address, "
+                                       "never the listening one: no exe, no pid, it raises before find_executable() can "
+                                       "read `info proc` (gdb_plus.py:__attach_gdb)")
+def test_attach_without_binary_finds_the_executable(debugger, server, basic):
+    """
+    Debugger((host, port)) with no binary= asks gdb which file the remote process runs (`info proc`) and loads it: on a
+    gdbserver of this machine dbg.exe is the fixture and its symbols resolve to the remote process.
+    """
+    dbg = debugger(server, aslr=False)
+    assert dbg.exe is not None
+    assert Path(dbg.exe.path).resolve() == Path(basic).resolve()
+    assert dbg.instruction_pointer == dbg.exe.entry
+    assert dbg.symbols["tick"] == dbg.exe.symbols["tick"]
+
+
 def test_download_libraries(debugger, server, basic):
     """download=True copies the remote libc into ./gdb_files and dbg.libc points at that copy."""
     dbg = debugger(server, binary=basic, download=True)

@@ -29,8 +29,9 @@ sys.path.insert(1, str(TESTS))
 
 from support import environment  # noqa: E402
 
-# Saves every result in tests/.results/ for the dashboard (python3 tests/dashboard/server.py)
-pytest_plugins = ["support.results"]
+# Saves every result in tests/.results/ for the dashboard (python3 tests/dashboard/server.py);
+# --affected runs only the tests that reach the changed code (support/affected.py)
+pytest_plugins = ["support.results", "support.affected"]
 
 # The legacy suite lives next to us until it is deleted. Don't collect it (test_performances runs at import).
 collect_ignore = ["test.py", "test_old.py", "test_Structure.py", "test_new_libdebug.py", "test_performances.py"]
@@ -159,6 +160,15 @@ def pytest_runtest_call(item):
         signal.signal(signal.SIGALRM, previous)
 
 
+# The watchdog of the running test (deadline and log). faulthandler has a single timer per process: one test at a time.
+_watchdog = {}
+
+
+def _arm_watchdog():
+    remaining = max(1, _watchdog["deadline"] - time.monotonic())
+    faulthandler.dump_traceback_later(remaining, exit=True, file=_watchdog["stream"])
+
+
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_protocol(item, nextitem):
     # SIGALRM can't interrupt a main thread stuck inside C code (libdebug's waitpid...). Last resort: if the
@@ -169,14 +179,23 @@ def pytest_runtest_protocol(item, nextitem):
     # Not stderr: pytest captures it and the buffered report is lost when faulthandler calls _exit()
     with open(WATCHDOG_LOG, "w") as log:
         log.write(f"{item.nodeid} took more than {hard_limit:.0f}s. The run was stopped. Threads:\n\n")
-    stream = open(WATCHDOG_LOG, "a")
-    faulthandler.dump_traceback_later(hard_limit, exit=True, file=stream)
+    _watchdog.update(deadline=time.monotonic() + hard_limit, stream=open(WATCHDOG_LOG, "a"))
+    _arm_watchdog()
     try:
         yield
     finally:
         faulthandler.cancel_dump_traceback_later()
-        stream.close()
+        _watchdog["stream"].close()
+        _watchdog.clear()
         WATCHDOG_LOG.unlink(missing_ok=True)
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_exception_interact(node, call, report):
+    # pytest's faulthandler plugin cancels the timer whenever a test fails (it is meant for --pdb): arm it again,
+    # or a teardown that hangs after a failure is never stopped. Not under --pdb, where someone is debugging.
+    if _watchdog and not node.config.getoption("usepdb"):
+        _arm_watchdog()
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -346,6 +365,29 @@ def _process_alive(pid):
         return False
 
 
+def _kill(pids):
+    for pid in pids:
+        if _process_alive(pid):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+
+
+def _descendants(pid):
+    """Every process below pid, read from /proc/<pid>/task/*/children."""
+    found, todo = [], [pid]
+    while todo:
+        for task in Path(f"/proc/{todo.pop()}/task").glob("*"):
+            try:
+                children = [int(child) for child in (task / "children").read_text().split()]
+            except OSError:
+                continue
+            found += children
+            todo += children
+    return found
+
+
 def _shutdown(dbg, *, seconds=20):
     """Close a debugger without ever hanging the suite, then kill whatever survived."""
     from pwn import context
@@ -355,8 +397,13 @@ def _shutdown(dbg, *, seconds=20):
     def expired(signum, frame):
         raise TestTimeout("close() hung")
 
+    # SIGALRM only interrupts Python code: a close() blocked in C (on a lock, in a read) never sees it.
+    # Killing the processes from another thread closes the pipes and sockets such a close() waits on.
+    killer = threading.Timer(seconds, _kill, args=(pids,))
+    killer.daemon = True
     previous = signal.signal(signal.SIGALRM, expired)
-    signal.alarm(seconds)
+    killer.start()
+    signal.alarm(seconds + 5)
     try:
         with context.silent:
             for d in debuggers:
@@ -367,14 +414,10 @@ def _shutdown(dbg, *, seconds=20):
     except TestTimeout:
         pass
     finally:
+        killer.cancel()
         signal.alarm(0)
         signal.signal(signal.SIGALRM, previous)
-    for pid in pids:
-        if _process_alive(pid):
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
+    _kill(pids)
 
 
 def _kill_terminals_of(log):
@@ -404,16 +447,29 @@ def _start_gdbserver(target, *, env=None):
     listening = threading.Event()
 
     # Don't probe the port: gdbserver would take the probe for the debugger
-    def watch(stream):
-        for line in iter(stream.readline, b""):
-            if b"Listening on port" in line:
-                listening.set()
+    # Read a copy of the pipe with os.read: a thread blocked in stream.readline() holds the lock of the stream and
+    # process.close() would wait for it as long as anything keeps the pipe open (the inferior inherits it).
+    def watch(fd):
+        seen = b""
+        try:
+            while chunk := os.read(fd, 0x1000):
+                seen = (seen + chunk)[-0x100:]
+                if b"Listening on port" in seen:
+                    listening.set()
+        finally:
+            os.close(fd)
 
-    threading.Thread(target=watch, args=(server.proc.stderr,), name="gdbserver_stderr", daemon=True).start()
+    threading.Thread(target=watch, args=(os.dup(server.proc.stderr.fileno()),), name="gdbserver_stderr", daemon=True).start()
     if not listening.wait(10):
-        server.close()
+        _stop_gdbserver(server)
         raise RuntimeError("gdbserver did not start")
     return server, ("127.0.0.1", port)
+
+
+def _stop_gdbserver(server):
+    """Kill gdbserver's inferior before gdbserver: a detached or orphaned inferior would outlive it."""
+    _kill(_descendants(server.pid))
+    server.close()
 
 
 @pytest.fixture
@@ -426,13 +482,28 @@ def debugger(request):
     (the target is the binary of that arch: use the `basic` / target_binary fixtures).
 
     Every debugger is closed after the test, even if it fails or hangs. If the test passed we also
-    check the invariant every legacy test asserted by hand: the wait priority is back to 0.
+    check the invariant every legacy test asserted by hand: the wait priority is back to 0 (the actions interrupt()
+    suspended excepted).
     Opt out with @pytest.mark.allow_priority_leak.
     """
     from gdb_plus import Debugger
     from pwn import context
     from support.results import BACKENDS
     created = []
+
+    def build(target, **kwargs):
+        # A Debugger whose __init__ raises is never returned to us, but its gdb may already hold the process
+        # (a qemu gdbstub then never lets the guest exit). Build it in two steps to still be able to close it.
+        dbg = Debugger.__new__(Debugger)
+        try:
+            dbg.__init__(target, **kwargs)
+        except BaseException:
+            try:
+                _shutdown(dbg)
+            except Exception:  # half initialized: even reading an attribute may fail through __getattr__
+                pass
+            raise
+        return dbg
 
     def factory(target, *, backend="gdb", **kwargs):
         if isinstance(target, Path):
@@ -445,13 +516,13 @@ def debugger(request):
             binary = kwargs.pop("binary", target if isinstance(target, str) else None)
             server, address = _start_gdbserver(target, env=env)
             try:
-                dbg = Debugger(address, binary=binary, **kwargs)
+                dbg = build(address, binary=binary, **kwargs)
             except BaseException:
-                server.close()
+                _stop_gdbserver(server)
                 raise
             dbg.p = server
         else:
-            dbg = Debugger(target, **kwargs)
+            dbg = build(target, **kwargs)
         created.append(dbg)
         if backend == "libdebug":
             dbg.migrate(libdebug=True)
@@ -470,6 +541,8 @@ def debugger(request):
             with context.silent:
                 if dbg.running:  # a c(wait=False) still in flight legitimately holds a priority
                     continue
+            if dbg._priority.suspended:  # so do the actions interrupt() suspended, until resume()
+                continue
             deadline = time.time() + 2
             while dbg.priority != 0 and time.time() < deadline:
                 time.sleep(0.05)

@@ -4,7 +4,7 @@ from queue import Queue
 import pytest
 from pwn import context
 
-from gdb_plus import SKIP_SYSCALL
+from gdb_plus import SKIP_SYSCALL, Suspended
 from support.targets import registers
 
 
@@ -72,7 +72,7 @@ def test_catch_syscall_rewrites_arguments(dbg):
     assert dbg.p.recvline(timeout=5) == b"rewritten\n"
     dbg.interrupt()
 
-
+# BUG: Another race condition around interrupt. It returns too fast.
 @NO_CATCHPOINTS
 def test_skip_syscall(dbg):
     """
@@ -88,6 +88,7 @@ def test_skip_syscall(dbg):
     dbg.c(wait=False)
     assert dbg.p.recvline(timeout=5) == b"pid %d\n" % dbg.pid
     dbg.interrupt()
+    print(dbg.priority)
 
 
 @NO_CATCHPOINTS
@@ -196,6 +197,67 @@ def test_strace_exclude(dbg, capfd):
     output = capfd.readouterr().out
     assert "getpid()" in output
     assert "write(" not in output
+
+
+@NO_CATCHPOINTS
+@pytest.mark.not_applicable("qemu", "qemu-user can't stop a guest blocked in a syscall: the interrupt waits for read() to return (gdb_plus warns about it)")
+def test_resume_a_syscall_callback_interrupted_in_a_blocking_read(dbg):
+    """
+    The entry callback of a read() catchpoint returns False, so gdb_plus steps over the syscall, which blocks waiting for
+    input. interrupt() ends the script's c(wait=False) but suspends that step, without the handler noticing. After the
+    input and resume() the step ends and the exit callback receives the 4 bytes of the line; then the process stays
+    stopped, since the continue is over.
+    """
+    events = Queue()
+    reading = []
+
+    def callback(d, entry):
+        if entry and d.syscall_args[0] == 0:
+            reading.append(True)
+            events.put(("entry", None))
+        elif not entry and reading:
+            reading.clear()
+            events.put(("exit", d.return_value))
+        return False
+    dbg.catch_syscall("read", callback)
+    done = dbg.c(wait=False)
+    dbg.p.recvuntil(b"ready\n")
+    assert events.get(timeout=5) == ("entry", None)
+    dbg.interrupt()
+    assert done.is_set() and done.interrupted
+    assert events.empty()
+    dbg.p.sendline(b"abc")
+    assert dbg.resume()
+    assert dbg.wait(10)
+    assert events.get(timeout=1) == ("exit", 4)
+    assert not dbg.running and dbg.priority == 0
+
+
+@NO_CATCHPOINTS
+@pytest.mark.not_applicable("qemu", "qemu-user can't stop a guest blocked in a syscall: the interrupt waits for read() to return (gdb_plus warns about it)")
+def test_continue_is_refused_while_a_syscall_callback_is_suspended(dbg):
+    """
+    The same read() catchpoint interrupted in the middle of its step: c() raises Suspended, since it would take the stop
+    the suspended step waits for. After the input and resume() the handler finishes, and c() runs the program to its end.
+    """
+    entered = Queue()
+
+    def callback(d, entry):
+        if entry and d.syscall_args[0] == 0:
+            entered.put(True)
+        return False
+    dbg.catch_syscall("read", callback)
+    dbg.c(wait=False)
+    dbg.p.recvuntil(b"ready\n")
+    assert entered.get(timeout=5)
+    dbg.interrupt()
+    with pytest.raises(Suspended):
+        dbg.c()
+    dbg.p.sendline(b"abc")
+    assert dbg.resume()
+    assert dbg.wait(10)
+    dbg.c()
+    assert b"line abc" in dbg.p.recvall(timeout=5)
 
 
 @pytest.mark.not_applicable("gdb_only", "this test checks that catch_syscall() raises without gdb; where gdb is used catchpoints work (the other tests of this file)")
@@ -365,7 +427,7 @@ def test_handle_signal_by_number(signals):
     signals.c()
     assert seen == [1]
 
-
+# BUG: SIGUSR1 is registered by the program, so we shouldn't block the execution
 def test_continue_until_across_a_signal(signals):
     """
     continue_until() to a location reached after a signal: the signal is delivered (the handler runs once) and

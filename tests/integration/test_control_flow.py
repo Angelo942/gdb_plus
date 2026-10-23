@@ -1,8 +1,10 @@
-"""step / next / finish / continue_until / jump / interrupt / wait on every backend."""
+"""step / next / finish / continue_until / jump / interrupt / resume / wait on every backend."""
+import threading
 import time
 
 import pytest
 
+from gdb_plus import Suspended
 from support.targets import after_call, call_target, call_to, calls_in, is_call, is_return, read_c_long
 
 # qemu-user only stops a guest between two instructions, not inside a host syscall
@@ -337,7 +339,7 @@ def test_setting_the_instruction_pointer_jumps(dbg):
     assert dbg.instruction_pointer == dbg.symbols["main_end"]
 
 
-@pytest.mark.known_gap("new_libdebug", "interrupt() raises NotImplementedError")
+@pytest.mark.known_gap("libdebug", "interrupt() raises NotImplementedError for the legacy libdebug")
 @QEMU_BLOCKED_READ
 def test_interrupt_a_blocking_read(dbg):
     """
@@ -357,7 +359,7 @@ def test_interrupt_a_blocking_read(dbg):
 
 
 # BUG: We have a race condition here. If we put a sleep(0.1) after the interrupt it works perfectly fine
-@pytest.mark.known_gap("new_libdebug", "interrupt() raises NotImplementedError")
+@pytest.mark.known_gap("libdebug", "interrupt() raises NotImplementedError for the legacy libdebug")
 @QEMU_BLOCKED_READ
 def test_input_sent_while_interrupted_in_a_read(dbg):
     """
@@ -491,9 +493,6 @@ def test_next_until_call_gives_up_at_the_limit(dbg):
     assert len(seen) == 2
 
 
-@pytest.mark.known_gap("native", "wait() ignores its timeout unless legacy=True: _priority_wait is called without it (gdb_plus.py:wait)")
-@pytest.mark.known_gap("remote", "wait() ignores its timeout unless legacy=True: _priority_wait is called without it (gdb_plus.py:wait)")
-@pytest.mark.known_gap("foreign", "wait() ignores its timeout unless legacy=True: _priority_wait is called without it (gdb_plus.py:wait)")
 def test_wait_with_a_timeout_returns_while_running(dbg):
     """
     wait(timeout=0.5) on a process that waits for input (it won't stop by itself) returns after about half a second,
@@ -528,3 +527,177 @@ def test_step_into_a_blocking_syscall_gives_up_after_the_timeout(dbg):
     dbg.p.sendline(b"after the step")
     dbg.c()
     assert b"line after the step" in dbg.p.recvall(timeout=5)
+
+
+########################## INTERRUPT RACES ##########################
+
+@pytest.mark.known_gap("libdebug", "interrupt() raises NotImplementedError for the legacy libdebug")
+@QEMU_BLOCKED_READ
+def test_interrupt_returns_once_the_continue_it_stopped_is_over(dbg):
+    """
+    interrupt() of a c(wait=False) blocked in read() returns only once that continue has ended: right after it the
+    continue is done (done.interrupted), the priority is 0 and the process is stopped. Repeated ten times, with a new
+    c(wait=False) each time, because a thread that ends late only shows up in some of the runs.
+    """
+    done = dbg.c(wait=False)
+    dbg.p.recvuntil(b"ready\n")
+    for _ in range(10):
+        dbg.interrupt()
+        assert done.is_set() and done.interrupted
+        assert dbg.priority == 0
+        assert not dbg.running
+        done = dbg.c(wait=False)
+    dbg.interrupt()
+    assert dbg.priority == 0
+
+
+@pytest.mark.known_gap("libdebug", "interrupt() raises NotImplementedError for the legacy libdebug")
+@QEMU_BLOCKED_READ
+def test_interrupt_right_after_a_non_blocking_continue(dbg):
+    """
+    c(wait=False) returns once its thread resumed the process, so an interrupt() right after it still finds the continue in
+    progress: the continue ends, the process is stopped and the priority is 0. A new c() then reads the line sent.
+    """
+    done = dbg.c(wait=False)
+    dbg.interrupt()
+    assert done.is_set() and done.interrupted
+    assert dbg.priority == 0
+    assert not dbg.running
+    done = dbg.c(wait=False)
+    dbg.p.sendline(b"after interrupt")
+    assert done.wait(10)
+    assert b"line after interrupt" in dbg.p.recvall(timeout=5)
+
+
+@pytest.mark.known_gap("libdebug", "interrupt() raises NotImplementedError for the legacy libdebug")
+def test_interrupt_while_a_callback_runs_keeps_the_process_stopped(dbg):
+    """
+    interrupt() while a breakpoint callback is still running (it returns False after half a second): interrupt() waits
+    for the callback, the continue ends and the process stays stopped on the breakpoint instead of resuming as the
+    callback asked. Nothing is left to resume.
+    """
+    entered = threading.Event()
+    def callback(d):
+        entered.set()
+        time.sleep(0.5)
+        return False
+    dbg.b("tick", callback=callback)
+    done = dbg.c(wait=False)
+    assert entered.wait(5)
+    dbg.interrupt()
+    assert done.is_set() and done.interrupted
+    assert dbg.priority == 0
+    assert not dbg.running
+    assert dbg.instruction_pointer == dbg.symbols["tick"]
+    assert dbg.resume() is False
+
+
+@pytest.mark.known_gap("libdebug", "interrupt() raises NotImplementedError for the legacy libdebug")
+@QEMU_BLOCKED_READ
+def test_interrupt_ends_a_non_blocking_until_and_removes_its_breakpoint(dbg):
+    """
+    until("after_input", wait=False) interrupted while read() waits for input: the until ends (done.interrupted) and its
+    temporary breakpoint is removed, so the c() that follows runs the program to its end instead of stopping there.
+    """
+    address = dbg.symbols["after_input"]
+    done = dbg.until("after_input", wait=False)
+    dbg.p.recvuntil(b"ready\n")
+    dbg.interrupt()
+    assert done.is_set() and done.interrupted
+    assert dbg.priority == 0
+    assert not dbg.breakpoints[address]
+    dbg.p.sendline(b"x")
+    dbg.c()
+    assert b"line x" in dbg.p.recvall(timeout=5)
+
+
+########################## RESUME ##########################
+
+def _until_after_input_in_a_callback(dbg, reached):
+    """
+    A callback on say_hi that runs until("after_input"): the until blocks in the read() that follows, then the callback
+    records where it is and returns False. Returns the Event set when the callback starts.
+    """
+    started = threading.Event()
+    def callback(d):
+        started.set()
+        d.until("after_input")
+        reached.append(d.instruction_pointer)
+        return False
+    dbg.b("say_hi", callback=callback)
+    return started
+
+
+@pytest.mark.known_gap("libdebug", "interrupt() raises NotImplementedError for the legacy libdebug")
+@QEMU_BLOCKED_READ
+def test_a_callback_does_not_notice_the_interrupt(dbg):
+    """
+    A callback runs until("after_input"), which blocks in read(). interrupt() ends the script's c(wait=False), but the
+    until() of the callback keeps waiting, suspended. After the input and resume() it reaches after_input and the callback
+    goes on; when it returns the process stays stopped there, since the script's continue is over.
+    """
+    reached = []
+    started = _until_after_input_in_a_callback(dbg, reached)
+    done = dbg.c(wait=False)
+    assert started.wait(5)
+    dbg.p.recvuntil(b"ready\n")
+    dbg.interrupt()
+    assert done.is_set() and done.interrupted
+    assert dbg.priority == 1
+    assert reached == []
+    dbg.p.sendline(b"after resume")
+    assert dbg.resume()
+    assert dbg.wait(10)
+    assert reached == [dbg.symbols["after_input"]]
+    assert dbg.instruction_pointer == dbg.symbols["after_input"]
+    assert dbg.priority == 0
+
+
+@pytest.mark.known_gap("libdebug", "interrupt() raises NotImplementedError for the legacy libdebug")
+@QEMU_BLOCKED_READ
+def test_the_script_cannot_resume_the_process_while_a_callback_is_suspended(dbg):
+    """
+    While the until() of a callback is suspended by interrupt(), c() and step() raise Suspended instead of taking the
+    stops the until() waits for. After resume() the callback finishes and c() runs the program to its end.
+    """
+    reached = []
+    started = _until_after_input_in_a_callback(dbg, reached)
+    dbg.c(wait=False)
+    assert started.wait(5)
+    dbg.p.recvuntil(b"ready\n")
+    dbg.interrupt()
+    with pytest.raises(Suspended):
+        dbg.c()
+    with pytest.raises(Suspended):
+        dbg.step()
+    dbg.p.sendline(b"x")
+    assert dbg.resume()
+    assert dbg.wait(10)
+    dbg.c()
+    assert b"line x" in dbg.p.recvall(timeout=5)
+
+
+@pytest.mark.known_gap("libdebug", "interrupt() raises NotImplementedError for the legacy libdebug")
+@QEMU_BLOCKED_READ
+def test_continue_after_interrupt_starts_a_new_action(dbg):
+    """
+    After interrupt() the continue it stopped is over and resume() has nothing to do: a new c() runs to the breakpoint on
+    after_input as usual.
+    """
+    first = dbg.c(wait=False)
+    dbg.p.recvuntil(b"ready\n")
+    dbg.interrupt()
+    assert first.is_set() and first.interrupted
+    assert dbg.resume() is False
+    dbg.b("after_input")
+    dbg.p.sendline(b"new continue")
+    dbg.c()
+    assert dbg.instruction_pointer == dbg.symbols["after_input"]
+    assert dbg.priority == 0
+
+
+def test_resume_without_an_interrupt_does_nothing(dbg):
+    """resume() when no interrupt() suspended anything returns False and the process stays stopped."""
+    assert dbg.resume() is False
+    assert not dbg.running
+    assert dbg.priority == 0

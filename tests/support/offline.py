@@ -64,6 +64,8 @@ class FakeExe:
     def range(self):
         return 0 if self.end_address is None else self.end_address - self.address
 
+    size = range
+
     def __contains__(self, value):
         return self.end_address is not None and self.address < value < self.end_address
 

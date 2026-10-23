@@ -1,0 +1,50 @@
+#!/bin/sh
+# git pre-push hook: runs the tests that reach the commits being pushed (tests/support/affected.py) and blocks the push
+# on a new failure. Tests whose last recorded result was already a failure are listed but don't block.
+#
+#   install:    ln -s ../../tests/support/pre-push .git/hooks/pre-push
+#   skip once:  git push --no-verify
+#   GDB_PLUS_HOOK_STRICT=1   block on every failure, even the ones already recorded
+#   GDB_PLUS_HOOK_JOBS=N     pytest-xdist workers (default 8, 0 = no xdist)
+#
+# Only the committed code is tested: the pushed commit is checked out in a temporary worktree, and the selection
+# compares it with what the remote already has (the remote tip of the branch, or its merge-base with origin/main for a
+# new branch). Uncommitted edits are neither selected nor tested. The index and the recorded results (for
+# --affected-baseline) are read from tests/.results of this checkout.
+zero=0000000000000000000000000000000000000000
+base= tip=
+while read -r local_ref local_sha remote_ref remote_sha; do
+    [ "$local_sha" = "$zero" ] && continue                 # deleting a remote branch
+    tip=$local_sha
+    if [ "$remote_sha" != "$zero" ] && git cat-file -e "$remote_sha^{commit}" 2>/dev/null; then
+        base=$remote_sha
+    else
+        base=$(git merge-base "$local_sha" origin/main 2>/dev/null || git merge-base "$local_sha" main 2>/dev/null)
+    fi
+    break
+done
+[ -z "$base" ] && exit 0                                   # nothing to test (deletion, or no common history)
+[ "$base" = "$tip" ] && exit 0                             # nothing new to push
+if ! git cat-file -e "$tip:tests/support/affected.py" 2>/dev/null; then
+    echo "pre-push: tests/support/affected.py isn't in the pushed commit, can't select the tests (git push --no-verify to skip)" >&2
+    exit 1
+fi
+
+top=$(git rev-parse --show-toplevel) || exit 1
+tree=$(mktemp -d "${TMPDIR:-/tmp}/gdb_plus-pre-push.XXXXXX") || exit 1
+cleanup() { git -C "$top" worktree remove --force "$tree" >/dev/null 2>&1; rm -rf "$tree"; }
+trap cleanup EXIT
+trap 'exit 130' INT TERM
+git -C "$top" worktree add --quiet --detach "$tree" "$tip" || exit 1
+
+baseline=--affected-baseline
+[ -n "$GDB_PLUS_HOOK_STRICT" ] && baseline=
+jobs=${GDB_PLUS_HOOK_JOBS:-8}
+workers=
+[ "$jobs" != 0 ] && python3 -c "import xdist" 2>/dev/null && workers="-n $jobs"
+cd "$tree/tests" || exit 1
+GDB_PLUS_RESULTS_DIR="${GDB_PLUS_RESULTS_DIR:-$top/tests/.results}" PYTHONPATH="$tree${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 -m pytest --affected --affected-ref="$base" $baseline --no-record -q -p no:cacheprovider $workers </dev/null
+status=$?
+[ $status -eq 5 ] && exit 0   # no test reaches the pushed changes
+exit $status
