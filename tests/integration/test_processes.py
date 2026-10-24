@@ -39,7 +39,7 @@ def test_split_on_fork_with_interrupt(debugger, forking, backend):
     assert child.pid == pid != dbg.pid
     assert not dbg.running and not child.running
     child.c()
-    assert child._closed.is_set()
+    assert child.control.closed.is_set()
     dbg.c()
     output = dbg.p.recvall(timeout=5)
     assert b"child\n" in output and b"child exited 3" in output
@@ -159,7 +159,7 @@ def test_emulate_ptrace_off_restores_the_functions(debugger, target_binary, back
     assert dbg.read(dbg.symbols["ptrace"], 4) != ptrace
     dbg.emulate_ptrace(off=True)
     assert dbg.read(dbg.symbols["ptrace"], 4) == ptrace
-    assert dbg._ptrace_emulated is False
+    assert dbg.ptrace.emulated is False
 
 
 # What tests/fixtures/src/sysemu_tracer.c prints without a debugger (x86-64 Linux).
@@ -240,9 +240,9 @@ def test_trace_links_two_debuggers(debugger, forking, backend):
     dbg.c(wait=False)
     child = dbg.children[dbg.wait_split()]
     dbg.trace(child)
-    assert dbg._slaves[child.pid] is child
-    assert child._parent is dbg and child._ptrace_emulated
-    assert dbg._ptrace_group == {dbg.pid: dbg, child.pid: child}
+    assert dbg.ptrace.slaves[child.pid] is child
+    assert child._parent is dbg and child.ptrace.emulated
+    assert dbg._process_group == {dbg.pid: dbg, child.pid: child}
 
 
 ########################## BRUTEFORCE ##########################
@@ -285,7 +285,7 @@ def test_split_child_runs_the_script(debugger, forking, backend):
 
 
 @pytest.mark.not_applicable("libdebug", "the legacy libdebug fork can not split on fork")
-@pytest.mark.known_gap("gdb_only", "set_split_on_fork(off=True) disconnects self.fork_handler, which only exists once the split was turned on (gdb_plus.py:set_split_on_fork)")
+@pytest.mark.known_gap("gdb_only", "set_split_on_fork(off=True) disconnects self.fork_handler, which only exists once the split was turned on (debugger/engines/gdb.py:stop_splitting)")
 def test_split_off_before_it_was_on(debugger, forking, backend):
     """set_split_on_fork(off=True) on a debugger that never split is harmless: the program forks and ends normally."""
     dbg = debugger(forking, backend=backend)
@@ -325,15 +325,15 @@ def test_trace_a_parent(debugger, forking, backend):
     dbg.c(wait=False)
     child = dbg.children[dbg.wait_split()]
     child.trace(dbg, parent=True)
-    assert child._slaves[dbg.pid] is dbg
+    assert child.ptrace.slaves[dbg.pid] is dbg
     assert child._parent is dbg and dbg.children[child.pid] is child
-    assert dbg._ptrace_emulated
+    assert dbg.ptrace.emulated
 
 
 @pytest.mark.not_applicable("libdebugs", "inferiors are gdb's own objects (one per process it holds): libdebug has no equivalent")
-@pytest.mark.known_gap("remote", "write() ignores inferior= with gdb: __write_gdb is called without it and writes in the current inferior (gdb_plus.py:write)")
-@pytest.mark.known_gap("gdb", "write() ignores inferior= with gdb: __write_gdb is called without it and writes in the current inferior (gdb_plus.py:write)")
-@pytest.mark.known_gap("i386", "write() ignores inferior= with gdb: __write_gdb is called without it and writes in the current inferior (gdb_plus.py:write)")
+@pytest.mark.known_gap("remote", "write() ignores inferior= with gdb: GdbBackend.write_inferior is called without it and writes in the current inferior (debugger/engines/gdb.py:write)")
+@pytest.mark.known_gap("gdb", "write() ignores inferior= with gdb: GdbBackend.write_inferior is called without it and writes in the current inferior (debugger/engines/gdb.py:write)")
+@pytest.mark.known_gap("i386", "write() ignores inferior= with gdb: GdbBackend.write_inferior is called without it and writes in the current inferior (debugger/engines/gdb.py:write)")
 def test_read_and_write_in_another_inferior(debugger, forking, backend):
     """
     read(inferior=) and write(inferior=) access the memory of another process gdb holds (the child of a fork) without

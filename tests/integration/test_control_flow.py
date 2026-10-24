@@ -605,7 +605,7 @@ def test_interrupt_ends_a_non_blocking_until_and_removes_its_breakpoint(dbg):
     dbg.interrupt()
     assert done.is_set() and done.interrupted
     assert dbg.priority == 0
-    assert not dbg.breakpoints[address]
+    assert not dbg.control.breakpoints[address]
     dbg.p.sendline(b"x")
     dbg.c()
     assert b"line x" in dbg.p.recvall(timeout=5)

@@ -23,8 +23,8 @@ def test_catch_event_remembers_the_number_gdb_gave(dbg):
     callback = lambda d: False
     dbg.catch_event("syscall getpid", callback)
     assert dbg.executed[0] == "catch syscall getpid"
-    assert dbg._event_table == {"syscall getpid": 1}
-    assert dbg._event_breakpoints == {1: callback}
+    assert dbg.control.event_table == {"syscall getpid": 1}
+    assert dbg.control.event_breakpoints == {1: callback}
 
 
 def test_catching_the_same_event_again_only_replaces_the_callback(dbg):
@@ -34,7 +34,7 @@ def test_catching_the_same_event_again_only_replaces_the_callback(dbg):
     second = lambda d: True
     dbg.catch_event("syscall getpid", second)
     assert dbg.executed == sent
-    assert dbg._event_breakpoints == {1: second}
+    assert dbg.control.event_breakpoints == {1: second}
 
 
 def test_delete_catch_removes_the_catchpoint(dbg):
@@ -42,7 +42,7 @@ def test_delete_catch_removes_the_catchpoint(dbg):
     dbg.catch_event("syscall getpid", lambda d: False)
     dbg.delete_catch("syscall getpid")
     assert dbg.executed[-1] == "delete 1"
-    assert dbg._event_table == {} and dbg._event_breakpoints == {}
+    assert dbg.control.event_table == {} and dbg.control.event_breakpoints == {}
 
 
 def test_delete_catch_of_an_event_not_caught(dbg):

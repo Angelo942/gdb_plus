@@ -36,7 +36,7 @@ def test_breakpoint_is_registered(dbg):
     defined and not temporary.
     """
     breakpoint = dbg.b("add")
-    assert dbg.breakpoints[dbg.symbols["add"]] == [breakpoint]
+    assert dbg.control.breakpoints[dbg.symbols["add"]] == [breakpoint]
     assert breakpoint.user_defined and not breakpoint.temporary
 
 
@@ -96,7 +96,7 @@ def test_temporary_breakpoint(dbg):
     dbg.b("after_input")
     dbg.c()
     assert dbg.instruction_pointer == dbg.symbols["tick"]
-    assert dbg.breakpoints[dbg.symbols["tick"]] == []
+    assert dbg.control.breakpoints[dbg.symbols["tick"]] == []
     dbg.p.sendline(b"x")
     dbg.c()
     assert dbg.instruction_pointer == dbg.symbols["after_input"]
@@ -181,7 +181,7 @@ def test_callback_can_set_breakpoints(dbg):
     dbg.b("outer", callback=callback, temporary=True)
     dbg.c()
     assert dbg.instruction_pointer == dbg.symbols["tick"]
-    assert dbg.breakpoints[dbg.symbols["outer"]] == []
+    assert dbg.control.breakpoints[dbg.symbols["outer"]] == []
 
 
 def test_stepping_onto_a_continuing_callback_still_stops(dbg):
@@ -308,7 +308,7 @@ def test_temporary_breakpoint_with_a_continuing_callback(dbg):
     dbg.c()
     assert hits == [0]
     assert dbg.instruction_pointer == dbg.symbols["after_input"]
-    assert dbg.breakpoints[dbg.symbols["tick"]] == []
+    assert dbg.control.breakpoints[dbg.symbols["tick"]] == []
 
 
 def test_temporary_hardware_breakpoint(dbg):
@@ -345,6 +345,6 @@ def test_delete_by_address_leaves_the_internal_breakpoints(dbg):
     internal = dbg.b("tick", user_defined=False)
     dbg.b("tick")
     dbg.delete_breakpoint("tick")
-    assert dbg.breakpoints[dbg.symbols["tick"]] == [internal]
+    assert dbg.control.breakpoints[dbg.symbols["tick"]] == [internal]
     dbg.c()
     assert dbg.instruction_pointer == dbg.symbols["tick"]

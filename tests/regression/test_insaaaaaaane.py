@@ -102,7 +102,7 @@ def test_callback_sets_a_breakpoint_and_continues(dbg):
     dbg.b(0x403ad0, callback=callback, temporary=True)
     dbg.c(wait=True)
     assert dbg.rip == 0x403ad9
-    assert not len(dbg.breakpoints[0x403ad0] + dbg.breakpoints[0x403ad9])
+    assert not len(dbg.control.breakpoints[0x403ad0] + dbg.control.breakpoints[0x403ad9])
 
 
 def test_callback_steps_and_stops(dbg):

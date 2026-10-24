@@ -57,7 +57,7 @@ def test_keeps_hardware_breakpoints(dbg, target):
     """A hardware breakpoint set with gdb is still a hardware breakpoint in the new engine after migrate()."""
     dbg.b("outer", hw=True)
     dbg.migrate(**{target: True})
-    native = dbg.breakpoints[dbg.symbols["outer"]][0].native_breakpoint
+    native = dbg.control.breakpoints[dbg.symbols["outer"]][0].native_breakpoint
     assert getattr(native, "hardware", getattr(native, "hw", False))
 
 
@@ -93,7 +93,7 @@ def test_catchpoints_are_dropped(dbg, target):
 
 @pytest.mark.parametrize("target", [
     pytest.param("libdebug", marks=pytest.mark.libdebug),
-    pytest.param("new_libdebug", marks=[pytest.mark.new_libdebug, pytest.mark.xfail(strict=True, reason="migrate(gdb=True) from new libdebug calls detach(block=True), whose default quit=True kills the process (gdb_plus.py:migrate)")]),
+    pytest.param("new_libdebug", marks=[pytest.mark.new_libdebug, pytest.mark.xfail(strict=True, reason="migrate(gdb=True) from new libdebug calls detach(block=True), whose default quit=True kills the process (debugger/backends.py:migrate)")]),
 ])
 def test_back_to_gdb_runs_the_script(dbg, target):
     """migrate(gdb=True, script=...) runs the gdbscript in the new gdb: a convenience variable it sets can be read back."""

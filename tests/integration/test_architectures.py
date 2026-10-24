@@ -109,7 +109,7 @@ def test_qemu_gdbstub(debugger, basic, backend):
 @pytest.mark.not_applicable("native", "this test is about qemu-user's gdbstub, which only exists for the emulated architectures")
 @pytest.mark.untested("remote", "the x86-64 gdbserver: test_gdbserver.py")
 @pytest.mark.not_applicable("i386", "i386 runs natively: no QEMU involved")
-@pytest.mark.known_gap("riscv32", "maps/libs with qemu_gdbserver= are qemu's host addresses: qemu-user maps 32 bit guests 0x10000 higher, so _set_range reads the exe at the wrong address (gdb_plus.py:__raw_maps)")
+@pytest.mark.known_gap("riscv32", "maps/libs with qemu_gdbserver= are qemu's host addresses: qemu-user maps 32 bit guests 0x10000 higher, so _set_range reads the exe at the wrong address (debugger/files.py:_raw_maps)")
 @pytest.mark.parametrize("backend", [pytest.param(arch, marks=pytest.mark.qemu(arch)) for arch in QEMU_ARCHES])
 def test_qemu_gdbserver(debugger, basic, backend, tmp_path):
     """

@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from typing import Callable
-    from gdb_plus.gdb_plus import Debugger
+    from gdb_plus.debugger import Debugger
     # gdb: rpyc netref of gdb.Breakpoint (pwntools' .server_breakpoint), legacy libdebug: the address, new libdebug: its Breakpoint
     from gdb import Breakpoint as NativeGdbBreakpoint
     from libdebug.data.breakpoint import Breakpoint as LibdebugBreakpoint

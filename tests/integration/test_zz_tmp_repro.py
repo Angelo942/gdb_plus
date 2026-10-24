@@ -27,5 +27,6 @@ def test_repro(debugger, fixture_binary):
             print("guest detach OK")
         except BaseException:
             print("GUEST DETACH RAISED:\n" + traceback.format_exc())
-        print("guest gdb finalizer still pending:", dbg._gdb_finalizer is not None)
+        from gdb_plus.debugger.engines import GdbBackend
+        print("guest gdb finalizer still pending:", dbg._backend_of(GdbBackend)._finalizer is not None)
         os.system("ps -eo pid,ppid,stat,args | grep -E 'gdb-multiarch|qemu-riscv32' | grep -v grep | cut -c1-140")

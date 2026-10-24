@@ -250,7 +250,7 @@ def test_process_exit(debugger, basic, backend):
     dbg = debugger(basic, backend=backend)
     dbg.p.sendline(b"bye")
     dbg.c()
-    assert dbg._closed.is_set()
+    assert dbg.control.closed.is_set()
     assert b"line bye" in dbg.p.recvall(timeout=5)
 
 
@@ -387,7 +387,7 @@ def test_detach_without_quit_leaves_the_process_running(debugger, basic, backend
     assert b"line left alone" in dbg.p.recvall(timeout=5)
 
 
-@pytest.mark.known_gap("new_libdebug", "detach(block=True) on new libdebug calls self.logger.warn_once: a logging.Logger has no warn_once (gdb_plus.py:detach)")
+@pytest.mark.known_gap("new_libdebug", "detach(block=True) on new libdebug calls self.logger.warn_once: a logging.Logger has no warn_once (debugger/engines/new_libdebug.py:detach)")
 @pytest.mark.known_gap("qemu", "detach(block=True) sends SIGSTOP to qemu itself before `detach`: the stopped gdbstub never answers gdb", run=False)
 def test_detach_with_block_leaves_the_process_stopped(debugger, basic, backend):
     """
@@ -412,7 +412,7 @@ def _gdb_pid(dbg):
 
 
 @pytest.mark.not_applicable("libdebugs", "about the gdb process dying under the script: the libdebug backends run in the script's own process")
-@pytest.mark.known_gap("i386", "instruction_pointer catches every exception while reading eip and raises its own PwnlibException: the GdbDiedError is lost (gdb_plus.py:instruction_pointer)")
+@pytest.mark.known_gap("i386", "instruction_pointer catches every exception while reading eip and raises its own PwnlibException: the GdbDiedError is lost (debugger/registers.py:instruction_pointer)")
 def test_gdb_dying_wakes_the_script(debugger, basic, backend):
     """
     If gdb dies (killed, crashed, `quit` typed in its terminal) while the script waits in c(), c() raises GdbDiedError

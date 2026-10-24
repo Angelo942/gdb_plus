@@ -1,11 +1,13 @@
 GDB+ 7.6.0 **New libdebug**
+* Refactor god class
 * Significant speed-up for GDB
 * Fix race conditions in interrupt
 * Fix write in QEMU
-* Intruduce minimal support for new libdebug
+* Introduce minimal support for new libdebug
 * address = dbg.write(None, data) allocates memory to store data
 * Improve callback handling for syscall catchpoints
 * Improve structure parsing to interpret types and pointers
+* Improve testing suite
 
 GDB+ 7.5.0 **Parse structures**
 * Parse and read c structures into python objects

@@ -12,7 +12,7 @@ from functools import wraps
 if TYPE_CHECKING:
     from threading import Thread
     from types import TracebackType
-    from gdb_plus.gdb_plus import Debugger
+    from gdb_plus.debugger import Debugger
     from typing import Callable, Iterator, ParamSpec
     P = ParamSpec("P")
 

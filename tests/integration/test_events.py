@@ -356,7 +356,7 @@ def test_ltrace(debugger, basic, backend, capfd):
     assert "malloc['0x20'" in output
     assert "setvbuf" not in output
     dbg.disable_ltrace()
-    assert all(bp.address not in dbg.exe.plt.values() for bps in dbg.breakpoints.values() for bp in bps)
+    assert all(bp.address not in dbg.exe.plt.values() for bps in dbg.control.breakpoints.values() for bp in bps)
 
 
 def test_ftrace_with_custom_callback(debugger, basic, backend):
@@ -540,7 +540,7 @@ def test_send_signal_with_a_breakpoint_in_the_handler(signals):
     assert signals.read_int(signals.symbols["usr2_count"]) == 1
 
 
-@pytest.mark.known_gap("gdb_only", "c(signal=) is dropped with gdb: __continue_gdb has no signal parameter (gdb_plus.py:c)")
+@pytest.mark.known_gap("gdb_only", "c(signal=) is dropped with gdb: GdbBackend.cont has no signal parameter (debugger/engines/gdb.py:cont)")
 @pytest.mark.known_gap("libdebug", "continue_until() across a signal never returns with the legacy libdebug (test_continue_until_across_a_signal fails the same way)", run=False)
 @pytest.mark.known_gap("new_libdebug", "gdb_plus doesn't ask new libdebug to stop on signals: the SIGUSR1 raised by the program never stops it and it runs to its end")
 def test_continue_with_a_signal(signals):

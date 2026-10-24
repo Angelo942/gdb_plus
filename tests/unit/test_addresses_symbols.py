@@ -116,10 +116,10 @@ def test_symbols_are_cached_only_once_every_library_is_loaded():
     with context.local(arch="amd64"):
         dbg = offline_debugger(exe=FakeExe(symbols={"main": 0x401000}), libraries={"libc.so.6": None})
         assert dbg.symbols == {"main": 0x401000}
-        assert dbg._symbols is None
-        dbg.__dict__["_libraries"] = {}
+        assert dbg.space._symbols is None
+        dbg.space._libraries = {}
         dbg.symbols
-        assert dbg._symbols == {"main": 0x401000}
+        assert dbg.space._symbols == {"main": 0x401000}
 
 
 LIBRARIES = ["libc.so.6", "libcrypto.so.3", "ld-linux-x86-64.so.2", "libz.so.1", "libstdc++.so.6"]
@@ -136,12 +136,12 @@ LIBRARIES = ["libc.so.6", "libcrypto.so.3", "ld-linux-x86-64.so.2", "libz.so.1",
 ])
 def test_library_names(name, expected):
     """
-    _library_fullname() turns a short library name (libc, ld, libz...) into the full file name of the loaded library,
+    space.library_fullname() turns a short library name (libc, ld, libz...) into the full file name of the loaded library,
     matching on a prefix.
     """
     with context.local(arch="amd64"):
         dbg = offline_debugger(libraries={library: None for library in LIBRARIES})
-        assert dbg._library_fullname(name) == expected
+        assert dbg.space.library_fullname(name) == expected
 
 
 def test_libraries_are_attributes():
@@ -155,7 +155,7 @@ def test_libraries_are_attributes():
         assert dbg.libc is sentinel
         dbg.__dict__["_initialized"] = True  # __setattr__ only intercepts library names after __init__
         dbg.libc = "replaced"  # e.g. dbg.libc = ELF("./libc.so.6") when the debugger can't find it
-        assert dbg._libraries["libc.so.6"] == "replaced"
+        assert dbg.space._libraries["libc.so.6"] == "replaced"
 
 
 PROC_MAPS = """\
@@ -245,10 +245,10 @@ def test_qemu_32bit_maps_are_translated_to_guest_addresses(load):
         dbg = offline_debugger(exe=exe, raw_maps=qemu_32bit_host_maps(path, load), execute_results={"info auxv": auxv},
                                _qemu_guest_base=None)
         assert dbg.libs == {path: [load, load + 0x22000]}
-        assert dbg._qemu_guest_base == 0x10000
+        assert dbg.space._qemu_guest_base == 0x10000
         assert 0 in dbg.maps  # qemu's reservation of the guest space starts at guest address 0
         assert all(start + size <= 1 << 32 for start, size in dbg.maps.items())
-        dbg._set_range(exe)
+        dbg.space.set_range(exe)
     assert exe.address == load
     assert exe.end_address == load + 0x26000  # .bss included
 
@@ -260,16 +260,16 @@ def test_qemu_maps_stay_untranslated_without_auxv():
         dbg = offline_debugger(exe=EXE(path, checksec=False), raw_maps=qemu_32bit_host_maps(path, 0x10000),
                                _qemu_guest_base=None)
         assert dbg.libs == {path: [0x20000, 0x42000]}
-        assert dbg._qemu_guest_base is None
+        assert dbg.space._qemu_guest_base is None
 
 
 def test_set_range_finds_the_executable():
-    """_set_range() finds the executable in the maps and sets its base and end address."""
+    """space.set_range() finds the executable in the maps and sets its base and end address."""
     with context.local(arch="amd64"):
         exe = EXE(str(TESTS / "httpd"), checksec=False)
         exe.name = "basic"
         dbg = offline_debugger(raw_maps=PROC_MAPS)
-        dbg._set_range(exe)
+        dbg.space.set_range(exe)
     assert exe.address == 0x555555554000
     assert exe.end_address == exe.address + exe.mapped_size  # from the program headers, not the maps
 

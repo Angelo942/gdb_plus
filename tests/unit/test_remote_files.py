@@ -47,7 +47,7 @@ def test_remote_path_comes_from_the_maps(remote):
 
 def test_download_into_gdb_files(remote):
     """With download_libraries a remote library is downloaded into ./gdb_files and that copy is used."""
-    remote.download_libraries = True
+    remote.space.download_libraries = True
     assert remote.local_path(LIBC) == Path("gdb_files/libc.so.6")
     assert remote.downloaded == [(Path(LIBC), Path("gdb_files/libc.so.6"))]
 
@@ -57,7 +57,7 @@ def test_files_already_in_gdb_files_are_used(remote):
     # "if we have a gdb_files directory we assume that the libraries are here": no second download
     Path("gdb_files").mkdir()
     Path("gdb_files/libc.so.6").write_bytes(b"downloaded before")
-    remote.download_libraries = True
+    remote.space.download_libraries = True
     assert remote.local_path(LIBC) == Path("gdb_files/libc.so.6")
     assert remote.downloaded == []
 

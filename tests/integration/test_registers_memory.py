@@ -424,8 +424,8 @@ def test_inject_shellcode(dbg):
     assert dbg.call(address) == 0x1337
 
 
-@pytest.mark.known_gap("arm", "interrupt() never returns while the qemu-user guest spins in the injected loop (gdb_plus.py:interrupt)", run=False)
-@pytest.mark.known_gap("aarch64", "interrupt() never returns while the qemu-user guest spins in the injected loop (gdb_plus.py:interrupt)", run=False)
+@pytest.mark.known_gap("arm", "interrupt() never returns while the qemu-user guest spins in the injected loop (debugger/control_flow.py:interrupt)", run=False)
+@pytest.mark.known_gap("aarch64", "interrupt() never returns while the qemu-user guest spins in the injected loop (debugger/control_flow.py:interrupt)", run=False)
 def test_inject_sleep(dbg):
     """
     inject_sleep() writes an infinite loop over a function (used by debug_from and fork splitting to park a process);
@@ -502,8 +502,8 @@ def test_inject_shellcode_without_mprotect(dbg):
 
 @pytest.mark.not_applicable("remote", "another local process by pid: the remote target has no /proc of its own to read through")
 @pytest.mark.not_applicable("foreign", "another local process by pid: under QEMU /proc/<pid>/mem is the emulator's memory, not the guest's")
-@pytest.mark.known_gap("gdb", "read()/write() ignore pid= with gdb: they always use the current inferior (gdb_plus.py:read, write)")
-@pytest.mark.known_gap("new_libdebug", "read()/write() ignore pid= with new libdebug: they always use its own process (gdb_plus.py:read, write)")
+@pytest.mark.known_gap("gdb", "read()/write() ignore pid= with gdb: they always use the current inferior (debugger/engines/gdb.py:read, write)")
+@pytest.mark.known_gap("new_libdebug", "read()/write() ignore pid= with new libdebug: they always use its own process (debugger/engines/new_libdebug.py:read, write)")
 def test_read_and_write_another_process_by_pid(dbg, basic):
     """
     read(pid=) and write(pid=) access the memory of another process (here a second copy of the binary, without ASLR so

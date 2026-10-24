@@ -256,9 +256,9 @@ def test_gdb_call_void(dbg):
 
 
 @pytest.mark.not_applicable("libdebugs", "gdb_call() forwards to gdb's own `call` command: libdebug has no expression evaluator")
-@pytest.mark.known_gap("gdb", "gdb_call() catches every gdb error and retries after finish(): an unknown function never raises (gdb_plus.py:gdb_call)", run=False)
-@pytest.mark.known_gap("remote", "gdb_call() catches every gdb error and retries after finish(): an unknown function never raises (gdb_plus.py:gdb_call)", run=False)
-@pytest.mark.known_gap("i386", "gdb_call() catches every gdb error and retries after finish(): an unknown function never raises (gdb_plus.py:gdb_call)", run=False)
+@pytest.mark.known_gap("gdb", "gdb_call() catches every gdb error and retries after finish(): an unknown function never raises (debugger/calls.py:gdb_call)", run=False)
+@pytest.mark.known_gap("remote", "gdb_call() catches every gdb error and retries after finish(): an unknown function never raises (debugger/calls.py:gdb_call)", run=False)
+@pytest.mark.known_gap("i386", "gdb_call() catches every gdb error and retries after finish(): an unknown function never raises (debugger/calls.py:gdb_call)", run=False)
 def test_gdb_call_of_an_unknown_function_raises(dbg):
     """gdb_call() of a function that doesn't exist raises, and the process is still stopped where it was."""
     address = dbg.instruction_pointer

@@ -1,6 +1,6 @@
 """
 A Debugger that never starts gdb: registers are plain attributes and memory is a dict of
-regions. It lets the unit tests exercise the pure logic of gdb_plus.py (typed memory helpers,
+regions. It lets the unit tests exercise the pure logic of the Debugger (typed memory helpers,
 address parsing, symbol merging, maps parsing, backups, argument lookup...) in milliseconds.
 
 How it works: Debugger.__setattr__ only forwards registers to a backend once `_initialized` is
@@ -12,6 +12,14 @@ from threading import Event
 from pwn import context
 
 from gdb_plus import Debugger
+from gdb_plus.debugger import PtraceEmulator
+from gdb_plus.debugger.engines import Backend
+from gdb_plus.debugger.space import AddressSpace
+from gdb_plus.debugger.control import Controller
+
+# The attributes the tests pass under the name the Debugger had for them -> their name in the Controller
+CONTROL = {"_event_table": "event_table", "_event_breakpoints": "event_breakpoints", "_handled_signals": "handled_signals",
+           "_closed": "closed", "_out_of_breakpoint": "out_of_breakpoint", "breakpoints": "breakpoints"}
 
 
 class FakeMemory:
@@ -84,8 +92,8 @@ class OfflineDebugger(Debugger):
         self.executed.append(code)
         return self.execute_results.get(code, "")
 
-    # Name-mangled private of Debugger: what /proc/pid/maps (or `info proc map`) would contain
-    def _Debugger__raw_maps(self):
+    # What /proc/pid/maps (or `info proc map`) would contain
+    def _raw_maps(self):
         return self.raw_maps
 
 
@@ -96,15 +104,29 @@ def offline_debugger(*, exe=None, registers=None, memory=None, libraries=None, r
     """
     dbg = Debugger.__new__(OfflineDebugger)
     state = dict(
-        debugging=True, local_debugging=True, gdb=None, libdebug=None, new_libdebug=None, p=None, pid=4242,
-        _exe=exe if exe is not None else FakeExe(), _libraries=dict(libraries or {}), _symbols=None, _ld=None,
-        _context_params=context.copy(), _cached_registers={}, _args=None, _sys_args=None, _free_bss=None,
-        _canary=None, _saved_auxiliary_vector=None, _handled_signals={}, _capstone=None, children={},
-        breakpoints={}, memory=memory if memory is not None else FakeMemory(), executed=[], execute_results={},
-        raw_maps=raw_maps, download_libraries=False, gdbserver_qemu=None, _qemu_guest_base=0, _closed=Event(),
+        debugging=True, local_debugging=True, p=None, pid=4242,
+        _context_params=context.copy(), _backends={}, _args=None, _sys_args=None, _free_bss=None,
+        _canary=None, _saved_auxiliary_vector=None, _capstone=None, children={},
+        memory=memory if memory is not None else FakeMemory(), executed=[], execute_results={},
+        raw_maps=raw_maps, gdbserver_qemu=None,
     )
+    # The state of the address space (dbg.space) and the engine handles (properties stored in the backends) are set apart
+    space = dict(_exe=exe if exe is not None else FakeExe(), _libraries=dict(libraries or {}), _symbols=None, _ld=None,
+                 download_libraries=False, _qemu_guest_base=0)
+    space.update({name: attributes.pop(name) for name in list(space) if name in attributes})
+    control = dict(breakpoints={}, handled_signals={}, closed=Event())
+    control.update({new: attributes.pop(old) for old, new in CONTROL.items() if old in attributes})
+    engines = {name: attributes.pop(name) for name in ("gdb", "libdebug", "new_libdebug") if name in attributes}
     state.update(attributes)
     dbg.__dict__.update(state)
+    dbg.__dict__.setdefault("ptrace", PtraceEmulator(dbg))
+    dbg.__dict__["_backend"] = dbg._backend_of(Backend)
+    dbg.__dict__["space"] = AddressSpace(dbg, download=False)
+    dbg.__dict__["control"] = Controller(dbg)
+    dbg.control.__dict__.update(control)
+    dbg.space.__dict__.update(space)
+    for name, handle in engines.items():
+        setattr(dbg, name, handle)
     for register in dbg._special_registers + dbg._registers:
         dbg.__dict__[register] = 0
     dbg.__dict__.update(registers or {})

@@ -9,9 +9,11 @@ from support.results import QEMU_ARCHES, expand
 #   remote                        the x86-64 fixture under gdbserver, debugged through Debugger((host, port))
 #   i386                          the fixture built with -m32, native gdb
 #   arm ... mips64                the freestanding fixture (fixtures/src/freestanding.h) under qemu-user
+#   aarch64_remote                the fixture built on the arm64 machine of --remote-gdbserver, run there under gdbserver
+#                                 and debugged from here (support/remote_host.py). Deselected without the option
 # A target that can't run a test is declared on the test (or the module) with
 # @pytest.mark.not_applicable / untested / known_gap(target or group, reason): see support/results.py.
-TARGETS = ["gdb", "libdebug", "new_libdebug", "remote", "i386", *QEMU_ARCHES]
+TARGETS = ["gdb", "libdebug", "new_libdebug", "remote", "i386", *QEMU_ARCHES, "aarch64_remote"]
 
 
 def _target(name):
@@ -20,6 +22,8 @@ def _target(name):
         marks.append(getattr(pytest.mark, name))
     elif name in QEMU_ARCHES:
         marks.append(pytest.mark.qemu(name))
+    elif name == "aarch64_remote":
+        marks.append(pytest.mark.remote_gdbserver)
     return pytest.param(name, id=name, marks=marks)
 
 
@@ -59,14 +63,20 @@ def not_applicable():
 
 
 @pytest.fixture
-def target_binary(request, fixture_binary):
+def target_binary(request, fixture_binary, tmp_path):
     """
-    target_binary("basic") -> the fixture built for the current target: basic, basic_i386, basic_arm...
+    target_binary("basic") -> the fixture built for the current target: basic, basic_i386, basic_arm..., or for
+    aarch64_remote a copy of the one built on the machine of --remote-gdbserver.
     Tests that don't run over the target axis get the x86-64 one.
     """
     backend = request.getfixturevalue("backend") if "backend" in request.fixturenames else "gdb"
 
     def get(name):
+        if backend == "aarch64_remote":
+            try:
+                return request.getfixturevalue("remote_host").binary(name, tmp_path)
+            except RuntimeError as error:
+                pytest.skip(f"could not build fixture {name} on the arm64 machine: {error}")
         if backend == "i386" or backend in QEMU_ARCHES:
             return fixture_binary(f"{name}_{backend}")
         return fixture_binary(name)

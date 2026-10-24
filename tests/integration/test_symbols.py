@@ -188,9 +188,9 @@ def test_access_library_from_a_local_copy(dbg, tmp_path):
     assert library.address == dbg.libs[path][0]
 
 
-@pytest.mark.known_gap("native", "dbg.symbols caches the merged table: assigning base_elf (or the address of a library) leaves it at the old base (gdb_plus.py:symbols)")
-@pytest.mark.known_gap("remote", "dbg.symbols caches the merged table: assigning base_elf (or the address of a library) leaves it at the old base (gdb_plus.py:symbols)")
-@pytest.mark.known_gap("foreign", "dbg.symbols caches the merged table: assigning base_elf (or the address of a library) leaves it at the old base (gdb_plus.py:symbols)")
+@pytest.mark.known_gap("native", "dbg.symbols caches the merged table: assigning base_elf (or the address of a library) leaves it at the old base (debugger/files.py:symbols)")
+@pytest.mark.known_gap("remote", "dbg.symbols caches the merged table: assigning base_elf (or the address of a library) leaves it at the old base (debugger/files.py:symbols)")
+@pytest.mark.known_gap("foreign", "dbg.symbols caches the merged table: assigning base_elf (or the address of a library) leaves it at the old base (debugger/files.py:symbols)")
 def test_base_elf_can_be_set(dbg, basic):
     """
     Assigning base_elf (for example from a leak) moves the executable: its symbols, and the merged dbg.symbols, follow
@@ -209,4 +209,4 @@ def test_unknown_symbol_raises(dbg):
     """A breakpoint on a symbol that exists nowhere raises (with a message saying where it was looked for)."""
     with pytest.raises(Exception):
         dbg.b("no_such_symbol")
-    assert all(not breakpoints for breakpoints in dbg.breakpoints.values())
+    assert all(not breakpoints for breakpoints in dbg.control.breakpoints.values())

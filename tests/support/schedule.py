@@ -11,6 +11,11 @@ lasts about max(total time / workers, slowest test).
 
 A test with no recorded duration (new, or the results directory is empty) goes first: it may be slow. Durations are
 rounded to 0.1s and the sort is stable, so the fast tests keep the collection order (module fixtures stay shared).
+
+A worker that replaces a crashed one (the watchdog stops a hung test by killing its worker) collects again. If it
+doesn't collect the same tests, xdist only writes that in its debug log and still sends it indices into the first
+collection: the worker fails on an index it doesn't have and the whole run ends with an INTERNALERROR. This scheduler
+prints the difference and shuts that worker down instead; the tests it would have run go to the other workers.
 """
 import json
 import os
@@ -49,6 +54,7 @@ def longest_first(collection, durations):
 
 try:
     from xdist.scheduler import LoadScheduling
+    from xdist.scheduler.load import report_collection_diff
 except ImportError:
     LoadScheduling = None
 else:
@@ -75,6 +81,30 @@ else:
             if not self.pending:
                 for node in self.nodes:
                     node.shutdown()
+
+        def add_node_collection(self, node, collection):
+            """
+            Called by xdist when `node` finished collecting. A node that comes after the first collection (it replaces a
+            crashed one) and collected other tests gets no test: it is shut down, and the difference is printed. If the
+            other workers are shutting down too, the tests still pending can't run anywhere: they are printed and
+            dropped, else xdist stops with "no active workers" while they wait.
+            """
+            if self.collection_is_completed and collection != self.collection:
+                reference = next(iter(self.node2collection)).gateway.id
+                self._warn(f"{report_collection_diff(self.collection, collection, reference, node.gateway.id)}\n"
+                           f"shutting down {node.gateway.id}: its tests go to the other workers")
+                node.shutdown()
+                if self.pending and all(other.shutting_down for other in self.nodes):
+                    self._warn("not run, no worker left with the same collection:\n" +
+                               "\n".join(self.collection[index] for index in self.pending))
+                    self.pending.clear()
+                return
+            super().add_node_collection(node, collection)
+
+        def _warn(self, text):
+            terminal = self.config.pluginmanager.get_plugin("terminalreporter")
+            if terminal is not None:
+                terminal.write_line("\n" + text, yellow=True)
 
         def check_schedule(self, node, duration=0):
             """Called when `node` finished a test (or a node went down): top its queue up to QUEUED tests."""

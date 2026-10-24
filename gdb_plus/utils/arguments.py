@@ -5,7 +5,7 @@ from gdb_plus.utils.logger import DEBUG
 
 if TYPE_CHECKING:
     from typing import Iterable
-    from gdb_plus.gdb_plus import Debugger
+    from gdb_plus.debugger import Debugger
 
 # First register is where to save the syscall num
 syscall_calling_convention: dict[str, list[str]] = {

@@ -56,6 +56,9 @@ def pytest_addoption(parser):
     group.addoption("--timeout-scale", type=float, default=float(os.environ.get("GDB_PLUS_TIMEOUT_SCALE", 1)),
                     help="multiply every timeout (slow machines, docker, valgrind...)")
     group.addoption("--pwn-log-level", default="error", help="pwntools log level during the tests")
+    group.addoption("--remote-gdbserver", metavar="USER@HOST", default=os.environ.get("GDB_PLUS_REMOTE_GDBSERVER"),
+                    help="arm64 machine reached with ssh (key login) for the aarch64_remote target: the fixtures are "
+                         "built and run there under gdbserver (env GDB_PLUS_REMOTE_GDBSERVER)")
 
 
 ########################## SELECTION ##########################
@@ -81,6 +84,8 @@ def _skip_reason(item, config):
             return f"qemu-user for {arch} and gdb-multiarch are required"
         if item.get_closest_marker("syscall_catchpoints") and not environment.qemu_catches_syscalls(arch):
             return f"this qemu-{arch} doesn't report syscalls to gdb (catch syscall: 'Your system does not support this type of catchpoint')"
+    if item.get_closest_marker("remote_gdbserver") and shutil.which("gdb-multiarch") is None:
+        return "gdb-multiarch is required to debug the arm64 gdbserver of --remote-gdbserver"
     if item.get_closest_marker("libdebug") and not environment.has_legacy_libdebug():
         return "legacy libdebug: pip3 install git+https://github.com/Angelo942/libdebug.git"
     if item.get_closest_marker("new_libdebug") and not environment.has_new_libdebug():
@@ -115,6 +120,13 @@ def _declared_outcome(item):
 
 
 def pytest_collection_modifyitems(config, items):
+    # Without the arm64 machine its runs are deselected, not skipped: the recorder keeps the results of the last run
+    # that had it instead of replacing them with "not run"
+    if not config.getoption("--remote-gdbserver"):
+        remote = [item for item in items if item.get_closest_marker("remote_gdbserver")]
+        if remote:
+            items[:] = [item for item in items if not item.get_closest_marker("remote_gdbserver")]
+            config.hook.pytest_deselected(items=remote)
     for item in items:
         tier = _tier(item)
         if tier is not None:
@@ -290,6 +302,25 @@ def _built_fixtures():
     return environment.build_fixtures()
 
 
+@pytest.fixture(scope="session")
+def remote_host(request, tmp_path_factory):
+    """
+    The arm64 machine of --remote-gdbserver (support/remote_host.py), checked and with the fixture sources copied
+    there once per session. Skips the tests that use it when it can't be reached or isn't arm64.
+    """
+    from support.remote_host import RemoteHost
+    destination = request.config.getoption("--remote-gdbserver")
+    if not destination:
+        pytest.skip("needs an arm64 machine with gdbserver: --remote-gdbserver=user@host")
+    host = RemoteHost(destination, tmp_path_factory.mktemp("remote_fixtures"))
+    try:
+        host.setup()
+    except (RuntimeError, subprocess.TimeoutExpired) as error:
+        pytest.skip(f"--remote-gdbserver={destination} can't be used: {error}")
+    if host.arch != "aarch64":
+        pytest.skip(f"the aarch64_remote target needs an arm64 machine, {destination} is {host.arch}")
+    return host
+
 @pytest.fixture
 def fixture_binary(_built_fixtures, tmp_path):
     """
@@ -389,11 +420,14 @@ def _descendants(pid):
     return found
 
 
-def _shutdown(dbg, *, seconds=20):
-    """Close a debugger without ever hanging the suite, then kill whatever survived."""
+def _shutdown(dbg, *, seconds=20, local=True):
+    """
+    Close a debugger without ever hanging the suite, then kill whatever survived. local=False for a process of another
+    machine: its pid means nothing here.
+    """
     from pwn import context
     debuggers = [dbg] + list(getattr(dbg, "children", {}).values())
-    pids = [d.pid for d in debuggers if getattr(d, "pid", None)]
+    pids = [d.pid for d in debuggers if getattr(d, "pid", None)] if local else []
 
     def expired(signum, frame):
         raise TestTimeout("close() hung")
@@ -480,7 +514,9 @@ def debugger(request):
 
     backend is a target of the integration axis (integration/conftest.py): gdb, libdebug, new_libdebug,
     remote (the target runs under gdbserver and dbg.p is gdbserver's stdin/stdout), i386 or a qemu arch
-    (the target is the binary of that arch: use the `basic` / target_binary fixtures).
+    (the target is the binary of that arch: use the `basic` / target_binary fixtures). aarch64_remote is remote on
+    the machine of --remote-gdbserver: target is the local copy of a fixture built there (target_binary), which runs
+    there under gdbserver.
 
     Every debugger is closed after the test, even if it fails or hangs. If the test passed we also
     check the invariant every legacy test asserted by hand: the wait priority is back to 0 (the actions interrupt()
@@ -491,6 +527,7 @@ def debugger(request):
     from pwn import context
     from support.results import BACKENDS
     created = []
+    remote_servers = []  # gdbservers of --remote-gdbserver, stopped after their debugger is closed
 
     def build(target, **kwargs):
         # A Debugger whose __init__ raises is never returned to us, but its gdb may already hold the process
@@ -509,9 +546,22 @@ def debugger(request):
     def factory(target, *, backend="gdb", **kwargs):
         if isinstance(target, Path):
             target = str(target)
-        if backend not in BACKENDS:
+        if backend not in BACKENDS and backend != "aarch64_remote":
             raise ValueError(backend)
-        if backend == "remote":
+        if backend == "aarch64_remote":
+            host = request.getfixturevalue("remote_host")
+            kwargs.pop("aslr", None)
+            argv = [target] if isinstance(target, str) else list(target)
+            binary = kwargs.pop("binary", argv[0])
+            server = host.start_gdbserver([host.remote_path(Path(argv[0]).name), *argv[1:]], env=kwargs.pop("env", None))
+            try:
+                dbg = build(server.address, binary=binary, **kwargs)
+            except BaseException:
+                server.stop()
+                raise
+            dbg.p = server.tube
+            remote_servers.append(server)
+        elif backend == "remote":
             env = kwargs.pop("env", None)
             kwargs.pop("aslr", None)  # gdbserver disables the randomization by default
             binary = kwargs.pop("binary", target if isinstance(target, str) else None)
@@ -537,12 +587,12 @@ def debugger(request):
     leaks = []
     if passed and not request.node.get_closest_marker("allow_priority_leak"):
         for dbg in created:
-            if not dbg.debugging or dbg._closed.is_set():
+            if not dbg.debugging or dbg.control.closed.is_set():
                 continue
             with context.silent:
                 if dbg.running:  # a c(wait=False) still in flight legitimately holds a priority
                     continue
-            if dbg._priority.suspended:  # so do the actions interrupt() suspended, until resume()
+            if dbg.control.priority.suspended:  # so do the actions interrupt() suspended, until resume()
                 continue
             deadline = time.time() + 2
             while dbg.priority != 0 and time.time() < deadline:
@@ -550,7 +600,9 @@ def debugger(request):
             if dbg.priority != 0:
                 leaks.append(f"[{dbg.pid}] priority {dbg.priority}")
     for dbg in reversed(created):
-        _shutdown(dbg)
+        _shutdown(dbg, local=not any(server.tube is dbg.p for server in remote_servers))
+    for server in remote_servers:
+        server.stop()
     log = getattr(request.node, "gdb_terminal_log", None)
     if log is not None:
         _kill_terminals_of(log)

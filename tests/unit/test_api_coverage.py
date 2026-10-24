@@ -60,8 +60,9 @@ def _used(name):
 
 def _alias_of(name):
     """The other public names bound to the same function or property (until = continue_until...)"""
-    value = Debugger.__dict__.get(name)
-    return [other for other in _public_names() if other != name and Debugger.__dict__.get(other) is value and value is not None]
+    # Looked up through the MRO: an alias lives in the mixin of its feature area, not in Debugger.__dict__
+    value = inspect.getattr_static(Debugger, name, None)
+    return [other for other in _public_names() if other != name and inspect.getattr_static(Debugger, other, None) is value and value is not None]
 
 
 @pytest.mark.parametrize("name", _public_names())

@@ -14,7 +14,9 @@ Every result belongs to a feature (the test function and its parameters other th
     remote        gdbserver, debugged through Debugger((host, port))
     i386          32 bit x86, native, gdb
     arm aarch64 riscv32 riscv64 mips mips64     qemu-user + gdb-multiarch
-    aarch64_native aarch64_remote               planned: a real arm64 machine (the Raspberry Pi), see PLANNED
+    aarch64_native                              planned: the whole suite on a real arm64 machine (the Raspberry Pi)
+    aarch64_remote                              the gdbserver of an arm64 machine (--remote-gdbserver), debugged
+                                                from here: only integration/test_gdbserver.py so far, see PLANNED
 The domain comes from @pytest.mark.domain(name), else a parameter whose value is a domain (the `backend`
 target axis of tests/integration), else the qemu(arch) / libdebug / new_libdebug markers, else gdb.
 
@@ -56,22 +58,23 @@ RESULTS = Path(os.environ.get("GDB_PLUS_RESULTS_DIR", TESTS / ".results"))
 QEMU_ARCHES = ["arm", "aarch64", "riscv32", "riscv64", "mips", "mips64"]
 # Values of the `backend` target axis of tests/integration (and of any parameter that picks a domain)
 BACKENDS = ["gdb", "libdebug", "new_libdebug", "remote", "i386", *QEMU_ARCHES]
-# Domains of the matrix that no test runs on yet: each integration feature gets a "not covered" cell with this reason
-# instead of "missing". They are in no group, so the markers written for the other targets don't decide for them
+# Domains of the matrix that most features don't run on yet: an integration feature without a test there gets a "not
+# covered" cell with this reason instead of "missing". They are in no group, so the markers written for the other
+# targets don't decide for them
 PLANNED = {
     "aarch64_native": "planned, no harness yet: gdb_plus, gdb and the process all on a real arm64 machine "
                       "(the Raspberry Pi, tests/arm_pi_test_plan.md part A)",
-    "aarch64_remote": "planned, no harness yet: a gdbserver on the Raspberry Pi debugged from the x86-64 laptop with "
-                      "gdb-multiarch (tests/arm_pi_test_plan.md part B)",
+    "aarch64_remote": "this test doesn't take the target axis: it never runs on the gdbserver of the arm64 machine of "
+                      "--remote-gdbserver (tests/arm_pi_test_plan.md part B)",
 }
 DOMAINS = ["offline", *BACKENDS, *PLANNED]
 GROUPS = {
     "native": ["gdb", "libdebug", "new_libdebug"],        # a local x86-64 process
     "libdebugs": ["libdebug", "new_libdebug"],
-    "gdb_only": [d for d in BACKENDS if d not in ["libdebug", "new_libdebug"]],  # every domain that goes through gdb
-    "not_gdb": [d for d in BACKENDS if d != "gdb"],
+    "gdb_only": [*(d for d in BACKENDS if d not in ["libdebug", "new_libdebug"]), "aarch64_remote"],  # every domain that goes through gdb
+    "not_gdb": [*(d for d in BACKENDS if d != "gdb"), "aarch64_remote"],
     "qemu": QEMU_ARCHES,
-    "foreign": ["i386", *QEMU_ARCHES],                     # every architecture but x86-64
+    "foreign": ["i386", *QEMU_ARCHES, "aarch64_remote"],   # every architecture but x86-64
     "32bit": ["i386", "arm", "riscv32", "mips"],
 }
 TIERS = ["unit", "integration", "regression"]
@@ -178,7 +181,7 @@ def domain_of(item):
     callspec = getattr(item, "callspec", None)
     if callspec is not None:
         for name, value in callspec.params.items():
-            if isinstance(value, str) and value in BACKENDS:
+            if isinstance(value, str) and (value in BACKENDS or value in PLANNED):
                 return value, name
     marker = item.get_closest_marker("qemu")
     if marker is not None:
