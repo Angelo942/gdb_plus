@@ -60,6 +60,8 @@ def test_general_purpose_registers(dbg):
 
 
 @pytest.mark.known_gap("libdebug", "the legacy fork can not parse lower registers")
+@pytest.mark.known_gap("aarch64", "gdb 12 gives $wN the type long: GdbBackend.read_register masks with the size gdb reports and returns all of xN (debugger/engines/gdb.py:read_register)")
+@pytest.mark.known_gap("aarch64_remote", "gdb 12 gives $wN the type long: GdbBackend.read_register masks with the size gdb reports and returns all of xN (debugger/engines/gdb.py:read_register)")
 @pytest.mark.not_applicable("arm", "this architecture has no named sub-registers (like eax inside rax, or w0 inside x0)")
 @pytest.mark.not_applicable("riscv32", "this architecture has no named sub-registers (like eax inside rax, or w0 inside x0)")
 @pytest.mark.not_applicable("riscv64", "this architecture has no named sub-registers (like eax inside rax, or w0 inside x0)")
@@ -122,7 +124,7 @@ def test_generic_registers(dbg):
 @pytest.mark.not_applicable("riscv32", "base_pointer raises NotImplementedError: riscv has no frame pointer role")
 @pytest.mark.not_applicable("riscv64", "base_pointer raises NotImplementedError: riscv has no frame pointer role")
 @pytest.mark.not_applicable("native", "this test checks that base_pointer raises where the ABI has no frame pointer: this architecture has one (test_generic_registers reads it)")
-@pytest.mark.not_applicable("remote", "this test checks that base_pointer raises where the ABI has no frame pointer: this architecture has one (test_generic_registers reads it)")
+@pytest.mark.not_applicable("gdbserver", "this test checks that base_pointer raises where the ABI has no frame pointer: this architecture has one (test_generic_registers reads it)")
 @pytest.mark.not_applicable("i386", "this test checks that base_pointer raises where the ABI has no frame pointer: this architecture has one (test_generic_registers reads it)")
 @pytest.mark.not_applicable("arm", "this test checks that base_pointer raises where the ABI has no frame pointer: this architecture has one (test_generic_registers reads it)")
 @pytest.mark.not_applicable("aarch64", "this test checks that base_pointer raises where the ABI has no frame pointer: this architecture has one (test_generic_registers reads it)")
@@ -140,6 +142,7 @@ def test_no_base_pointer_on_riscv(dbg):
 @pytest.mark.known_gap("libdebugs", "the long registers are read through gdb only")
 @pytest.mark.known_gap("i386", "_long_registers only lists the xmm registers of amd64")
 @pytest.mark.not_applicable("qemu", "xmm registers are the SSE registers of x86: the QEMU targets are other architectures")
+@pytest.mark.not_applicable("aarch64_remote", "xmm registers are the SSE registers of x86: the gdbserver of this target runs on arm64")
 def test_xmm_registers(dbg):
     """
     A 128 bit xmm register can be assigned and read back as one integer (it is a register, not a Python attribute) and
@@ -171,6 +174,7 @@ def test_arguments_in_registers_and_on_the_stack(dbg):
 
 @_with(STACK_ARGUMENTS_GAP)
 @pytest.mark.known_gap("aarch64", "Arguments reads the stack arguments from sp + i*8, only right at the function entry")
+@pytest.mark.known_gap("aarch64_remote", "Arguments reads the stack arguments from sp + i*8, only right at the function entry")
 @pytest.mark.known_gap("arm", "Arguments reads the stack arguments from sp + i*4, only right at the function entry")
 def test_arguments_in_the_function_body(dbg):
     """
@@ -376,31 +380,32 @@ def test_canary_can_be_set_after_a_leak(dbg):
     assert dbg.canary == leaked
 
 
-def _permissions(pid, address):
-    for line in Path(f"/proc/{pid}/maps").read_text().splitlines():
+def _permissions(machine, pid, address):
+    """Permissions (rwxp) of the mapping that holds address, from /proc/<pid>/maps on the machine of the process"""
+    for line in machine.read_file(f"/proc/{pid}/maps").decode().splitlines():
         start, end = (int(x, 16) for x in line.split()[0].split("-"))
         if start <= address < end:
             return line.split()[1]
 
 
 @GUEST_PERMISSIONS
-def test_make_page_rwx(dbg):
+def test_make_page_rwx(dbg, target_machine):
     """make_page_rwx() changes the permissions of the page holding an address to rwx, as /proc/<pid>/maps shows."""
     pointer = dbg.alloc(0x20)
     dbg.make_page_rwx(pointer)
-    assert _permissions(dbg.pid, pointer).startswith("rwx")
+    assert _permissions(target_machine, dbg.pid, pointer).startswith("rwx")
 
 
 @GUEST_PERMISSIONS
-def test_make_page_rwx_across_pages(dbg):
+def test_make_page_rwx_across_pages(dbg, target_machine):
     """make_page_rwx(address, size) also changes the next page when the data crosses the end of the first one."""
     pointer = dbg.alloc(0x20)
     end_of_page = pointer - pointer % dbg.page_size + dbg.page_size
-    if _permissions(dbg.pid, end_of_page) is None:
+    if _permissions(target_machine, dbg.pid, end_of_page) is None:
         pytest.skip("the page after the allocation is not mapped")
     dbg.make_page_rwx(end_of_page - 0x10, 0x20)
-    assert _permissions(dbg.pid, end_of_page - 0x10).startswith("rwx")
-    assert _permissions(dbg.pid, end_of_page).startswith("rwx")
+    assert _permissions(target_machine, dbg.pid, end_of_page - 0x10).startswith("rwx")
+    assert _permissions(target_machine, dbg.pid, end_of_page).startswith("rwx")
 
 
 def test_page_size(dbg):
@@ -411,7 +416,7 @@ def test_page_size(dbg):
 
 
 @call_hangs
-def test_inject_shellcode(dbg):
+def test_inject_shellcode(dbg, target_machine):
     """
     inject_shellcode() writes code into a new rwx page; call() of that address runs it (a hand assembled function that
     returns 0x1337).
@@ -420,7 +425,7 @@ def test_inject_shellcode(dbg):
     address = dbg.inject_shellcode(shellcode)
     assert dbg.read(address, len(shellcode)) == shellcode
     if context.native:  # see GUEST_PERMISSIONS
-        assert _permissions(dbg.pid, address).startswith("rwx")
+        assert _permissions(target_machine, dbg.pid, address).startswith("rwx")
     assert dbg.call(address) == 0x1337
 
 
@@ -448,15 +453,17 @@ def test_inject_sleep(dbg):
     assert b"counter 5" in dbg.p.recvall(timeout=5)
 
 
-def test_maps_and_libs(dbg):
+def test_maps_and_libs(dbg, target_machine):
     """
     dbg.libs maps each loaded file (the executable, the libc) to its range, and dbg.maps gives the size of each mapping.
     """
     libs = dbg.libs
-    assert dbg.exe.path in libs
+    # dbg.libs is keyed by the paths of the machine that runs the process
+    exe_path = target_machine.program_path(dbg.exe.path)
+    assert exe_path in libs
     if not dbg.exe.statically_linked:
         assert any(re.search(r"/libc[.-]", path) for path in libs)
-    assert dbg.maps[libs[dbg.exe.path][0]] > 0
+    assert dbg.maps[libs[exe_path][0]] > 0
 
 
 def test_disassemble(dbg):
@@ -500,7 +507,7 @@ def test_inject_shellcode_without_mprotect(dbg):
     _return_through_injected_code(dbg, skip_mprotect=True)
 
 
-@pytest.mark.not_applicable("remote", "another local process by pid: the remote target has no /proc of its own to read through")
+@pytest.mark.not_applicable("gdbserver", "another local process by pid: the remote target has no /proc of its own to read through")
 @pytest.mark.not_applicable("foreign", "another local process by pid: under QEMU /proc/<pid>/mem is the emulator's memory, not the guest's")
 @pytest.mark.known_gap("gdb", "read()/write() ignore pid= with gdb: they always use the current inferior (debugger/engines/gdb.py:read, write)")
 @pytest.mark.known_gap("new_libdebug", "read()/write() ignore pid= with new libdebug: they always use its own process (debugger/engines/new_libdebug.py:read, write)")

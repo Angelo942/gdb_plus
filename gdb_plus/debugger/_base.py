@@ -42,6 +42,9 @@ if DEBUG: _logger.level = 10
 
 DEBUG_OFF = "Debug is off, commands won't be executed"
 IMPORTANT_DEBUG_OFF = "Tried to get information while debug is off. Make sure to ignore the output"
+# For the actions that signal the process or attach to it by pid from this machine
+NEEDS_LOCAL_PROCESS = ("{} reaches the process through its pid on this machine: it can't be used on a gdbserver target, "
+                       "whose pid may be another machine's")
 
 SHOULD_STOP = 0b1
 SKIP_SYSCALL = 0b10

@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from pwn import log, sleep
 
 from gdb_plus.utils import DEBUG
-from gdb_plus.debugger._base import DebuggerBase, DEBUG_OFF, IMPORTANT_DEBUG_OFF, context_decorator, _logger
+from gdb_plus.debugger._base import DebuggerBase, DEBUG_OFF, IMPORTANT_DEBUG_OFF, NEEDS_LOCAL_PROCESS, context_decorator, _logger
 
 if TYPE_CHECKING:
     from gdb import Inferior
@@ -110,6 +110,8 @@ class ForksMixin(DebuggerBase):
     # I thought about setting emulate_ptrace for the child if it is set in the parent, but I want to let the user free of choosing the parameters they wants [23/07/23]
     @context_decorator
     def _split_child(self, *, pid: int | None = None, inferior: Inferior | None = None, n: int | None = None, script: str = "") -> Debugger:
+        if not self.local_debugging:
+            log.error(NEEDS_LOCAL_PROCESS.format("Splitting a child (a new gdb attached to its pid)"))
         if inferior is None:
             for inf_n, inferior in self.inferiors.items():
                 if (pid is not None and inferior.pid == pid) or (n is not None and inf_n == n):
@@ -185,6 +187,9 @@ class ForksMixin(DebuggerBase):
 
         if self._pwndbg:
             log.warn_once("pwndbg may not handle correctly multi process applications. We recommend using GEF")
+
+        if not off and not self.local_debugging:
+            log.error(NEEDS_LOCAL_PROCESS.format("set_split_on_fork() (a new gdb attached to the pid of each child)"))
 
         if off:
             self._backend.stop_splitting()

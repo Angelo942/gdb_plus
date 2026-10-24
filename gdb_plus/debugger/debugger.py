@@ -15,7 +15,7 @@ from pwn import ELF, args, context, log, process, sleep
 from gdb_plus.utils import DEBUG, EXE, enum_libs, unexpected
 from gdb_plus.setup import identify_executable
 from gdb_plus.debugger.engines import GdbBackend
-from gdb_plus.debugger._base import DEBUG_OFF, context_decorator, _logger, ch
+from gdb_plus.debugger._base import DEBUG_OFF, NEEDS_LOCAL_PROCESS, context_decorator, _logger, ch
 from gdb_plus.debugger.launch import LaunchMixin
 from gdb_plus.debugger.backends import BackendsMixin
 from gdb_plus.debugger.stops import StopsMixin
@@ -203,6 +203,8 @@ class Debugger(LaunchMixin, BackendsMixin, StopsMixin, ControlFlowMixin, Steppin
         `timeout` seconds until the process is in the loop; then restore the code and continue from debug_from under gdb.
         """
         # NOTE: I can't attach again to the process if we are under an emulator
+        if not self.local_debugging:
+            log.error(NEEDS_LOCAL_PROCESS.format("Debugger(debug_from=)"))
         assert context.native, "debug_from isn't supported in qemu"
         address_debug_from = self._parse_address(debug_from)
         backup = self.inject_sleep(address_debug_from)
@@ -226,7 +228,7 @@ class Debugger(LaunchMixin, BackendsMixin, StopsMixin, ControlFlowMixin, Steppin
         if self._exe is not None and not self._exe.statically_linked and self.ld is None:
             log.warn_once(f"{self._exe.name} is not marked as statically linked, but I can not find a loader!")
         elif self._exe is not None and self.ld is not None and self.instruction_pointer in self.ld:
-            if not context.native:
+            if not context.native and (self.local_debugging or self.pid is None):
                 log.warn_once("Debugging from entry may fail with qemu. In case set Debugger(..., from_entry = False)")
             try:
                 address = self._exe.entry

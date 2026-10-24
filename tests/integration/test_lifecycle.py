@@ -15,7 +15,7 @@ from support.local_server import serve_binary
 # Debugger() always starts the process with gdb; the libdebug backends only exist after migrate()
 CONSTRUCTION = pytest.mark.not_applicable("libdebugs", "Debugger() always starts with gdb: the libdebug backends come later, with migrate()")
 # A (host, port) target is already running under gdbserver: how to start or attach to it is not ours to choose
-NO_LOCAL_PROCESS = pytest.mark.not_applicable("remote", "the target is a gdbserver: there is no local process to start or attach to")
+NO_LOCAL_PROCESS = pytest.mark.not_applicable("gdbserver", "the target is a gdbserver: there is no local process to start or attach to")
 # QEMU starts the program itself, gdb_plus refuses to attach to an emulated process (documented)
 NO_ATTACH_UNDER_QEMU = pytest.mark.not_applicable("qemu", "gdb_plus can't attach to a process under QEMU (documented)")
 STATIC = pytest.mark.not_applicable("qemu", "the QEMU fixtures are static: no loader, no libc")
@@ -47,12 +47,13 @@ def test_starts_at_the_entry_point(debugger, basic, backend):
         assert dbg.instruction_pointer in dbg.exe
 
 
-def test_non_pie_executable_has_a_range(debugger, fixture_binary, target_binary, backend):
+def test_non_pie_executable_has_a_range(debugger, target_binary, backend):
     """
     For a non PIE executable dbg.exe.address is the address in the ELF, dbg.exe has an end address and the instruction
     pointer is inside its range.
     """
-    path = fixture_binary("basic_nopie") if backend in ["gdb", "libdebug", "new_libdebug", "remote"] else target_binary("basic")
+    # basic is not PIE on i386 and on the QEMU targets, which have no basic_nopie
+    path = target_binary("basic_nopie") if backend in ["gdb", "libdebug", "new_libdebug", "remote", "aarch64_remote"] else target_binary("basic")
     dbg = debugger(path, backend=backend)
     assert not dbg.exe.pie
     assert dbg.exe.address == ELF(path, checksec=False).address
@@ -71,7 +72,7 @@ def test_from_entry_false_stops_in_the_loader(debugger, basic, backend):
 
 
 @CONSTRUCTION
-@pytest.mark.not_applicable("remote", "the test passes a path, an ELF or an EXE as target: a remote target is a (host, port) tuple instead")
+@pytest.mark.not_applicable("gdbserver", "the test passes a path, an ELF or an EXE as target: a remote target is a (host, port) tuple instead")
 @pytest.mark.parametrize("kind", ["str", "ELF", "EXE"])
 def test_target_types(debugger, basic, backend, kind):
     """The target can be a path, a pwntools ELF or a gdb_plus EXE: all of them start the same binary."""
@@ -307,7 +308,7 @@ def test_execute_action_and_wait(debugger, basic, backend):
 ########################## CTF SWITCHES ##########################
 
 SWITCH = [pytest.mark.not_applicable("libdebugs", "NOPTRACE and REMOTE start no debugger at all: there is no libdebug backend to choose"),
-          pytest.mark.not_applicable("remote", "the switch changes how a local binary is started (or replaces it with a connection): a gdbserver target is already started"),
+          pytest.mark.not_applicable("gdbserver", "the switch changes how a local binary is started (or replaces it with a connection): a gdbserver target is already started"),
           pytest.mark.untested("foreign", "the switch only changes how the process is started: covered on x86-64")]
 
 
@@ -370,9 +371,9 @@ def test_connect_while_debugging(debugger, basic):
 
 ########################## DETACH / GDB DEATH ##########################
 
-def _state(pid):
-    """The state letter of /proc/<pid>/stat: R running, S sleeping, T stopped, Z zombie"""
-    return open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[0]
+def _state(machine, pid):
+    """The state letter of /proc/<pid>/stat on the machine of the process: R running, S sleeping, T stopped, Z zombie"""
+    return machine.read_file(f"/proc/{pid}/stat").decode().rsplit(")", 1)[1].split()[0]
 
 
 def test_detach_without_quit_leaves_the_process_running(debugger, basic, backend):
@@ -389,7 +390,8 @@ def test_detach_without_quit_leaves_the_process_running(debugger, basic, backend
 
 @pytest.mark.known_gap("new_libdebug", "detach(block=True) on new libdebug calls self.logger.warn_once: a logging.Logger has no warn_once (debugger/engines/new_libdebug.py:detach)")
 @pytest.mark.known_gap("qemu", "detach(block=True) sends SIGSTOP to qemu itself before `detach`: the stopped gdbstub never answers gdb", run=False)
-def test_detach_with_block_leaves_the_process_stopped(debugger, basic, backend):
+@pytest.mark.not_applicable("gdbserver", "detach(block=True) stops the process with a signal sent from this machine: it is refused on a gdbserver target (test_gdbserver.py checks it)")
+def test_detach_with_block_leaves_the_process_stopped(debugger, basic, backend, target_machine):
     """
     detach(quit=False, block=True) leaves the program stopped (state T in /proc/<pid>/stat) so that another tool can
     attach; a SIGCONT lets it run to its end.
@@ -399,10 +401,10 @@ def test_detach_with_block_leaves_the_process_stopped(debugger, basic, backend):
     pid = dbg.pid
     dbg.detach(quit=False, block=True)
     deadline = time.time() + 5
-    while _state(pid) != "T" and time.time() < deadline:
+    while _state(target_machine, pid) != "T" and time.time() < deadline:
         time.sleep(0.05)
-    assert _state(pid) == "T"
-    os.kill(pid, signal.SIGCONT)
+    assert _state(target_machine, pid) == "T"
+    target_machine.signal(pid, "SIGCONT")
     dbg.p.sendline(b"resumed")
     assert b"line resumed" in dbg.p.recvall(timeout=5)
 

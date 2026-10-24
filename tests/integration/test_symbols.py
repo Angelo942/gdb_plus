@@ -99,7 +99,7 @@ def test_loader(dbg):
 
 
 @pytest.mark.not_applicable("native", "this test is about static binaries: the fixture of this target is dynamically linked (only the QEMU fixtures are static)")
-@pytest.mark.not_applicable("remote", "this test is about static binaries: the fixture of this target is dynamically linked (only the QEMU fixtures are static)")
+@pytest.mark.not_applicable("gdbserver", "this test is about static binaries: the fixture of this target is dynamically linked (only the QEMU fixtures are static)")
 @pytest.mark.not_applicable("i386", "this test is about static binaries: the fixture of this target is dynamically linked (only the QEMU fixtures are static)")
 def test_static_binary_has_no_libraries(dbg):
     """
@@ -158,6 +158,7 @@ def test_libc_range_covers_its_bss(dbg):
 
 
 @STATIC
+@pytest.mark.known_gap("aarch64_remote", "the end of ld is taken from its file-backed mappings: the end of its .bss is in an anonymous page after them, so the range is one page short (debugger/space.py, the EXE of ld)")
 def test_loader_range_is_inferred_from_the_headers(dbg):
     """The range of the loader comes from its program headers and contains every allocated section."""
     assert dbg.ld.end_address == dbg.ld.address + dbg.ld.mapped_size
@@ -165,10 +166,11 @@ def test_loader_range_is_inferred_from_the_headers(dbg):
         assert first in dbg.ld and last in dbg.ld, name
 
 
-def test_libs_and_exe_agree_on_the_base(dbg):
+def test_libs_and_exe_agree_on_the_base(dbg, target_machine):
     """dbg.libs and dbg.exe agree on where the executable starts, and its entry point is inside that range."""
     # The end of the range is checked by test_lifecycle.py::test_non_pie_executable_has_a_range
-    start, end = dbg.libs[dbg.exe.path]
+    # dbg.libs is keyed by the paths of the machine that runs the process
+    start, end = dbg.libs[target_machine.program_path(dbg.exe.path)]
     assert dbg.exe.address == start
     assert start <= dbg.exe.entry < end
 

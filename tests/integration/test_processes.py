@@ -14,10 +14,17 @@ pytestmark = [
 ]
 
 
-def NO_SPLIT(test):
+NO_SPLIT_ON_GDBSERVER = ("splitting attaches a new gdb to the pid of the child on this machine: it is refused on a gdbserver target "
+                         "(test_gdbserver.py checks it)")
+
+def SPLIT_BACKENDS(test):
+    """The libdebug backends can't split: the legacy fork by design, new libdebug not yet"""
     test = pytest.mark.not_applicable("libdebug", "the legacy libdebug fork can not split on fork")(test)
-    test = pytest.mark.known_gap("new_libdebug", "wait_split() raises NotImplementedError")(test)
-    return pytest.mark.known_gap("remote", "the child gets a new local gdb attached to its pid: impossible on a real remote host", run=False)(test)
+    return pytest.mark.known_gap("new_libdebug", "wait_split() raises NotImplementedError")(test)
+
+def NO_SPLIT(test):
+    test = SPLIT_BACKENDS(test)
+    return pytest.mark.not_applicable("gdbserver", NO_SPLIT_ON_GDBSERVER)(test)
 
 
 @pytest.fixture
@@ -75,7 +82,8 @@ def test_child_keeps_the_libraries(debugger, forking, backend):
     assert child.symbols["puts"] == dbg.symbols["puts"]
 
 
-@NO_SPLIT
+@SPLIT_BACKENDS
+@pytest.mark.not_applicable("gdbserver", NO_SPLIT_ON_GDBSERVER)
 def test_split_off(debugger, forking, backend):
     """set_split_on_fork(off=True) cancels the split: the fork happens without creating a child Debugger."""
     dbg = debugger(forking, backend=backend)
@@ -127,6 +135,7 @@ PTRACE_LIBDEBUG = pytest.mark.untested("libdebugs", "covered end to end by regre
 
 @NO_SPLIT
 @PTRACE_LIBDEBUG
+@pytest.mark.not_applicable("aarch64_remote", "the tracer fixture calls PTRACE_GETREGS / PTRACE_SETREGS, which only exist on x86: it doesn't build on arm64")
 @pytest.mark.parametrize("mode", ["cont", "detach"])
 def test_emulate_ptrace(debugger, target_binary, run_without_debugger, backend, mode):
     """A parent tracing its child behaves exactly as without a debugger, although both are debugged."""
@@ -151,6 +160,7 @@ def _program_output(output):
     return b"".join(line for line in output.splitlines(keepends=True) if line.strip() and not line.startswith(noise))
 
 
+@pytest.mark.not_applicable("aarch64_remote", "the tracer fixture calls PTRACE_GETREGS / PTRACE_SETREGS, which only exist on x86: it doesn't build on arm64")
 def test_emulate_ptrace_off_restores_the_functions(debugger, target_binary, backend):
     """emulate_ptrace() patches the libc's ptrace(); emulate_ptrace(off=True) restores its original bytes."""
     dbg = debugger(target_binary("tracer"), backend=backend)
@@ -186,7 +196,7 @@ def test_sysemu_tracer_oracle(fixture_binary, run_without_debugger):
 
 @pytest.mark.timeout(120)
 @pytest.mark.not_applicable("foreign", "PTRACE_SYSEMU only exists on x86-64")
-@pytest.mark.known_gap("remote", "the child gets a new local gdb attached to its pid: impossible on a real remote host")
+@pytest.mark.not_applicable("gdbserver", NO_SPLIT_ON_GDBSERVER)
 @pytest.mark.untested("new_libdebug", "the SYSEMU emulation is only replayed with gdb and the legacy libdebug")
 @pytest.mark.parametrize("engine", [
     "gdb",
@@ -249,7 +259,7 @@ def test_trace_links_two_debuggers(debugger, forking, backend):
 
 @pytest.mark.timeout(180)
 @pytest.mark.not_applicable("new_libdebug", "bruteforce() runs its children with gdb or the legacy libdebug (libdebug=True)")
-@pytest.mark.not_applicable("remote", "bruteforce() forks and splits the process locally")
+@pytest.mark.not_applicable("gdbserver", "bruteforce() forks and splits the process locally")
 @pytest.mark.untested("i386", "slow (forks and debugs n processes): only run on x86-64")
 @pytest.mark.known_gap("gdb", "bruteforce() never returns (root cause not investigated yet)", run=False)
 @pytest.mark.known_gap("libdebug", "bruteforce() never returns (root cause not investigated yet)", run=False)
@@ -331,7 +341,7 @@ def test_trace_a_parent(debugger, forking, backend):
 
 
 @pytest.mark.not_applicable("libdebugs", "inferiors are gdb's own objects (one per process it holds): libdebug has no equivalent")
-@pytest.mark.known_gap("remote", "write() ignores inferior= with gdb: GdbBackend.write_inferior is called without it and writes in the current inferior (debugger/engines/gdb.py:write)")
+@pytest.mark.known_gap("gdbserver", "write() ignores inferior= with gdb: GdbBackend.write_inferior is called without it and writes in the current inferior (debugger/engines/gdb.py:write)")
 @pytest.mark.known_gap("gdb", "write() ignores inferior= with gdb: GdbBackend.write_inferior is called without it and writes in the current inferior (debugger/engines/gdb.py:write)")
 @pytest.mark.known_gap("i386", "write() ignores inferior= with gdb: GdbBackend.write_inferior is called without it and writes in the current inferior (debugger/engines/gdb.py:write)")
 def test_read_and_write_in_another_inferior(debugger, forking, backend):
@@ -352,7 +362,7 @@ def test_read_and_write_in_another_inferior(debugger, forking, backend):
 
 @pytest.mark.timeout(180)
 @pytest.mark.not_applicable("new_libdebug", "bruteforce() runs its children with gdb or the legacy libdebug (libdebug=True)")
-@pytest.mark.not_applicable("remote", "bruteforce() forks and splits the process locally")
+@pytest.mark.not_applicable("gdbserver", "bruteforce() forks and splits the process locally")
 @pytest.mark.untested("i386", "slow (forks and debugs n processes): only run on x86-64")
 @pytest.mark.known_gap("gdb", "bruteforce() never returns: test_bruteforce times out the same way", run=False)
 @pytest.mark.known_gap("libdebug", "bruteforce() never returns: test_bruteforce times out the same way", run=False)
@@ -385,7 +395,7 @@ def test_bruteforce_with_threads_init_and_backup(debugger, basic, backend):
 
 @pytest.mark.timeout(180)
 @pytest.mark.not_applicable("new_libdebug", "bruteforce() runs its children with gdb or the legacy libdebug (libdebug=True)")
-@pytest.mark.not_applicable("remote", "bruteforce() forks and splits the process locally")
+@pytest.mark.not_applicable("gdbserver", "bruteforce() forks and splits the process locally")
 @pytest.mark.untested("i386", "slow (forks and debugs n processes): only run on x86-64")
 @pytest.mark.known_gap("gdb", "bruteforce() never returns: test_bruteforce times out the same way", run=False)
 @pytest.mark.known_gap("libdebug", "bruteforce() never returns: test_bruteforce times out the same way", run=False)

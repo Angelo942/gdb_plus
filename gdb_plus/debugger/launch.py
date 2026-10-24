@@ -8,7 +8,7 @@ from pwnlib.exception import PwnlibException
 
 from gdb_plus.utils import DEBUG
 from gdb_plus.debugger.engines import GdbBackend
-from gdb_plus.debugger._base import DebuggerBase, DEBUG_OFF, context_decorator, GdbDiedError
+from gdb_plus.debugger._base import DebuggerBase, DEBUG_OFF, NEEDS_LOCAL_PROCESS, context_decorator, GdbDiedError
 
 if TYPE_CHECKING:
     from typing import Callable
@@ -142,6 +142,8 @@ class LaunchMixin(DebuggerBase):
             self.debug_from_done.set()
             return
 
+        if not self.local_debugging:
+            log.error(NEEDS_LOCAL_PROCESS.format("debug_from()"))
         if not context.native:
             log.error("debug_from is not supported under QEMU")
 
@@ -224,10 +226,13 @@ class LaunchMixin(DebuggerBase):
         Args:
             quit (bool, optional): If True, the program is terminated after detaching. Defaults to True.
             block (bool, optional): If True, prevent the process from continuing the execution when the debugger is not attached. Defaults to False.
+                Only for a local process: the process is stopped with a SIGSTOP sent from this machine.
         """
         if not self.debugging:
             log.warn_once(DEBUG_OFF)
             return
+        if block and not self.local_debugging:
+            log.error(NEEDS_LOCAL_PROCESS.format("detach(block=True)"))
 
         # Must be stopped
         try:

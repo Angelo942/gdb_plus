@@ -230,18 +230,21 @@ class AddressSpace:
             log.info(f"{name} is already accessible as dbg.{name}")
             return self._libraries[name]
 
+        dbg = self.dbg
         if local_path is not None:
             path = local_path
 
         # If we already downloaded the library look for it. (Maybe we have to worry about name collisions but it's so rare it's not gonna come up in the next few years) [09/05/25] 
-        elif (path := self.local_path(name)) is not None:
-                print(f"found {path}")
+        # Only without a process (REMOTE, NOPTRACE): with one, the library exists once the maps show it, and local_path()
+        # below still prefers the copy in gdb_files
+        elif not dbg.debugging and (path := self.local_path(name)) is not None:
+            if DEBUG: dbg.logger.debug("found %s", path)
 
         else:
             found_path = None
             for path in self.libs:
                 library_name = Path(path).name
-                if str(name) in library_name:
+                if Path(name).name in library_name: # name can also be the full path of the library on the remote server
                     if found_path is not None:
                         log.warn(f"Name is not specific enough! Could mean both {found_path} and {path}")
                     found_path = path

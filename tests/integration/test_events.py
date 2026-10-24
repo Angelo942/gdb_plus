@@ -201,6 +201,7 @@ def test_strace_exclude(dbg, capfd):
 
 @NO_CATCHPOINTS
 @pytest.mark.not_applicable("qemu", "qemu-user can't stop a guest blocked in a syscall: the interrupt waits for read() to return (gdb_plus warns about it)")
+@pytest.mark.known_gap("aarch64_remote", "syscall_restarts() recognises a syscall stopped by a signal from -ERESTART* in the return register (x86): arm64 rewinds pc to the svc and puts back x0 before the signal stop, so the interrupted read() looks finished and its exit callback runs (debugger/control.py:syscall_restarts)")
 def test_resume_a_syscall_callback_interrupted_in_a_blocking_read(dbg):
     """
     The entry callback of a read() catchpoint returns False, so gdb_plus steps over the syscall, which blocks waiting for
@@ -235,6 +236,7 @@ def test_resume_a_syscall_callback_interrupted_in_a_blocking_read(dbg):
 
 @NO_CATCHPOINTS
 @pytest.mark.not_applicable("qemu", "qemu-user can't stop a guest blocked in a syscall: the interrupt waits for read() to return (gdb_plus warns about it)")
+@pytest.mark.known_gap("aarch64_remote", "syscall_restarts() recognises a syscall stopped by a signal from -ERESTART* in the return register (x86): arm64 rewinds pc to the svc and puts back x0 before the signal stop, so the interrupted read() looks finished and its exit callback runs (debugger/control.py:syscall_restarts)", run=False)
 def test_continue_is_refused_while_a_syscall_callback_is_suspended(dbg):
     """
     The same read() catchpoint interrupted in the middle of its step: c() raises Suspended, since it would take the stop
@@ -325,6 +327,7 @@ def test_catch_exec(debugger, target_binary, backend):
 
 @NO_CATCHPOINTS
 @NO_PROCESSES
+@pytest.mark.known_gap("aarch64_remote", "the entry handler steps over the syscall with si: through the arm64 gdbserver the step out of execve never stops (gdb only reports the new program) and the process runs to its end, so the exit callback never runs (debugger/engines/gdb.py:handle_stop)")
 def test_syscall_callbacks_across_exec(debugger, target_binary, backend):
     """
     A callback on execve gets its entry and its exit even though the exit happens in the new program, and the new
@@ -342,6 +345,7 @@ def test_syscall_callbacks_across_exec(debugger, target_binary, backend):
 ########################## TRACING ##########################
 
 @STATIC("the QEMU fixtures are static: no PLT to trace")
+@pytest.mark.known_gap("aarch64_remote", "set_ltrace() breaks on every entry of exe.plt: on arm64 pwntools adds a bogus one (the br x17 inside the last stub), whose callback runs a second finish() inside the finish() of fgets, which then never returns (debugger/events.py:set_ltrace)", run=False)
 def test_ltrace(debugger, basic, backend, capfd):
     """
     set_ltrace() prints every libc call made through the PLT with its arguments (malloc(0x20)), honours exclude=, and
@@ -476,18 +480,22 @@ def test_fault(debugger, target_binary, backend):
 
 ########################## MORE OPTIONS ##########################
 
-def _parent_pid(pid):
-    """Field 4 of /proc/<pid>/stat (under QEMU: the parent of the emulator, which is what the guest's getppid sees)"""
-    return int(open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[1])
+def _parent_pid(machine, pid):
+    """
+    Field 4 of /proc/<pid>/stat on the machine of the process (under QEMU: the parent of the emulator, which is what the
+    guest's getppid sees)
+    """
+    return int(machine.read_file(f"/proc/{pid}/stat").decode().rsplit(")", 1)[1].split()[1])
 
 
 @NO_CATCHPOINTS
-def test_sys_num_can_be_rewritten_on_entry(dbg, sysno):
+@pytest.mark.known_gap("aarch64_remote", "arm64 takes the syscall number from regs->syscallno, which only PTRACE_SETREGSET NT_ARM_SYSTEM_CALL changes: sys_num writes x8, which the kernel ignores at the entry stop (utils/arguments.py:Arguments_syscall)")
+def test_sys_num_can_be_rewritten_on_entry(dbg, sysno, target_machine):
     """
     Assigning dbg.sys_num on the entry of getpid turns it into getppid: the program prints its parent's pid (read from
     /proc) instead of its own.
     """
-    parent = _parent_pid(dbg.pid)  # before the process exits
+    parent = _parent_pid(target_machine, dbg.pid)  # before the process exits
 
     def callback(d, entry):
         if entry:

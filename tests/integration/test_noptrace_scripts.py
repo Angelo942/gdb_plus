@@ -12,7 +12,7 @@ REPO = Path(__file__).resolve().parents[2]
 
 pytestmark = [
     pytest.mark.not_applicable("libdebugs", "NOPTRACE starts no debugger at all: there is no libdebug backend to choose"),
-    pytest.mark.not_applicable("remote", "NOPTRACE changes how a local binary is started: a gdbserver target is already started"),
+    pytest.mark.not_applicable("gdbserver", "NOPTRACE changes how a local binary is started: a gdbserver target is already started"),
     pytest.mark.untested("foreign", "NOPTRACE only changes how the process is started: covered on x86-64"),
 ]
 

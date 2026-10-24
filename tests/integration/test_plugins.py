@@ -10,7 +10,7 @@ PLUGINS = [pytest.param("gef", marks=pytest.mark.gef), pytest.param("pwndbg", ma
 pytestmark = [
     pytest.mark.timeout(120),
     pytest.mark.not_applicable("libdebugs", "GEF and pwndbg are gdb plugins"),
-    pytest.mark.untested("remote", "the shortcuts only forward a command to the plugin: covered on a local process"),
+    pytest.mark.untested("gdbserver", "the shortcuts only forward a command to the plugin: covered on a local process"),
     pytest.mark.untested("foreign", "the shortcuts only forward a command to the plugin: covered on x86-64"),
 ]
 

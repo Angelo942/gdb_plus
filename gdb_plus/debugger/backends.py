@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from pwn import context, log
 
 from gdb_plus.utils import DEBUG
-from gdb_plus.debugger._base import DebuggerBase, DEBUG_OFF, context_decorator
+from gdb_plus.debugger._base import DebuggerBase, DEBUG_OFF, NEEDS_LOCAL_PROCESS, context_decorator
 from gdb_plus.debugger.engines import Backend, GdbBackend, LibdebugBackend, NewLibdebugBackend
 
 if TYPE_CHECKING:
@@ -75,6 +75,8 @@ class BackendsMixin(DebuggerBase):
             log.warn_once(DEBUG_OFF)
             return
 
+        if not self.local_debugging:
+            log.error(NEEDS_LOCAL_PROCESS.format("migrate()"))
         assert context.native, "migrate isn't supported in qemu"
 
         # Maybe put a try except to restore the backup in case of accident [06/06/23]

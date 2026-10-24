@@ -71,6 +71,7 @@ DOMAINS = ["offline", *BACKENDS, *PLANNED]
 GROUPS = {
     "native": ["gdb", "libdebug", "new_libdebug"],        # a local x86-64 process
     "libdebugs": ["libdebug", "new_libdebug"],
+    "gdbserver": ["remote", "aarch64_remote"],           # debugged through a gdbserver: no local process
     "gdb_only": [*(d for d in BACKENDS if d not in ["libdebug", "new_libdebug"]), "aarch64_remote"],  # every domain that goes through gdb
     "not_gdb": [*(d for d in BACKENDS if d != "gdb"), "aarch64_remote"],
     "qemu": QEMU_ARCHES,

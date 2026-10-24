@@ -553,6 +553,7 @@ def debugger(request):
             kwargs.pop("aslr", None)
             argv = [target] if isinstance(target, str) else list(target)
             binary = kwargs.pop("binary", argv[0])
+            host.copy_libraries(Path.cwd())
             server = host.start_gdbserver([host.remote_path(Path(argv[0]).name), *argv[1:]], env=kwargs.pop("env", None))
             try:
                 dbg = build(server.address, binary=binary, **kwargs)

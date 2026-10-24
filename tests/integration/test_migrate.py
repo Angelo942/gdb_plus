@@ -5,7 +5,7 @@ TARGETS = [pytest.param("libdebug", marks=pytest.mark.libdebug), pytest.param("n
 
 pytestmark = [
     pytest.mark.not_applicable("gdb", "every test here starts with gdb and migrates to a libdebug backend: a gdb column would migrate from gdb to gdb"),
-    pytest.mark.not_applicable("remote", "libdebug debugs local processes: a gdbserver session can't migrate"),
+    pytest.mark.not_applicable("gdbserver", "libdebug debugs local processes: migrate() is refused on a gdbserver target (test_gdbserver.py checks it)"),
     pytest.mark.not_applicable("qemu", "libdebug can't debug a process under QEMU (migrate asserts context.native)"),
     pytest.mark.untested("i386", "the legacy libdebug is x86-64 only; new libdebug on i386: test_architectures.py::test_new_libdebug_on_i386"),
 ]

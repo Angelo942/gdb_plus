@@ -73,7 +73,7 @@ class FilesMixin(DebuggerBase):
             try:
                 self.execute(f"remote get {source} {destination}")
             except Exception as e:
-                if not context.native:
+                if not context.native and self.pid is None:
                     log.error("Can not download files from qemu's gdbstup. Please debug qemu itself and pass it in Debugger(..., qemu_gdbserver=...)")
                 else:
                     if DEBUG: self.logger.warning("Could not download %s", source)

@@ -1,4 +1,7 @@
+import os
+import signal
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -82,6 +85,47 @@ def target_binary(request, fixture_binary, tmp_path):
         return fixture_binary(name)
     return get
 
+
+class LocalMachine:
+    """
+    This machine seen from outside the debugged process (/proc, files, signals), for the target_machine fixture.
+    support/remote_host.py:RemoteMachine has the same methods for the arm64 machine of aarch64_remote.
+    """
+    def __init__(self, directory: Path):
+        self.directory = directory
+
+    def read_file(self, path: str) -> bytes:
+        return Path(path).read_bytes()
+
+    def exists(self, path: str) -> bool:
+        return Path(path).exists()
+
+    def write_file(self, path: str, data: bytes):
+        Path(path).write_bytes(data)
+
+    def temporary(self, name: str) -> str:
+        """Path of a file named `name` in the directory of the test"""
+        return str(self.directory / name)
+
+    def signal(self, pid: int, name: str):
+        """Send the signal `name` ("SIGCONT") to a process of the machine"""
+        os.kill(pid, getattr(signal, name))
+
+    def program_path(self, local_path: str) -> str:
+        """Path on the machine of the program whose local copy is local_path"""
+        return str(local_path)
+
+@pytest.fixture
+def target_machine(request, tmp_path):
+    """
+    The machine the debugged process runs on, for the tests that check it from outside: its /proc, its files, signals
+    sent to it. This one, or the arm64 machine of --remote-gdbserver on aarch64_remote.
+    """
+    backend = request.getfixturevalue("backend") if "backend" in request.fixturenames else "gdb"
+    if backend == "aarch64_remote":
+        from support.remote_host import RemoteMachine
+        return RemoteMachine(request.getfixturevalue("remote_host"), tmp_path.name)
+    return LocalMachine(tmp_path)
 
 @pytest.fixture
 def basic(target_binary):

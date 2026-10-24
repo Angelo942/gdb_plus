@@ -24,7 +24,6 @@ SSH = ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "Ser
 # Where the fixtures are copied and built, relative to the home of the remote user
 REMOTE_DIRECTORY = ".cache/gdb_plus_tests"
 
-
 class RemoteHost:
     """
     One ssh destination, set up once per session by the remote_host fixture (tests/conftest.py): setup() checks the
@@ -79,6 +78,20 @@ class RemoteHost:
             shutil.copy(local, copy)
         return str(copy)
 
+    def copy_libraries(self, destination: Path):
+        """
+        Copy the libraries the fixtures load on the host (ldd of basic) into destination/gdb_files, where gdb_plus looks
+        for the local copy of a remote file before anything else. Without them it would take the symbols of this
+        machine's own aarch64 libc (a cross toolchain's), which isn't the host's.
+        """
+        libraries = self.cache / "gdb_files"
+        if not libraries.exists():
+            output = self.run(f"ldd {shlex.quote(self.remote_path('basic'))}").decode()
+            libraries.mkdir(parents=True)
+            for path in re.findall(r"(/\S+) \(0x", output):
+                (libraries / Path(path).name).write_bytes(self.read_file(path))
+        shutil.copytree(libraries, Path(destination) / "gdb_files", dirs_exist_ok=True)
+
     def read_file(self, path: str) -> bytes:
         """Content of a file of the host"""
         return self.run(f"cat {shlex.quote(str(path))}")
@@ -112,7 +125,6 @@ class RemoteHost:
             if not server.port_in_use:
                 break
         raise RuntimeError(f"gdbserver did not start on {self.destination}: {server.output.decode(errors='replace')}")
-
 
 class RemoteGdbserver:
     """A gdbserver started on a RemoteHost through `ssh -L PORT:127.0.0.1:PORT`. Built by RemoteHost.start_gdbserver."""
@@ -175,3 +187,34 @@ class RemoteGdbserver:
         finally:
             if self.tube is not None:
                 self.tube.close()
+
+class RemoteMachine:
+    """
+    The arm64 machine seen from outside the debugged process, for the target_machine fixture (integration/conftest.py):
+    the same methods as LocalMachine there. Each test gets its own directory under the build directory of the host.
+    """
+    def __init__(self, host: RemoteHost, name: str):
+        self.host = host
+        self.directory = f"{host.directory}/tmp/{name}"
+        host.run(f"mkdir -p {shlex.quote(self.directory)}")
+
+    def read_file(self, path: str) -> bytes:
+        return self.host.read_file(path)
+
+    def exists(self, path: str) -> bool:
+        return self.host.run(f"test -e {shlex.quote(str(path))} && echo yes; true").strip() == b"yes"
+
+    def write_file(self, path: str, data: bytes):
+        self.host.run(f"cat > {shlex.quote(str(path))}", stdin=data)
+
+    def temporary(self, name: str) -> str:
+        """Path of a file named `name` in the directory of the test"""
+        return f"{self.directory}/{name}"
+
+    def signal(self, pid: int, name: str):
+        """Send the signal `name` ("SIGCONT") to a process of the machine"""
+        self.host.run(f"kill -{name.removeprefix('SIG')} {pid}")
+
+    def program_path(self, local_path: str) -> str:
+        """Path on the machine of the program whose local copy is local_path"""
+        return self.host.remote_path(Path(local_path).name)

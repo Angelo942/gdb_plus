@@ -1,3 +1,6 @@
+GDB+ 7.7.0 **Local arm support**
+* Support running scripts on arm architecture
+
 GDB+ 7.6.0 **New libdebug**
 * Refactor god class
 * Significant speed-up for GDB

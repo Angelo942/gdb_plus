@@ -236,7 +236,7 @@ class ControlFlowMixin(DebuggerBase):
                 return False # Nothing to stop: same answer as the other backends
             raise NotImplementedError(f"interrupt is not implemented for libdebug")
 
-        if not context.native:
+        if not context.native and (self.local_debugging or self.pid is None):
             log.warn_once("Interrupting process under QEMU may not work!")
 
         if manager.in_handler():

@@ -9,6 +9,7 @@ from pathlib import Path
 from queue import Queue
 
 import pytest
+from pwnlib.exception import PwnlibException
 
 from support.local_server import gdbserver
 from support.targets import after_call, call_to, read_c_long
@@ -217,6 +218,27 @@ def test_interrupt_a_blocking_read(dbg):
     dbg.p.sendline(b"after interrupt")
     assert done.wait(10)
     assert b"line after interrupt" in dbg.p.recvall(timeout=5)
+
+########################## LOCAL-ONLY ACTIONS ##########################
+
+LOCAL_ONLY_ACTIONS = {
+    "migrate": lambda dbg: dbg.migrate(new_libdebug=True),
+    "set_split_on_fork": lambda dbg: dbg.set_split_on_fork(),
+    "detach_block": lambda dbg: dbg.detach(quit=False, block=True),
+    "debug_from": lambda dbg: dbg.debug_from("after_input"),
+}
+
+@pytest.mark.parametrize("action", LOCAL_ONLY_ACTIONS)
+def test_actions_on_the_local_pid_are_refused(dbg, action):
+    """
+    The actions that signal the process or attach to it by pid from this machine (migrate to libdebug, splitting on
+    fork, detach(block=True), debug_from) raise at once on a gdbserver target, whose pid may be another machine's; the
+    session keeps working afterwards.
+    """
+    with pytest.raises(PwnlibException, match="gdbserver target"):
+        LOCAL_ONLY_ACTIONS[action](dbg)
+    dbg.until("main_start")
+    assert dbg.instruction_pointer == dbg.symbols["main_start"]
 
 ########################## REGISTERS, CALLS AND SYSCALLS ##########################
 

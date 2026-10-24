@@ -170,21 +170,21 @@ def test_syscall(dbg, sysno):
 
 
 @call_hangs
-def test_syscall_with_buffers(dbg, sysno, tmp_path):
+def test_syscall_with_buffers(dbg, sysno, target_machine):
     """
     syscall() copies bytes and str arguments into the process: openat + write + close create a real file on the host
     whose content the test reads back.
     """
     # openat exists on every architecture (aarch64 and riscv have no open)
-    path = str(tmp_path / "written")
-    open(path, "wb").close()
+    path = target_machine.temporary("written")
+    target_machine.write_file(path, b"")
     at_fdcwd, o_wronly = -100, 1
     fd = dbg.syscall(sysno("openat"), [at_fdcwd % 2**context.bits, path, o_wronly, 0])
     assert 2 < fd < 2**16
     data = b"written by a syscall"
     assert dbg.syscall(sysno("write"), [fd, data, len(data)]) == len(data)
     assert dbg.syscall(sysno("close"), [fd]) == 0
-    assert open(path, "rb").read() == data
+    assert target_machine.read_file(path) == data
 
 
 @call_hangs
@@ -223,13 +223,13 @@ def test_syscall_too_many_arguments(dbg):
 
 
 @call_hangs
-def test_syscall_result_is_visible_to_the_program(dbg, sysno):
+def test_syscall_result_is_visible_to_the_program(dbg, sysno, target_machine):
     """
     A write(1, ...) injected with syscall() reaches the process' real stdout, and the process is still alive afterwards.
     """
     dbg.syscall(sysno("write"), [1, b"injected\n", 9])
     assert dbg.p.recvuntil(b"injected\n", timeout=5).endswith(b"injected\n")  # gdbserver may print first
-    assert os.path.exists(f"/proc/{dbg.pid}")
+    assert target_machine.exists(f"/proc/{dbg.pid}")
 
 
 @call_hangs
@@ -257,7 +257,7 @@ def test_gdb_call_void(dbg):
 
 @pytest.mark.not_applicable("libdebugs", "gdb_call() forwards to gdb's own `call` command: libdebug has no expression evaluator")
 @pytest.mark.known_gap("gdb", "gdb_call() catches every gdb error and retries after finish(): an unknown function never raises (debugger/calls.py:gdb_call)", run=False)
-@pytest.mark.known_gap("remote", "gdb_call() catches every gdb error and retries after finish(): an unknown function never raises (debugger/calls.py:gdb_call)", run=False)
+@pytest.mark.known_gap("gdbserver", "gdb_call() catches every gdb error and retries after finish(): an unknown function never raises (debugger/calls.py:gdb_call)", run=False)
 @pytest.mark.known_gap("i386", "gdb_call() catches every gdb error and retries after finish(): an unknown function never raises (debugger/calls.py:gdb_call)", run=False)
 def test_gdb_call_of_an_unknown_function_raises(dbg):
     """gdb_call() of a function that doesn't exist raises, and the process is still stopped where it was."""
