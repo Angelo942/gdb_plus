@@ -105,7 +105,7 @@ class NewLibdebugBackend(Backend):
     def saved_ip(self, link_register: str | None) -> int:
         dbg = self.dbg
         try:
-            address = dbg.new_libdebug.backtrace()[-1]
+            address = dbg.new_libdebug.backtrace()[1]
             assert address != dbg.instruction_pointer
         except:
             address = dbg._find_rip()
