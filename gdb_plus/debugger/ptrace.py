@@ -2,7 +2,7 @@
 Emulation of ptrace between the processes of one debugging session.
 
 Linux allows a single tracer per process, so a process traced by another one can't be debugged. When both the tracer
-and the tracee run under gdb_plus we let neither of them call ptrace and waitpid for real: a breakpoint on each function
+and the tracee run under gdb_plus we let neither of them call ptrace, waitpid and waitid for real: a breakpoint on each function
 (or a catchpoint on each syscall) answers in its place, acting on the Debugger of the other process.
 
 - PtraceEmulator, one per Debugger (`dbg.ptrace`), holds the state of the process both as a tracer (its slaves, the hooks
@@ -34,8 +34,13 @@ if TYPE_CHECKING:
 
 # The requests we emulate (PTRACE_<name>). On Linux PEEKDATA and POKEDATA are the same requests as PEEKTEXT and POKETEXT
 REQUESTS = ["TRACEME", "POKEDATA", "POKETEXT", "PEEKTEXT", "PEEKDATA", "GETREGS", "SETREGS", "ATTACH", "SEIZE",
-            "INTERRUPT", "CONT", "DETACH", "SETOPTIONS", "SINGLESTEP"]
+            "INTERRUPT", "CONT", "DETACH", "SETOPTIONS", "SINGLESTEP", "SYSEMU_SINGLESTEP"]
 SAME_AS = {"POKEDATA": "POKETEXT", "PEEKDATA": "PEEKTEXT"}
+# Options of waitpid / waitid, id types of waitid and the si_code it reports (linux/wait.h, asm-generic/siginfo.h)
+WNOHANG, WNOWAIT = 0x1, 0x01000000
+P_ALL, P_PID = 0, 1
+CLD_EXITED, CLD_TRAPPED = 1, 4
+ENOSYS = 38
 
 def _define_missing_constants() -> None:
     "Add to pwntools' `constants` the ptrace requests and options it doesn't define (shared by every Debugger)"
@@ -45,6 +50,7 @@ def _define_missing_constants() -> None:
     if context.arch == "amd64":
         constants.PTRACE_GETREGS = 12
         constants.PTRACE_SETREGS = 13
+        constants.PTRACE_SYSEMU_SINGLESTEP = 32
         constants.PTRACE_SETOPTIONS = 0x4200 # really ??
         constants.PTRACE_O_EXITKILL = 0x00100000
         constants.PTRACE_O_SUSPEND_SECCOMP = 0x00200000
@@ -121,7 +127,7 @@ class PtraceEmulator:
     The ptrace state of one process and the emulated requests.
 
     A process can be a tracer (it has slaves), a tracee (its stops go to its tracer's waitpid), or both.
-    _on_wait and _on_ptrace are breakpoint callbacks of the tracer: they run on the thread that handles that stop (see
+    _on_wait, _on_waitid and _on_ptrace are breakpoint callbacks of the tracer: they run on the thread that handles that stop (see
     _handle_breakpoints). The request handlers (_PTRACE_*) run there too, on the emulator of the process that called
     ptrace, with the tracee as `slave`.
     """
@@ -138,6 +144,11 @@ class PtraceEmulator:
         self.emulated = False # Our stops are reported to the tracer's waitpid instead of to the script
         self.has_stopped = Event()
         self.can_continue = Event()
+        self.options = 0 # Set by the tracer with PTRACE_SETOPTIONS or PTRACE_SEIZE
+        self.status: int | None = None # Wait status of the current stop when it isn't derived from the stop signal (see wait_status)
+        self.signal_stop = False # Stopped by a signal: the tracer's next request decides whether it is delivered (_inject_signal)
+        self.sysemu_stop = False # Stopped by PTRACE_SYSEMU_SINGLESTEP at the entry of a syscall, which was not executed
+        self.orig_rax: int | None = None # The syscall number PTRACE_GETREGS reports during that stop
 
     ########################## SETUP ##########################
 
@@ -169,12 +180,15 @@ class PtraceEmulator:
             log.warn_once("We recommend libdebug over new_libdebug to emulate ptrace.")
 
         _define_missing_constants()
-        self._requests = {getattr(constants, f"PTRACE_{name}"): name for name in REQUESTS}
+        # PTRACE_SYSEMU_SINGLESTEP is only defined on amd64
+        self._requests = {getattr(constants, f"PTRACE_{name}"): name for name in REQUESTS if hasattr(constants, f"PTRACE_{name}")}
+        # A statically linked tracer only contains waitid if it calls it
+        hook_waitid = syscall or "waitid" in dbg.symbols
 
         if not syscall:
             # Disable functions (Is it needed compared to a simple return in the callback ? I'm worried about the user manually going over the breakpoint)
             shellcode = nop[context.arch] + return_instruction[context.arch]
-            for function in [wait_fun, "ptrace"]:
+            for function in [wait_fun, "ptrace"] + (["waitid"] if hook_waitid else []):
                 address = dbg._parse_address(function)
                 backup = dbg.read(address, len(shellcode))
                 dbg.write(address, shellcode)
@@ -182,12 +196,17 @@ class PtraceEmulator:
 
         # The callbacks only receive (dbg, entry): bind the options of this call to them
         on_wait = partial(self._on_wait, manual=manual, silent=silent, syscall=syscall)
+        on_waitid = partial(self._on_waitid, manual=manual, silent=silent, syscall=syscall)
         on_ptrace = partial(self._on_ptrace, manual=manual, silent=silent, syscall=syscall)
 
         if syscall:
             dbg.catch_syscall(wait_syscall, on_wait)
+            # glibc's waitid() calls the waitid syscall, not wait4
+            dbg.catch_syscall("waitid", on_waitid)
         else:
             self._breakpoints.append(dbg.b(wait_fun + f"+{len(nop[context.arch])}", callback=on_wait, user_defined=False))
+            if hook_waitid:
+                self._breakpoints.append(dbg.b(f"waitid+{len(nop[context.arch])}", callback=on_waitid, user_defined=False))
 
         # I still lose control if I hit the breakpoint on ptrace with a dbg.si()... [18/01/25]
         if syscall:
@@ -227,8 +246,10 @@ class PtraceEmulator:
     def take_stop(self, *, verbose: bool = False) -> bool:
         """
         Called by the stop handlers (on their thread, holding _action_lock) when the process stopped for a signal.
-        While ptrace is emulated that stop belongs to the tracer's waitpid: mark the process as stopped for it and return
-        True, and the stop handler must not wake the script. Returns False when ptrace isn't emulated.
+        While ptrace is emulated that stop belongs to the tracer's waitpid: mark the process as stopped for it, and the
+        tracer's next request decides whether the signal is delivered (_inject_signal). Returns True if the stop handler
+        must not wake the script. Returns False when ptrace isn't emulated, or when the signal stopped a step (the
+        tracer's PTRACE_SINGLESTEP, or a step of the script): the step ends with this stop, before the instruction runs.
         verbose: log the signal with log.info (it reads _stop_reason, which costs requests to gdb)
         """
         if not self.emulated:
@@ -237,8 +258,9 @@ class PtraceEmulator:
             log.info(f"stop signal {self.dbg._stop_reason} will be handled by waitpid")
         elif DEBUG:
             self.dbg.logger.debug("stop will be handle by waitpid")
+        self.signal_stop = True
         self.has_stopped.set()
-        return True
+        return not self.dbg.control.stepped
 
     def on_exit(self) -> None:
         """
@@ -281,13 +303,29 @@ class PtraceEmulator:
 
     # TODO make sure the slave didn't stop for a user breakpoint !
     # Handle all options: https://stackoverflow.com/questions/21248840/example-of-waitpid-in-use
+    def resumed(self) -> None:
+        """Called by the tracer's request handlers each time they let this process run or step: forget the emulated stop"""
+        self.status = None
+        self.signal_stop = False
+        self.sysemu_stop = False
+        self.orig_rax = None
+
+    def wait_status(self) -> int:
+        """The Linux wait status of the current stop of this process, as the tracer's waitpid and waitid report it"""
+        if self.status is not None:
+            return self.status
+        if self.dbg._stop_reason == "NOT RUNNING":
+            return 0x0
+        return self.dbg.stop_signal * 0x100 + 0x7f
+
     def wait_stopped(self, options: int = 0x40000000) -> bool:
         """
-        What the tracer's waitpid sees of this process: True once it stopped (False for WNOHANG while it runs).
-        Called by the tracer's _on_wait: without WNOHANG it blocks that callback until this process stops.
+        What the tracer's waitpid or waitid sees of this process: True once it stopped (False for WNOHANG while it runs).
+        Called by the tracer's _on_wait / _on_waitid: without WNOHANG it blocks that callback until this process stops.
+        With WNOWAIT the stop stays there for the next wait.
         """
-        if options == 0x1: # WNOHANG
-            log.info("waitpid WNOHANG! Won't stop")
+        if options & WNOHANG:
+            log.info("wait WNOHANG! Won't stop")
             # Check first that the slave isn't running in case has_stopped hasn't been cleared correctly ? Clear it in hidden_continue instead of PTRACE_CONT ? [27/06/23]
             stopped = self.has_stopped.is_set()
         else:
@@ -297,12 +335,40 @@ class PtraceEmulator:
             stopped = True
 
         # I can't clear it only here ! A wrong SIGSTOP in the step before a continue would set it again [22/07/23]
-        if stopped:
+        if stopped and not options & WNOWAIT:
             self.has_stopped.clear()
 
         return stopped
 
     ########################## BREAKPOINT CALLBACKS ##########################
+
+    def _wait_for_slave(self, dbg: Debugger, pid: int | None, options: int) -> tuple[Debugger, bool]:
+        """
+        What waitpid and waitid share: find the slave `pid` (None: any slave) and wait for it as wait_stopped(options).
+        Called by _on_wait and _on_waitid on the thread of the tracer's stop. Returns the slave and whether it stopped.
+        """
+        if pid is None:
+            assert len(self.slaves) <= 1, "For now I can only handle waitpid(-1) if there is only one slave"
+            if len(self.slaves) == 0:
+                log.warn("The other process hasn't called TRACEME yet. I will wait... (just make sure you didn't setup ptrace_emulation too late)")
+            while len(self.slaves) == 0:
+                sleep(0.2)
+            pid = list(self.slaves.keys())[0]
+            if DEBUG: dbg.logger.debug("waiting for -1...")
+
+        log.info(f'wait for process [{pid}]')
+        if pid not in dbg._process_group:
+            raise Exception(f"We reached waitpid but we didn't have time to split the new process! Please stop the process earlier")
+        if pid not in self.slaves:
+            log.warn(f"The process {pid} hasn't called TRACEME yet. I will wait... (just make sure you didn't setup ptrace_emulation too late)")
+        while pid not in self.slaves:
+            sleep(0.2)
+        tracee = self.slaves[pid]
+        stopped = tracee.ptrace.wait_stopped(options)
+        # If we close the program while both debuggers are still open we are gonna try to continue the stop handler letting the parent know that the child exited, but since the parent is also closed the code would crash
+        # Instead we exit cleanly
+        if dbg.control.closed.is_set(): sys.exit()
+        return tracee, stopped
 
     def _on_wait(self, dbg: Debugger, entry: bool | None = None, *, manual: bool, silent: bool, syscall: bool) -> bool | int:
         """
@@ -319,39 +385,16 @@ class PtraceEmulator:
             status_pointer = args[1]
             options = args[2]
 
-            if pid == 2**32 - 1:
-                assert len(self.slaves) <= 1, "For now I can only handle waitpid(-1) if there is only one slave"
-                if len(self.slaves) == 0:
-                    log.warn("The other process hasn't called TRACEME yet. I will wait... (just make sure you didn't setup ptrace_emulation too late)")
-                while len(self.slaves) == 0:
-                    sleep(0.2)
-                pid = list(self.slaves.keys())[0]
-                if DEBUG: dbg.logger.debug("waiting for -1...")
-
-            log.info(f'waitpid for process [{pid}]')
-            if pid not in dbg._process_group:
-                raise Exception(f"We reached waitpid but we didn't have time to split the new process! Please stop the process earlier")
-            if pid not in self.slaves:
-                log.warn(f"The process {pid} hasn't called TRACEME yet. I will wait... (just make sure you didn't setup ptrace_emulation too late)")
-            while pid not in self.slaves:
-                sleep(0.2)
-            tracee = self.slaves[pid]
-            stopped = tracee.ptrace.wait_stopped(options)
-            # If we close the program while both debuggers are still open we are gonna try to continue the stop handler letting the parent know that the child exited, but since the parent is also closed the code would crash
-            # Instead we exit cleanly
-            if dbg.control.closed.is_set(): sys.exit()
+            tracee, stopped = self._wait_for_slave(dbg, None if pid == 2**32 - 1 else pid, options)
 
             # TODO what about handling events in status ? [04/06/23]
             if stopped:
-                if tracee._stop_reason == "NOT RUNNING":
-                    status = 0x0
-                else:
-                    status = (tracee.stop_signal * 0x100 + 0x7f)
-                dbg.return_value = pid
+                status = tracee.ptrace.wait_status()
+                dbg.return_value = tracee.pid
             else:
                 status = 0x0
                 dbg.return_value = 0x0
-            log.info(f"[{dbg.pid}] setting status waitpid for {pid}: {hex(status_pointer)} -> [{hex(status)}]")
+            log.info(f"[{dbg.pid}] setting status waitpid for {tracee.pid}: {hex(status_pointer)} -> [{hex(status)}]")
             dbg.write(status_pointer, p32(status))
             # I don't handle the errors yet [19/06/23]
             # I would have liked it, but for now we have a bug if ret jumps on an address where we have a breakpoint that should stop, but our return False let the process run anyway [09/06/23]
@@ -362,6 +405,70 @@ class PtraceEmulator:
             # For some reason after the setoption it continues even with manual = False, but stops after continue...
             if manual and stopped:
                 tracee.control.set_stop("waitpid asked to stop")
+                return True
+            else:
+                return False
+
+        if silent:
+            with context.silent:
+                should_stop = callback(dbg)
+        else:
+            should_stop = callback(dbg)
+
+        if syscall:
+            return_code = SKIP_SYSCALL | should_stop
+        else:
+            return_code = should_stop
+
+        return return_code
+
+    def _on_waitid(self, dbg: Debugger, entry: bool | None = None, *, manual: bool, silent: bool, syscall: bool) -> bool | int:
+        """
+        Callback on waitid (or on its syscall): fill the tracer's siginfo_t with the state of the slave, as Linux does for
+        a ptrace stop (CLD_TRAPPED) or an exit (CLD_EXITED).
+        manual, silent, syscall: the options of the emulate_ptrace() that installed it
+        """
+        def callback(dbg: Debugger) -> bool:
+            if syscall:
+                args = dbg.syscall_args
+            else:
+                args = dbg.args
+
+            idtype = args[0] & 0xffffffff
+            id_ = args[1] & 0xffffffff
+            infop = args[2]
+            options = args[3] & 0xffffffff
+
+            if idtype == P_ALL:
+                pid = None
+            elif idtype == P_PID:
+                pid = id_
+            else:
+                raise NotImplementedError(f"waitid with idtype {idtype} (P_PGID / P_PIDFD) is not emulated")
+
+            tracee, stopped = self._wait_for_slave(dbg, pid, options)
+
+            # siginfo_t of SIGCHLD on Linux: si_signo @0, si_errno @4, si_code @8, si_pid @0x10, si_uid @0x14, si_status @0x18
+            # WNOHANG with nothing to report: waitid returns 0 and leaves si_pid at 0
+            siginfo = bytearray(128)
+            if stopped:
+                status = tracee.ptrace.wait_status()
+                if status & 0xff == 0x7f:
+                    # si_status keeps the bits of the ptrace event: 0x85 for a syscall stop with PTRACE_O_TRACESYSGOOD
+                    code, si_status = CLD_TRAPPED, status >> 8
+                else:
+                    code, si_status = CLD_EXITED, (status >> 8) & 0xff
+                siginfo[0x00:0x04] = p32(int(signal.SIGCHLD))
+                siginfo[0x08:0x0c] = p32(code)
+                siginfo[0x10:0x14] = p32(tracee.pid)
+                siginfo[0x14:0x18] = p32(os.getuid())
+                siginfo[0x18:0x1c] = p32(si_status)
+                log.info(f"[{dbg.pid}] waitid for {tracee.pid}: si_code {code}, si_status {hex(si_status)}")
+            dbg.write(infop, bytes(siginfo))
+            dbg.return_value = 0
+
+            if manual and stopped:
+                tracee.control.set_stop("waitid asked to stop")
                 return True
             else:
                 return False
@@ -446,6 +553,25 @@ class PtraceEmulator:
     # If attach and interrupt stop the process I want continue and detach to let it run again, otherwise just set ptrace_can_continue [08/06/23]
     # Should we handle the interruptions in a special way ? Like adding a priority when attaching ? [08/06/23] (But how to handle stop due to a SIGNAL ?)
 
+    def _inject_signal(self, slave: Debugger, data: int) -> bool:
+        """
+        What the tracer's request that resumes the slave does with its `data` argument, as Linux does at a
+        signal-delivery-stop: the signal that stopped the slave is delivered only if the tracer passes it again, and
+        `data` is the signal delivered (0: none).
+        Called by the handlers of PTRACE_CONT, PTRACE_SINGLESTEP and PTRACE_SYSEMU_SINGLESTEP before they resume the
+        slave. Returns False if the slave must stay stopped: delivering SIGSTOP stops it again (group-stop), and the
+        tracer's waitpid reports that stop.
+        """
+        if data == signal.SIGSTOP:
+            log.info(f"[{self.dbg.pid}] delivers SIGSTOP: [{slave.pid}] stops again")
+            slave.ptrace.status = (signal.SIGSTOP << 8) | 0x7f
+            slave.ptrace.has_stopped.set()
+            return False
+        if data or slave.ptrace.signal_stop:
+            if data: log.info(f"[{self.dbg.pid}] delivers signal {data} to [{slave.pid}]")
+            slave._backend.queue_signal(data)
+        return True
+
     # We could do a return False or True depending on if we interrupted the process or not. A small indication if we are debugging manually or not [08/06/23]
     def _PTRACE_ATTACH(self, pid: int, _: int, *, slave: Debugger, **kwargs: bool) -> bool:
         log.debug(f"pretending to attach to process {pid}")
@@ -481,7 +607,11 @@ class PtraceEmulator:
         #tracer.ptrace.has_stopped.set()
         return manual
 
-    def _PTRACE_CONT(self, _: int, __: int, *, slave: Debugger, manual: bool = False, **kwargs: bool) -> bool:
+    def _PTRACE_CONT(self, _: int, data: int, *, slave: Debugger, manual: bool = False, **kwargs: bool) -> bool:
+        if not self._inject_signal(slave, data):
+            self.dbg.return_value = 0x0
+            return manual
+        slave.ptrace.resumed()
         if not manual:
             log.info(f"[{self.dbg.pid}] PTRACE_CONT will let the slave [{slave.pid}] continue")
             slave.ptrace.has_stopped.clear()
@@ -495,6 +625,7 @@ class PtraceEmulator:
     def _PTRACE_DETACH(self, _: int, __: int, *, slave: Debugger, manual: bool = False, **kwargs: bool) -> bool:
         log.debug(f"ptrace detached from {slave.pid}")
         self.slaves.pop(slave.pid)
+        slave.ptrace.resumed()
         slave.ptrace.can_continue.set()
         if not manual:
             log.info(f"detach will let the slave continue")
@@ -520,17 +651,22 @@ class PtraceEmulator:
         self.dbg.return_value = data
         return manual
 
+    @_in_debugger_context
     def _PTRACE_GETREGS(self, _: int, pointer_registers: int, *, slave: Debugger, manual: bool = False, **kwargs: bool) -> bool:
+        """Copy the whole user_regs_struct of the slave: the general registers, eflags, orig_rax and the segments"""
         registers = user_regs_struct()
-        for register in slave._registers:
-            value = getattr(slave, register)
-            if DEBUG: self.dbg.logger.debug("reading [%d]'s register %s: 0x%x", slave.pid, register, value)
-            #if register in ["rip", "eip"]:
-            #    register = "ip"
-            #elif register in ["rsp", "esp"]:
-            #    register = "sp"
-            assert register in registers.registers
-            setattr(registers, register, value)
+        readable = slave._registers + slave._special_registers
+        for register in registers.registers:
+            name = "orig_rax" if register == "orig_ax" else register
+            if name == "orig_rax" and slave.ptrace.orig_rax is not None:
+                value = slave.ptrace.orig_rax
+            elif name in readable:
+                value = getattr(slave, name)
+            else:
+                # fs_base and gs_base aren't registers of the Debugger
+                value = 0
+            if DEBUG: self.dbg.logger.debug("reading [%d]'s register %s: 0x%x", slave.pid, name, value)
+            setattr(registers, register, value & ((1 << context.bits) - 1))
         self.dbg.write(pointer_registers, registers.get())
         self.dbg.return_value = 0 # right ?
         return manual
@@ -548,11 +684,16 @@ class PtraceEmulator:
             value = getattr(registers, register)
             if DEBUG: self.dbg.logger.debug("setting [%d]'s register %s: 0x%x", slave.pid, register, value)
             setattr(slave, register, value)
+        # Only the general registers are written: the tracer's copy must never clobber the segments or fs_base. In a SYSEMU
+        # stop the syscall number is ours to keep
+        if slave.ptrace.sysemu_stop:
+            slave.ptrace.orig_rax = registers.orig_ax
         self.dbg.return_value = 0
         return manual
 
     def _PTRACE_SETOPTIONS(self, _: int, options: int, *, slave: Debugger, manual: bool = False, **kwargs: bool) -> bool:
         if DEBUG: self.dbg.logger.debug("0x%x", options)
+        slave.ptrace.options = options
         if options & constants.PTRACE_O_EXITKILL:
             options -= constants.PTRACE_O_EXITKILL
             log.info("Option EXITKILL set")
@@ -571,10 +712,54 @@ class PtraceEmulator:
         self.dbg.return_value = 0x0
         return manual
 
-    def _PTRACE_SINGLESTEP(self, _: int, __: int, *, slave: Debugger, manual: bool = False, **kwargs: bool) -> bool:
+    def _PTRACE_SINGLESTEP(self, _: int, data: int, *, slave: Debugger, manual: bool = False, **kwargs: bool) -> bool:
+        if slave.ptrace.sysemu_stop:
+            # Out of a SYSEMU stop the kernel reports the syscall exit as a SIGTRAP stop and executes no instruction
+            # (report_single_step() in kernel/entry/common.c). rip and rax stay as the tracer left them
+            log.info(f"single step out of the SYSEMU stop of [{slave.pid}]: SIGTRAP, nothing executed")
+            slave.ptrace.resumed()
+            slave.ptrace.status = (signal.SIGTRAP << 8) | 0x7f
+            slave.ptrace.has_stopped.set()
+            self.dbg.return_value = 0x0
+            return manual
+
+        if not self._inject_signal(slave, data):
+            self.dbg.return_value = 0x0
+            return manual
+        slave.ptrace.resumed()
+        # A signal can stop the step before the instruction runs: the slave then reports that signal instead
         log.info(f"ptrace single step from {slave.reverse_lookup(slave.instruction_pointer)}")
         slave.step()
         if DEBUG: self.dbg.logger.debug("Telling the slave that it has stopped")
+        slave.ptrace.has_stopped.set()
+        self.dbg.return_value = 0x0
+        return manual
+
+    @_in_debugger_context
+    def _PTRACE_SYSEMU_SINGLESTEP(self, _: int, data: int, *, slave: Debugger, manual: bool = False, **kwargs: bool) -> bool:
+        """
+        Single step the slave, but stop it at the entry of a syscall without executing it, as the kernel does on x86-64:
+        rip goes past the syscall instruction, rax becomes -ENOSYS and GETREGS reports the number in orig_rax.
+        Only the `syscall` instruction is recognised, not `int 0x80` or `sysenter`.
+        """
+        assert context.arch == "amd64", "PTRACE_SYSEMU_SINGLESTEP is only emulated on amd64"
+        if not self._inject_signal(slave, data):
+            self.dbg.return_value = 0x0
+            return manual
+        # Out of a SYSEMU stop SYSCALL_EMU is still set: the kernel reports no syscall exit and steps the next instruction
+        slave.ptrace.resumed()
+        address = slave.instruction_pointer
+        if slave.read(address, 2) == b"\x0f\x05":
+            number = slave.rax
+            slave.rip = address + 2
+            slave.rax = -ENOSYS & ((1 << context.bits) - 1)
+            slave.ptrace.orig_rax = number
+            slave.ptrace.sysemu_stop = True
+            trap = signal.SIGTRAP | (0x80 if slave.ptrace.options & constants.PTRACE_O_TRACESYSGOOD else 0)
+            slave.ptrace.status = (trap << 8) | 0x7f
+            log.info(f"SYSEMU stop of [{slave.pid}] on syscall {hex(number)} at {slave.reverse_lookup(address)}")
+        else:
+            slave.step()
         slave.ptrace.has_stopped.set()
         self.dbg.return_value = 0x0
         return manual

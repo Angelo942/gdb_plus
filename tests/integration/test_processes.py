@@ -228,6 +228,66 @@ def test_emulate_ptrace_sysemu_and_waitid(debugger, fixture_binary, engine):
         os.kill(dbg.pid, signal.SIGKILL)
 
 
+# What tests/fixtures/src/signal_tracer.c prints without a debugger (x86-64 Linux).
+SIGNAL_TRACER_OUTPUT = b"""\
+handshake: status 0x137f
+step: status 0xa7f rip_moved 0
+step discarded: status 0x57f executed 1
+step: status 0xa7f rip_moved 0
+step delivered: status 0x57f in_handler 1
+cont: status 0xa7f
+cont: status 0xa7f
+cont: status 0x137f
+group stop: status 0x137f
+child: handled 2
+exit: exited 1 code 0
+"""
+
+
+@pytest.mark.not_applicable("not_gdb", "an oracle of the kernel: no debugger is involved, so it only runs once, in the gdb column")
+def test_signal_tracer_oracle(fixture_binary, run_without_debugger):
+    """The kernel behaviour the emulation of the data argument of PTRACE_CONT / PTRACE_SINGLESTEP copies. If this fails, the kernel changed, not gdb_plus."""
+    assert run_without_debugger([fixture_binary("signal_tracer")]) == SIGNAL_TRACER_OUTPUT
+
+
+@pytest.mark.timeout(120)
+@pytest.mark.not_applicable("foreign", "the signal_tracer fixture reads the child's registers with PTRACE_GETREGS and sends its signals with x86-64 syscalls")
+@pytest.mark.not_applicable("gdbserver", NO_SPLIT_ON_GDBSERVER)
+@pytest.mark.untested("new_libdebug", "the emulation of signals is only replayed with gdb and the legacy libdebug")
+@pytest.mark.parametrize("engine", [
+    "gdb",
+    # the parent is still inside its final emulated waitpid when the test ends (see below)
+    pytest.param("libdebug", marks=[pytest.mark.libdebug, pytest.mark.allow_priority_leak]),
+])
+def test_emulate_ptrace_signals_follow_the_tracer(debugger, fixture_binary, engine):
+    """
+    A child that sends itself signals while its parent single-steps or continues it: each signal stops it before the
+    next instruction and reaches the parent's waitpid, and the parent's next request discards it, delivers it or stops
+    the child again with SIGSTOP, as without a debugger.
+    """
+    dbg = debugger(fixture_binary("signal_tracer"))
+    dbg.set_split_on_fork()
+    dbg.emulate_ptrace()
+    dbg.until("fork")
+    dbg.finish()
+    child = dbg.children[dbg.wait_split()]
+    child.emulate_ptrace()
+    if engine == "libdebug":
+        child.migrate(libdebug=True)  # migrating the parent first breaks (regression/test_traps.py)
+        dbg.migrate(libdebug=True)
+    dbg.c(wait=False)
+    child.c(wait=False)
+    if engine == "gdb":
+        assert _program_output(dbg.p.recvall(timeout=90)) == SIGNAL_TRACER_OUTPUT
+    else:
+        # Legacy libdebug never tells an emulated wait that the tracee exited, so the final waitpid() blocks: check
+        # everything before it
+        before_exit = SIGNAL_TRACER_OUTPUT[:SIGNAL_TRACER_OUTPUT.index(b"exit:")]
+        assert _program_output(dbg.p.recvuntil(b"handled 2\n", timeout=90)) == before_exit
+        # libdebug's detach() waits for the parent to exit, which it never does from inside that waitpid
+        os.kill(dbg.pid, signal.SIGKILL)
+
+
 @pytest.mark.not_applicable("foreign", "the sysemu_tracer fixture drives its child with PTRACE_SYSEMU, which only exists on x86-64")
 def test_emulate_ptrace_off_restores_waitid(debugger, fixture_binary, backend):
     """emulate_ptrace() also patches waitid(); emulate_ptrace(off=True) restores its original bytes."""

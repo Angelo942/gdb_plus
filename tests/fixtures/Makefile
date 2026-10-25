@@ -6,7 +6,7 @@ CC      ?= gcc
 CFLAGS  := -O0 -g -fno-stack-protector -fcf-protection=none -fno-omit-frame-pointer -Isrc
 BIN     := bin
 
-NATIVE  := basic basic_nopie forking execs signals threads tracer sysemu_tracer
+NATIVE  := basic basic_nopie forking execs signals threads tracer sysemu_tracer signal_tracer
 I386    := basic_i386 forking_i386 execs_i386 signals_i386 threads_i386 tracer_i386
 
 # Foreign architectures, run under qemu-user. There is usually no cross libc installed, so these are

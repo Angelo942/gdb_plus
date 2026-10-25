@@ -237,7 +237,7 @@ DEBUGGER_NAMES = {
                    "instruction_pointer", "logger", "pid", "ptrace", "return_value"},
     "PtraceEmulator": {"_parent", "_parse_address", "_process_group", "_stop_reason", "args", "b", "catch_syscall", "children",
                        "control", "delete_breakpoint", "delete_catch_syscall", "execute", "gdb", "logger", "new_libdebug",
-                       "pid", "read", "return_value", "syscall_args", "write"},
+                       "pid", "read", "return_value", "stop_signal", "symbols", "syscall_args", "write"},
 }
 
 def debugger_names_used():

@@ -160,6 +160,13 @@ class Backend:
         The caller has already set the breakpoint where the process stops.
         """
         raise NotImplementedError(f"sending signals is not implemented for the given debugger")
+    def queue_signal(self, n: int) -> None:
+        """
+        The next command that resumes the process (step or continue) delivers signal `n` (Linux number), and the signal
+        that stopped the process is not delivered; n = 0 delivers nothing. Called while the process is stopped by the
+        ptrace emulation of its tracer (PtraceEmulator._inject_signal), before it resumes the process.
+        """
+        raise NotImplementedError(f"queueing signals is not implemented for the given debugger")
     def auxiliary_vector(self) -> dict[str, int] | None:
         """
         The auxiliary vector of the process, {AT_* name: value} (dbg._auxiliary_vector caches it). None if gdb can't

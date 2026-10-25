@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 from pwn import ELF, context, gdb, log, process
 from rpyc import BgServingThread
 
-from gdb_plus.utils import DEBUG, PriorityEvent, Interrupted, DoneEvent, set_done_if_panic, Breakpoint, SIGNALS
+from gdb_plus.utils import DEBUG, PriorityEvent, Interrupted, DoneEvent, set_done_if_panic, Breakpoint, SIGNALS, SIGNALS_from_num
 from gdb_plus.debugger._base import SHOULD_STOP, SKIP_SYSCALL, INTERRUPT_HIT_BREAKPOINT, lock_decorator, context_decorator, GdbDiedError, _kill_gdb, _logger
 from gdb_plus.debugger.engines.base import Backend
 
@@ -257,6 +257,15 @@ class GdbBackend(Backend):
         else:
             priority = dbg.execute_action(f"signal {n}", sender="signal")
             dbg.control.priority_wait(comment=f"signal {n}", priority = priority)
+    def queue_signal(self, n: int) -> None:
+        dbg = self.dbg
+        # gdb numbers the signals its own way: give it the name. queue-signal 0 discards the signal of the stop
+        name = SIGNALS_from_num[n] if n else "0"
+        try:
+            dbg.execute(f"queue-signal {name}")
+        except Exception as e:
+            # gdb refuses a signal set to nopass (`handle`), like the ones of emulate_ptrace(signals=...)
+            log.warn(f"[{dbg.pid}] gdb can not deliver {name}: {e}")
     def stop_reason(self) -> str:
         dbg = self.dbg
         try:

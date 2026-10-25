@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 
 from pwn import context, log
 
-from gdb_plus.utils import DEBUG, DoneEvent, set_done_if_panic
+from gdb_plus.utils import DEBUG, DoneEvent, set_done_if_panic, SIGNALS
 from gdb_plus.debugger._base import DebuggerBase, DEBUG_OFF, lock_decorator, context_decorator
 
 if TYPE_CHECKING:
@@ -61,7 +61,8 @@ class SteppingMixin(DebuggerBase):
             repeat -= 1
 
         for _ in range(repeat):
-            if not self._step(signal, timeout=timeout):
+            # A signal that stops the process before the instruction runs leaves the address where it was
+            if not self._step(signal, timeout=timeout) and self._stop_reason not in set(SIGNALS) - {"SIGTRAP"}:
                 log.warn("You stepped, but the address didn't change. This may be due to a bug in gdb. If this wasn't the intended behaviour use force=True in the function step or continue you just called")
 
         return self

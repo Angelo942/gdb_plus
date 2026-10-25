@@ -124,6 +124,15 @@ class NewLibdebugBackend(Backend):
             dbg.step()
         else:
             dbg.c()
+    def queue_signal(self, n: int) -> None:
+        dbg = self.dbg
+        # TODO handle threads
+        thread = dbg.new_libdebug.threads[0]
+        if n:
+            thread.signal = n
+        else:
+            # libdebug forwards the signal of the stop unless it is cleared, and its setter only takes real signals
+            thread._signal_number = 0
     auxiliary_vector = LibdebugBackend.auxiliary_vector
     def stop_reason(self) -> str:
         dbg = self.dbg
@@ -247,6 +256,9 @@ class NewLibdebugBackend(Backend):
             if dbg.control.interrupted:
                 dbg.control.interrupted_stop()
             elif dbg.control.stepped:
+                if dbg._stop_reason in SIGNALS:
+                    # A signal stopped the step: it also goes to the tracer's waitpid, and the step ends anyway
+                    dbg.ptrace.take_stop()
                 dbg.control.stepped = False
                 dbg.control.set_stop("stepped")
             elif dbg._stop_reason in SIGNALS:

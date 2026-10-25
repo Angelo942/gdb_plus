@@ -17,6 +17,10 @@ if TYPE_CHECKING:
 
 class LibdebugBackend(Backend):
     """The engine is legacy libdebug: dbg.libdebug."""
+    def __init__(self, dbg: Debugger) -> None:
+        super().__init__(dbg)
+        # The signal the next resume delivers (queue_signal). libdebug resumes with no signal unless it is told one
+        self.pending_signal = 0
     def delete_breakpoint(self, breakpoint: Breakpoint) -> None:
         dbg = self.dbg
         dbg.libdebug.del_bp(breakpoint.native_breakpoint)
@@ -44,10 +48,11 @@ class LibdebugBackend(Backend):
             ...
     def resume_process(self, step: bool) -> None:
         dbg = self.dbg
+        signal, self.pending_signal = self.pending_signal, 0
         if step:
-            dbg.libdebug.step()
+            dbg.libdebug.step(signal=signal)
         else:
-            dbg.libdebug.cont(blocking=False)
+            dbg.libdebug.cont(blocking=False, signal=signal)
     @set_done_if_panic
     def cont(self, force: bool, wait: bool, done: DoneEvent, signal: int) -> None:
         # Continue in libdebug is already stepping [21/05/23]
@@ -89,6 +94,7 @@ class LibdebugBackend(Backend):
         return dbg._find_rip()     
     def step(self, signal: int | str, timeout: float | None, internal: bool) -> tuple[PriorityEvent | None, bool]:
         dbg = self.dbg
+        signal, self.pending_signal = signal or self.pending_signal, 0
         event = dbg.execute_action(lambda: dbg.libdebug.step(signal=signal), sender="step", internal=internal, step=True)
         finished = dbg.control.priority_wait(comment="step", priority=event, timeout=timeout)
         return event, finished
@@ -102,6 +108,8 @@ class LibdebugBackend(Backend):
             dbg.step(signal=n)
         else:
             dbg.c(signal=n)
+    def queue_signal(self, n: int) -> None:
+        self.pending_signal = n
     # libdebug has no `info auxv`, but the kernel gives us the raw vector: pairs of (type, value) words [23/10/26]
     def auxiliary_vector(self) -> dict[str, int]:
         dbg = self.dbg
@@ -178,12 +186,15 @@ class LibdebugBackend(Backend):
         
         if len(breakpoints) == 0:
             if dbg.control.stepped or dbg.control.interrupted:
-                dbg.control.stepped = False
-                dbg.control.interrupted = False
+                taken = False
                 if dbg.stop_signal not in [0x5, 0x2, 0x13]:
                     log.warn(f"I wanted to step or interrupt, but stopped due to signal: {dbg._stop_reason}")
-                    if dbg.ptrace.take_stop():
-                        return
+                    # Before clearing stepped: a step stopped by a signal must still end (see take_stop)
+                    taken = dbg.ptrace.take_stop()
+                dbg.control.stepped = False
+                dbg.control.interrupted = False
+                if taken:
+                    return
             # This should now be handled by libdebug [08/06/23]
             # AND SIGTRAP COULD ALSO BE DUE TO A INT3 EMULATING PTRACE [24/12/23]
             #elif self.libdebug.stop_status == 0x57f:
