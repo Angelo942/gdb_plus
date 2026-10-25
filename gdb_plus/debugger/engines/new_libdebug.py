@@ -167,11 +167,17 @@ class NewLibdebugBackend(Backend):
             log.warn_once("new_libdebug will not tell you when the children are created! You can not interrupt.")
     def read_register(self, name: str) -> int:
         dbg = self.dbg
-        res = getattr(dbg.new_libdebug.regs, _NEW_LIBDEBUG_REGISTERS.get(name, name))
+        if name in _NEW_LIBDEBUG_REGISTERS:
+            res = getattr(dbg.new_libdebug, _NEW_LIBDEBUG_REGISTERS[name])
+        else:
+            res = getattr(dbg.new_libdebug.regs, name)
         return res
     def write_register(self, name: str, value: int) -> None:
         dbg = self.dbg
-        setattr(dbg.new_libdebug.regs, _NEW_LIBDEBUG_REGISTERS.get(name, name), value % 2**context.bits) # doesn't support negative values
+        if name in _NEW_LIBDEBUG_REGISTERS:
+            setattr(dbg.new_libdebug, _NEW_LIBDEBUG_REGISTERS[name], value % 2**context.bits) # doesn't support negative values
+        else:
+            setattr(dbg.new_libdebug.regs, name, value % 2**context.bits) # doesn't support negative values
     @lock_decorator
     @context_decorator
     def handle_stop(self) -> None:
