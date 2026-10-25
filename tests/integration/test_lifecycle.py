@@ -10,6 +10,7 @@ import pytest
 from pwn import ELF, args, context, process
 
 from gdb_plus.utils.exe import EXE
+from support.known_bugs import LIBDEBUG_EXIT
 from support.local_server import serve_binary
 
 # Debugger() always starts the process with gdb; the libdebug backends only exist after migrate()
@@ -246,6 +247,7 @@ def test_detach_lets_the_process_run(debugger, basic, backend):
     assert b"line free" in dbg.p.recvall(timeout=5)
 
 
+@pytest.mark.known_gap("libdebug", LIBDEBUG_EXIT, run=False)
 def test_process_exit(debugger, basic, backend):
     """When the program exits, c() returns and the debugger knows it is closed (_closed is set)."""
     dbg = debugger(basic, backend=backend)

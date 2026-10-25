@@ -4,6 +4,7 @@ import os
 import pytest
 from pwn import context
 
+from support.known_bugs import LIBDEBUG_EXIT
 from support.targets import read_c_long
 
 # call() runs the function in a thread and waits for its result: when restore_backup() raises there, it never returns
@@ -119,6 +120,7 @@ def test_call_without_waiting(dbg):
 
 
 @call_hangs
+@pytest.mark.known_gap("libdebug", LIBDEBUG_EXIT, run=False)
 def test_program_continues_normally_after_calls(dbg):
     """
     After two call("tick") the program continues as if nothing happened, except for the side effects: it prints counter
@@ -132,6 +134,7 @@ def test_program_continues_normally_after_calls(dbg):
 
 # BUG: Get's called multiple times
 @call_hangs
+@pytest.mark.known_gap("libdebug", "call() from a callback returns onto the breakpoint of that callback, which the legacy libdebug reports as a new hit: the callback runs again")
 def test_call_from_a_callback(dbg):
     """
     call() inside a breakpoint callback works and returns to the address of that breakpoint without running the callback

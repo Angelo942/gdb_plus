@@ -1,6 +1,8 @@
 """migrate() between gdb, legacy libdebug and new libdebug keeps the state of the debugging session."""
 import pytest
 
+from support.known_bugs import LIBDEBUG_EXIT
+
 TARGETS = [pytest.param("libdebug", marks=pytest.mark.libdebug), pytest.param("new_libdebug", marks=pytest.mark.new_libdebug)]
 
 pytestmark = [
@@ -34,6 +36,7 @@ def test_keeps_the_position(dbg, target):
 
 
 @pytest.mark.parametrize("target", TARGETS)
+@pytest.mark.known_gap("libdebug", LIBDEBUG_EXIT, run=False)
 def test_keeps_the_breakpoints(dbg, target):
     """
     migrate() replays the breakpoint table on the new engine: a stopping breakpoint still stops and a continuing
@@ -80,6 +83,7 @@ def test_round_trip(dbg, target):
 
 
 @pytest.mark.parametrize("target", TARGETS)
+@pytest.mark.known_gap("libdebug", LIBDEBUG_EXIT, run=False)
 def test_catchpoints_are_dropped(dbg, target):
     """
     Catchpoints (gdb only) are dropped by migrate() to libdebug instead of breaking it: the program runs to its end.

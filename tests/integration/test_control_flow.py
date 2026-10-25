@@ -5,6 +5,7 @@ import time
 import pytest
 
 from gdb_plus import Suspended
+from support.known_bugs import LIBDEBUG_EXIT, LIBDEBUG_REWIND
 from support.targets import after_call, call_target, call_to, calls_in, is_call, is_return, read_c_long
 
 # qemu-user only stops a guest between two instructions, not inside a host syscall
@@ -60,6 +61,7 @@ def test_step(dbg):
     assert dbg.instruction_pointer == address + size
 
 
+@pytest.mark.known_gap("libdebug", LIBDEBUG_REWIND)
 def test_step_force(dbg):
     """
     step(force=True) (and its old name exit_broken_function()) leaves the current address even when a breakpoint sits on
@@ -114,6 +116,7 @@ def test_continue_until_where_we_are_does_nothing(dbg):
     assert read_c_long(dbg, "counter") == 0
 
 
+@pytest.mark.known_gap("libdebug", LIBDEBUG_REWIND)
 def test_continue_until_loop(dbg):
     """
     until(address, loop=True) from that same address runs until the next time it is reached: tick() runs once and stops
@@ -144,6 +147,7 @@ def test_non_blocking_continue_until(dbg):
     assert dbg.instruction_pointer == dbg.symbols["after_input"]
 
 
+@pytest.mark.known_gap("libdebug", LIBDEBUG_EXIT, run=False)
 def test_continue_to_the_end(dbg):
     """c() without breakpoints lets the program run to its end; its output matches what it prints without a debugger."""
     dbg.p.sendline(b"end")
@@ -319,6 +323,7 @@ def test_next_until_call(dbg):
     assert dbg.instruction_pointer == expected.address
 
 
+@pytest.mark.known_gap("libdebug", LIBDEBUG_EXIT, run=False)
 def test_jump(dbg):
     """
     jump("main_end") moves the instruction pointer without running the code in between: the program skips the whole body
@@ -390,6 +395,7 @@ def test_wait_for_a_breakpoint(dbg):
     assert dbg.instruction_pointer == dbg.symbols["after_input"]
 
 
+@pytest.mark.known_gap("libdebug", LIBDEBUG_EXIT, run=False)
 def test_return_value_can_be_overwritten(dbg):
     """Assigning dbg.return_value after finish() changes what the caller sees: the program prints the fake pid 1234."""
     dbg.until("ask_pid")

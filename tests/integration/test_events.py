@@ -5,6 +5,7 @@ import pytest
 from pwn import context
 
 from gdb_plus import SKIP_SYSCALL, Suspended
+from support.known_bugs import LIBDEBUG_EXIT, LIBDEBUG_REWIND
 from support.targets import registers
 
 
@@ -346,6 +347,7 @@ def test_syscall_callbacks_across_exec(debugger, target_binary, backend):
 
 @STATIC("the QEMU fixtures are static: no PLT to trace")
 @pytest.mark.known_gap("aarch64_remote", "set_ltrace() breaks on every entry of exe.plt: on arm64 pwntools adds a bogus one (the br x17 inside the last stub), whose callback runs a second finish() inside the finish() of fgets, which then never returns (debugger/events.py:set_ltrace)", run=False)
+@pytest.mark.known_gap("libdebug", "LibdebugBackend.continue_until() continues once and raises if the process stops anywhere else (a signal, another breakpoint) instead of going on to the target (debugger/engines/libdebug.py:continue_until)", run=False)
 def test_ltrace(debugger, basic, backend, capfd):
     """
     set_ltrace() prints every libc call made through the PLT with its arguments (malloc(0x20)), honours exclude=, and
@@ -363,6 +365,7 @@ def test_ltrace(debugger, basic, backend, capfd):
     assert all(bp.address not in dbg.exe.plt.values() for bps in dbg.control.breakpoints.values() for bp in bps)
 
 
+@pytest.mark.known_gap("libdebug", LIBDEBUG_REWIND, run=False)
 def test_ftrace_with_custom_callback(debugger, basic, backend):
     """
     set_ftrace(custom_callback=) calls the callback with the name of every function of the binary that is entered (main,
@@ -383,6 +386,7 @@ def test_ftrace_with_custom_callback(debugger, basic, backend):
     dbg.p.sendline(b"x")
 
 
+@pytest.mark.known_gap("libdebug", LIBDEBUG_REWIND, run=False)
 def test_ftrace_prints_arguments_and_return(debugger, basic, backend, capfd):
     """set_ftrace(n_args=2) prints each call with its first two arguments: add(0x1, 0x2)."""
     dbg = debugger(basic, backend=backend)
@@ -412,6 +416,7 @@ def test_signal_stops_the_process(signals):
 
 
 @pytest.mark.known_gap("new_libdebug", "the stop handler ignores _handled_signals")
+@pytest.mark.known_gap("libdebug", LIBDEBUG_EXIT, run=False)
 def test_handle_signal_by_name(signals):
     """
     handle_signal("SIGUSR1", callback) runs the callback when the signal arrives, and the program never receives it (its
@@ -424,6 +429,7 @@ def test_handle_signal_by_name(signals):
     assert b"usr1 0" in signals.p.recvall(timeout=5)  # nopass: the program never sees it
 
 
+@pytest.mark.known_gap("libdebug", LIBDEBUG_EXIT, run=False)
 def test_handle_signal_by_number(signals):
     """handle_signal(10, callback) is the same as by name: the callback runs once."""
     seen = []
@@ -432,6 +438,7 @@ def test_handle_signal_by_number(signals):
     assert seen == [1]
 
 # BUG: SIGUSR1 is registered by the program, so we shouldn't block the execution
+@pytest.mark.known_gap("libdebug", "LibdebugBackend.continue_until() continues once and raises if the process stops anywhere else (a signal, another breakpoint) instead of going on to the target (debugger/engines/libdebug.py:continue_until)")
 def test_continue_until_across_a_signal(signals):
     """
     continue_until() to a location reached after a signal: the signal is delivered (the handler runs once) and

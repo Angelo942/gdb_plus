@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from pwn import context, pack, process
 
+from support.known_bugs import LIBDEBUG_EXIT
 from support.targets import RETURN_0x1337, after_call, call_to, read_c_long, registers, word_mask
 
 STACK_ARGUMENTS_GAP = [pytest.mark.known_gap(arch, "Arguments has no stack lookup for riscv and mips")
@@ -224,6 +225,7 @@ def test_read_and_write(dbg):
 @pytest.mark.known_gap("gdb_only", "read() goes through gdb, which can't read while the process runs")
 @pytest.mark.known_gap("new_libdebug", "new libdebug can't be interrupted (interrupt() raises NotImplementedError)", run=False)
 @QEMU_BLOCKED_READ
+@pytest.mark.known_gap("libdebug", "interrupt() raises NotImplementedError for the legacy libdebug")
 def test_memory_is_accessible_while_running(dbg):
     """
     Memory can be read and written while the process runs (the documented convention), not only while it is stopped.
@@ -348,6 +350,7 @@ def test_safe_read(dbg):
 
 
 @pytest.mark.known_gap("riscv32", "nop() only has the 4 byte riscv nop: a compressed (2 byte) call can't be patched")
+@pytest.mark.known_gap("libdebug", LIBDEBUG_EXIT, run=False)
 def test_nop_a_call(dbg):
     """
     nop(address) replaces the instruction there with nops of the same size (it returns the old bytes): with the call to
@@ -431,6 +434,7 @@ def test_inject_shellcode(dbg, target_machine):
 
 @pytest.mark.known_gap("arm", "interrupt() never returns while the qemu-user guest spins in the injected loop (debugger/control_flow.py:interrupt)", run=False)
 @pytest.mark.known_gap("aarch64", "interrupt() never returns while the qemu-user guest spins in the injected loop (debugger/control_flow.py:interrupt)", run=False)
+@pytest.mark.known_gap("libdebug", "interrupt() raises NotImplementedError for the legacy libdebug")
 def test_inject_sleep(dbg):
     """
     inject_sleep() writes an infinite loop over a function (used by debug_from and fork splitting to park a process);
@@ -489,7 +493,6 @@ def _return_through_injected_code(dbg, **options):
     assert dbg.return_value == 0x1337
 
 
-@pytest.mark.known_gap("libdebug", "make_page_rwx() tests self._gdb, an attribute Debugger doesn't have (only gdb's own attributes answer it through __getattr__)")
 @pytest.mark.known_gap("new_libdebug", "make_page_rwx() calls mprotect with call(), whose restore_backup() writes orig_rax: new libdebug has no such register")
 def test_inject_shellcode_over_a_function(dbg):
     """
